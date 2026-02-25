@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Save, Trash2, Undo, Play, Download, X, Plus } from 'lucide-react';
+import { Save, Trash2, Undo, Play, Download, X, Plus, Sparkles, Loader2 } from 'lucide-react';
 import { Region, Puzzle } from '../types';
+import { detectDifferences } from '../services/ai';
 
 interface EditorCanvasProps {
   imageA: string;
@@ -15,6 +16,7 @@ interface EditorCanvasProps {
 export function EditorCanvas({ imageA, imageB, onSave, onPlay, onAddToBatch, batchCount }: EditorCanvasProps) {
   const [regions, setRegions] = useState<Region[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(null);
   const [currentRegion, setCurrentRegion] = useState<Region | null>(null);
   
@@ -152,11 +154,46 @@ export function EditorCanvas({ imageA, imageB, onSave, onPlay, onAddToBatch, bat
     onPlay(puzzle);
   };
 
+  const handleAutoDetect = async () => {
+    setIsDetecting(true);
+    try {
+      const differences = await detectDifferences(imageA, imageB);
+      
+      const newRegions: Region[] = differences.map(diff => ({
+        id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2),
+        x: diff.xmin,
+        y: diff.ymin,
+        width: diff.xmax - diff.xmin,
+        height: diff.ymax - diff.ymin
+      }));
+
+      setRegions(prev => [...prev, ...newRegions]);
+    } catch (error) {
+      alert('Failed to detect differences automatically. Please try again or mark them manually.');
+    } finally {
+      setIsDetecting(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full w-full max-w-6xl mx-auto p-4 space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-slate-800">Mark Differences</h2>
         <div className="flex space-x-2">
+          <button 
+            onClick={handleAutoDetect} 
+            disabled={isDetecting}
+            className="flex items-center space-x-2 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-medium transition-colors border border-indigo-200"
+            title="Auto-detect differences with AI"
+          >
+            {isDetecting ? (
+              <Loader2 size={18} className="animate-spin" />
+            ) : (
+              <Sparkles size={18} />
+            )}
+            <span>{isDetecting ? 'Detecting...' : 'Auto Detect'}</span>
+          </button>
+          <div className="w-px h-6 bg-slate-300 mx-2" />
           <button onClick={handleUndo} className="p-2 text-slate-600 hover:bg-slate-100 rounded-full" title="Undo">
             <Undo size={20} />
           </button>
