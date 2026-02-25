@@ -1,0 +1,5 @@
+{
+  "name": "Spot the Difference",
+  "description": "A client-side spot the difference game creator and player.",
+  "requestFramePermissions": []
+}
