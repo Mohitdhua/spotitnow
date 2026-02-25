@@ -32,18 +32,12 @@ export async function detectDifferences(imageA: string, imageB: string): Promise
       For each difference, provide a bounding box using normalized coordinates (0 to 1).
       Return the result as a JSON object with a "differences" key containing an array of bounding boxes.
       Each bounding box should have ymin, xmin, ymax, xmax.
-      
-      Example JSON format:
-      {
-        "differences": [
-          { "ymin": 0.1, "xmin": 0.2, "ymax": 0.3, "xmax": 0.4 }
-        ]
-      }
     `;
 
     const response = await ai.models.generateContent({
       model: model,
       contents: {
+        role: "user",
         parts: [
           { text: prompt },
           {
@@ -87,7 +81,7 @@ export async function detectDifferences(imageA: string, imageB: string): Promise
     if (!text) return [];
 
     const result = JSON.parse(text);
-    return result.differences || [];
+    return result?.differences || [];
 
   } catch (error) {
     console.error("Error detecting differences:", error);

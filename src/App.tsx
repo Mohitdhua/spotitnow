@@ -9,21 +9,47 @@ import { Plus, Upload, Gamepad2, Download, Layers } from 'lucide-react';
 import { ImageUploader } from './components/ImageUploader';
 import { EditorCanvas } from './components/EditorCanvas';
 import { GameCanvas } from './components/GameCanvas';
-import { Puzzle, PuzzleSet, GameMode } from './types';
+import { Puzzle, PuzzleSet, GameMode, Region } from './types';
 
 export default function App() {
   const [mode, setMode] = useState<GameMode | 'home'>('home');
   const [puzzle, setPuzzle] = useState<Puzzle | null>(null);
   const [batch, setBatch] = useState<Puzzle[]>([]);
   const [playIndex, setPlayIndex] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const handleImagesSelected = (imageA: string, imageB: string) => {
-    setPuzzle({
+  const handleImagesSelected = (imageA: string, imageB: string, regions: Region[] = []) => {
+    const newPuzzle: Puzzle = {
       imageA,
       imageB,
-      regions: []
-    });
-    setMode('edit');
+      regions,
+      title: 'Auto-Generated Puzzle'
+    };
+
+    setPuzzle(newPuzzle);
+    
+    // If regions are detected (which they should be now), go straight to play mode
+    if (regions.length > 0) {
+      setBatch([newPuzzle]);
+      setPlayIndex(0);
+      setMode('play');
+    } else {
+      // Fallback to edit if no regions found (shouldn't happen with new logic)
+      setMode('edit');
+    }
+  };
+
+  const handleBatchSelected = (newPuzzles: Puzzle[]) => {
+    const updatedBatch = [...batch, ...newPuzzles];
+    setBatch(updatedBatch);
+    
+    if (batch.length === 0 && newPuzzles.length > 0) {
+      setPuzzle(newPuzzles[0]);
+      setMode('play'); // Auto-play first puzzle
+      setPlayIndex(0);
+    } else {
+      alert(`Added ${newPuzzles.length} puzzles to batch!`);
+    }
   };
 
   const handleSavePuzzle = (updatedPuzzle: Puzzle) => {
@@ -83,6 +109,12 @@ export default function App() {
               setBatch(json.puzzles);
               setPlayIndex(0);
               setPuzzle(json.puzzles[0]);
+              setMode('play');
+            } else if (Array.isArray(json)) {
+              // Handle raw array of puzzles
+              setBatch(json);
+              setPlayIndex(0);
+              setPuzzle(json[0]);
               setMode('play');
             } else if (json.imageA && json.imageB) {
               // Single puzzle
@@ -229,7 +261,7 @@ export default function App() {
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
-              className="h-full"
+              className="h-full relative"
             >
               <div className="text-center pt-8 pb-2">
                 {batch.length > 0 ? (
@@ -238,7 +270,18 @@ export default function App() {
                   <h2 className="text-2xl font-bold text-slate-800">Upload Images</h2>
                 )}
               </div>
-              <ImageUploader onImagesSelected={handleImagesSelected} />
+              <ImageUploader 
+                onImagesSelected={handleImagesSelected} 
+                onBatchSelected={handleBatchSelected}
+              />
+              {isProcessing && (
+                <div className="absolute inset-0 bg-white/80 flex items-center justify-center z-50 backdrop-blur-sm">
+                  <div className="flex flex-col items-center space-y-4">
+                    <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+                    <p className="text-indigo-600 font-medium text-lg">Analyzing images & generating puzzle...</p>
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
 
@@ -270,6 +313,7 @@ export default function App() {
               className="h-full"
             >
               <GameCanvas 
+                key={puzzle.title + playIndex}
                 puzzle={puzzle} 
                 onExit={handleExit}
                 onNextLevel={handleNextLevel}

@@ -7,14 +7,15 @@ import { detectDifferences } from '../services/ai';
 interface EditorCanvasProps {
   imageA: string;
   imageB: string;
+  initialRegions?: Region[];
   onSave: (puzzle: Puzzle) => void;
-  onPlay: (puzzle: Puzzle) => void;
-  onAddToBatch: (puzzle: Puzzle) => void;
-  batchCount: number;
+  onPlay?: (puzzle: Puzzle) => void;
+  onAddToBatch?: (puzzle: Puzzle) => void;
+  batchCount?: number;
 }
 
-export function EditorCanvas({ imageA, imageB, onSave, onPlay, onAddToBatch, batchCount }: EditorCanvasProps) {
-  const [regions, setRegions] = useState<Region[]>([]);
+export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPlay, onAddToBatch, batchCount }: EditorCanvasProps) {
+  const [regions, setRegions] = useState<Region[]>(initialRegions);
   const [isDrawing, setIsDrawing] = useState(false);
   const [isDetecting, setIsDetecting] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(null);

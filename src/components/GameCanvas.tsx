@@ -11,13 +11,16 @@ interface GameCanvasProps {
   hasNextLevel?: boolean;
 }
 
-export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCanvasProps) {
+export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLevel, hasNextLevel }) => {
   const [foundRegions, setFoundRegions] = useState<Set<string>>(new Set());
+  const [missedRegions, setMissedRegions] = useState<Set<string>>(new Set());
   const [mistakes, setMistakes] = useState(0);
   const [startTime] = useState(Date.now());
   const [elapsedTime, setElapsedTime] = useState(0);
   const [clickFeedback, setClickFeedback] = useState<{ x: number, y: number, type: 'success' | 'error', id: number } | null>(null);
   const [gameOver, setGameOver] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [isFailed, setIsFailed] = useState(false);
   const [zoom, setZoom] = useState(1);
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -35,8 +38,11 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
 
   // Check win condition
   useEffect(() => {
+    if (isFailed) return; // Don't trigger win if failed
+    
     if (foundRegions.size === puzzle.regions.length && !gameOver) {
       setGameOver(true);
+      setShowModal(true);
       confetti({
         particleCount: 100,
         spread: 70,
@@ -47,7 +53,7 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
       // Optional: clear confetti if component unmounts quickly
       // confetti.reset(); 
     };
-  }, [foundRegions, puzzle.regions.length, gameOver]);
+  }, [foundRegions, puzzle.regions.length, gameOver, isFailed]);
 
   // Draw canvas
   useEffect(() => {
@@ -62,10 +68,13 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
       puzzle.regions.forEach(region => {
         if (foundRegions.has(region.id)) {
           drawRegion(ctx, region, 'rgba(0, 255, 0, 0.2)', 'rgba(0, 255, 0, 0.8)');
+        } else if (missedRegions.has(region.id)) {
+          // Draw missed regions in Red
+          drawRegion(ctx, region, 'rgba(255, 0, 0, 0.2)', 'rgba(255, 0, 0, 0.8)');
         }
       });
     }
-  }, [foundRegions, puzzle.regions]);
+  }, [foundRegions, missedRegions, puzzle.regions]);
 
   const drawRegion = (ctx: CanvasRenderingContext2D, region: Region, fillColor: string, strokeColor: string) => {
     const canvas = canvasRef.current;
@@ -80,7 +89,6 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
     ctx.strokeStyle = strokeColor;
     ctx.lineWidth = 3;
     
-    // Draw rounded rect or circle? Rect is easier for now given the editor uses rects.
     ctx.beginPath();
     ctx.rect(x, y, w, h);
     ctx.fill();
@@ -109,11 +117,25 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
     if (found) {
       setFoundRegions(prev => new Set(prev).add(found.id));
       setClickFeedback({ x: e.clientX, y: e.clientY, type: 'success', id: Date.now() });
-      // Play success sound (optional)
     } else {
-      setMistakes(prev => prev + 1);
+      const newMistakes = mistakes + 1;
+      setMistakes(newMistakes);
       setClickFeedback({ x: e.clientX, y: e.clientY, type: 'error', id: Date.now() });
-      // Play error sound (optional)
+      
+      if (newMistakes >= 10) {
+        setIsFailed(true);
+        setGameOver(true);
+        setShowModal(true);
+        
+        // Identify missed regions
+        const missed = new Set<string>();
+        puzzle.regions.forEach(r => {
+          if (!foundRegions.has(r.id)) {
+            missed.add(r.id);
+          }
+        });
+        setMissedRegions(missed);
+      }
     }
   };
 
@@ -136,6 +158,15 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
             <span className="text-xl font-mono font-bold text-slate-700">{formatTime(elapsedTime)}</span>
           </div>
         </div>
+
+        {gameOver && !showModal && (
+          <button 
+            onClick={() => setShowModal(true)}
+            className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold shadow-md animate-pulse"
+          >
+            Continue / Next
+          </button>
+        )}
 
         <div className="flex items-center space-x-8">
           <div className="flex flex-col items-center">
@@ -236,7 +267,7 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
 
       {/* Game Over Modal */}
       <AnimatePresence>
-        {gameOver && (
+        {gameOver && showModal && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -247,13 +278,27 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
               animate={{ scale: 1, y: 0 }}
               className="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full text-center space-y-6"
             >
-              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto text-green-600">
-                <CheckCircle size={48} />
-              </div>
-              <div>
-                <h2 className="text-3xl font-bold text-slate-900">Puzzle Solved!</h2>
-                <p className="text-slate-500 mt-2">You found all {puzzle.regions.length} differences.</p>
-              </div>
+              {isFailed ? (
+                <>
+                  <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto text-red-600">
+                    <XCircle size={48} />
+                  </div>
+                  <div>
+                    <h2 className="text-3xl font-bold text-slate-900">Too Many Mistakes</h2>
+                    <p className="text-slate-500 mt-2">You reached 10 mistakes. The differences have been revealed.</p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto text-green-600">
+                    <CheckCircle size={48} />
+                  </div>
+                  <div>
+                    <h2 className="text-3xl font-bold text-slate-900">Puzzle Solved!</h2>
+                    <p className="text-slate-500 mt-2">You found all {puzzle.regions.length} differences.</p>
+                  </div>
+                </>
+              )}
               
               <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl">
                 <div className="text-center">
@@ -262,9 +307,18 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
                 </div>
                 <div className="text-center">
                   <div className="text-sm text-slate-400 uppercase font-bold">Mistakes</div>
-                  <div className="text-xl font-mono font-bold text-red-500">{mistakes}</div>
+                  <div className={`text-xl font-mono font-bold ${mistakes > 0 ? 'text-red-500' : 'text-slate-700'}`}>{mistakes}</div>
                 </div>
               </div>
+
+              {isFailed && (
+                <button
+                  onClick={() => setShowModal(false)}
+                  className="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors mb-2"
+                >
+                  Review Differences
+                </button>
+              )}
 
               <div className="flex space-x-3">
                 <button 
@@ -278,7 +332,9 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
                   <button 
                     onClick={() => {
                       setGameOver(false);
+                      setIsFailed(false);
                       setFoundRegions(new Set());
+                      setMissedRegions(new Set());
                       setMistakes(0);
                       onNextLevel();
                     }}
@@ -291,14 +347,16 @@ export function GameCanvas({ puzzle, onExit, onNextLevel, hasNextLevel }: GameCa
                   <button 
                     onClick={() => {
                       setGameOver(false);
+                      setIsFailed(false);
                       setFoundRegions(new Set());
+                      setMissedRegions(new Set());
                       setMistakes(0);
-                      onExit(); // Simplest for now
+                      onExit(); 
                     }}
                     className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center space-x-2"
                   >
                     <RotateCcw size={18} />
-                    <span>Play Again</span>
+                    <span>{isFailed ? 'Try Again' : 'Play Again'}</span>
                   </button>
                 )}
               </div>
