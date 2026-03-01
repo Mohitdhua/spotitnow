@@ -82,51 +82,81 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
     }
   };
 
+  const isVerticalLayout = settings.aspectRatio === '9:16' || settings.aspectRatio === '1:1';
+
   const formatTime = (seconds: number) => {
     return seconds.toFixed(1);
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-[#FFFDF5] p-4 lg:p-8 overflow-hidden">
+    <div className="flex flex-col items-center justify-center min-h-screen bg-[#FFFDF5] p-2 lg:p-4 overflow-hidden relative">
+      
+      {/* External Back Button - Top Left */}
+      <div className="absolute top-6 left-6 z-50">
+        <button 
+          onClick={onExit}
+          className="p-3 bg-white border-4 border-black rounded-xl hover:bg-black hover:text-white transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+        >
+          <ArrowLeft size={24} strokeWidth={3} />
+        </button>
+      </div>
+
+      {/* External Playback Controls - Bottom Center */}
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-6">
+        <button 
+          onClick={() => setIsPlaying(!isPlaying)} 
+          className="p-4 bg-white border-4 border-black rounded-full hover:bg-[#4ECDC4] transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group"
+        >
+          {isPlaying ? <Pause size={32} strokeWidth={3} className="group-hover:scale-110 transition-transform"/> : <Play size={32} strokeWidth={3} className="ml-1 group-hover:scale-110 transition-transform"/>}
+        </button>
+        <button 
+          onClick={handleSkip} 
+          className="p-4 bg-white border-4 border-black rounded-full hover:bg-[#FFD93D] transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group"
+        >
+          <SkipForward size={32} strokeWidth={3} className="group-hover:scale-110 transition-transform"/>
+        </button>
+      </div>
+
       {/* Game Container - Responsive Aspect Ratio */}
       <div 
         ref={containerRef}
         className={`relative w-full max-w-[1600px] bg-white border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] rounded-2xl overflow-hidden flex flex-col ${getAspectRatioStyle()}`}
         style={{ 
           width: settings.aspectRatio === '9:16' ? 'auto' : '100%', 
-          height: settings.aspectRatio === '9:16' ? '100%' : 'auto' 
+          height: settings.aspectRatio === '9:16' ? '100%' : 'auto',
+          maxHeight: 'calc(100vh - 160px)' // Ensure space for controls
         }}
       >
         
         {/* HUD Header */}
-        <div className="h-20 bg-[#FFD93D] border-b-4 border-black flex items-center justify-between px-6 shrink-0 z-20">
+        <div className="h-16 bg-[#FFD93D] border-b-4 border-black flex items-center justify-between px-4 shrink-0 z-20">
           <div className="flex items-center space-x-4">
-            <button 
-              onClick={onExit}
-              className="p-2 bg-white border-2 border-black rounded-lg hover:bg-black hover:text-white transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
-            >
-              <ArrowLeft size={24} strokeWidth={3} />
-            </button>
+            {settings.logo && (
+              <div className="h-10 w-10 bg-white border-2 border-black rounded-lg overflow-hidden flex items-center justify-center shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+                <img src={settings.logo} alt="Logo" className="w-full h-full object-contain" />
+              </div>
+            )}
+
             <div className="flex flex-col">
-              <h2 className="text-2xl font-black font-display uppercase leading-none tracking-tight text-black">
+              <h2 className="text-xl font-black font-display uppercase leading-none tracking-tight text-black">
                 {phase === 'showing' ? 'Find Differences' : phase === 'revealing' ? 'Revealing...' : 'Next Puzzle'}
               </h2>
-              <span className="text-xs font-bold uppercase tracking-widest opacity-70 text-black">
+              <span className="text-[10px] font-bold uppercase tracking-widest opacity-70 text-black">
                 Puzzle {currentIndex + 1} / {puzzles.length}
               </span>
             </div>
           </div>
 
-          {/* Timer & Controls */}
-          <div className="flex items-center space-x-6">
+          {/* Timer Only (Controls Moved Outside) */}
+          <div className="flex items-center space-x-4">
             <div className="flex flex-col items-end">
-              <div className="flex items-center space-x-2 bg-black px-4 py-1 rounded-full border-2 border-black">
-                <div className={`w-3 h-3 rounded-full ${timeLeft <= 2 ? 'bg-[#FF6B6B] animate-pulse' : 'bg-[#4ECDC4]'}`} />
-                <span className={`font-mono text-xl font-bold ${timeLeft <= 2 ? 'text-[#FF6B6B]' : 'text-white'}`}>
+              <div className="flex items-center space-x-2 bg-black px-3 py-1 rounded-full border-2 border-black">
+                <div className={`w-2.5 h-2.5 rounded-full ${timeLeft <= 2 ? 'bg-[#FF6B6B] animate-pulse' : 'bg-[#4ECDC4]'}`} />
+                <span className={`font-mono text-lg font-bold ${timeLeft <= 2 ? 'text-[#FF6B6B]' : 'text-white'}`}>
                   {formatTime(timeLeft)}s
                 </span>
               </div>
-              <div className="w-32 h-3 bg-white border-2 border-black rounded-full mt-1 overflow-hidden shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+              <div className="w-24 h-2.5 bg-white border-2 border-black rounded-full mt-1 overflow-hidden shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
                 <motion.div 
                   className="h-full bg-[#FF6B6B]"
                   style={{ 
@@ -141,26 +171,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
                 />
               </div>
             </div>
-
-            <div className="flex items-center space-x-2">
-              <button 
-                onClick={() => setIsPlaying(!isPlaying)} 
-                className="p-2 bg-white border-2 border-black rounded-lg hover:bg-slate-100 transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
-              >
-                {isPlaying ? <Pause size={24} strokeWidth={3} /> : <Play size={24} strokeWidth={3} />}
-              </button>
-              <button 
-                onClick={handleSkip} 
-                className="p-2 bg-white border-2 border-black rounded-lg hover:bg-slate-100 transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
-              >
-                <SkipForward size={24} strokeWidth={3} />
-              </button>
-            </div>
           </div>
         </div>
 
         {/* Game Area */}
-        <div className="flex-1 relative bg-[#4ECDC4] overflow-hidden flex items-center justify-center p-4">
+        <div className="flex-1 relative bg-[#4ECDC4] overflow-hidden flex items-center justify-center p-2">
           {/* Background Pattern */}
           <div className="absolute inset-0 opacity-10" 
                style={{ backgroundImage: 'radial-gradient(circle, #000 2px, transparent 2px)', backgroundSize: '24px 24px' }} 
@@ -174,13 +189,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
                 animate={{ x: 0, opacity: 1 }}
                 exit={settings.transitionStyle === 'slide' ? { x: '-100%' } : { opacity: 0 }}
                 transition={{ duration: settings.transitionDuration }}
-                className="relative w-full h-full flex gap-4 items-center justify-center"
+                className={`relative w-full h-full flex gap-2 items-center justify-center ${isVerticalLayout ? 'flex-col' : 'flex-row'}`}
               >
                 {/* Original Image */}
-                <div className="relative h-full flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] group">
-                  <div className="absolute top-0 left-0 bg-black text-white px-4 py-1 font-black uppercase tracking-wider border-b-4 border-r-4 border-black rounded-br-xl z-10 text-sm">
-                    Original
-                  </div>
+                <div className="relative flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] group w-full h-full">
                   <img 
                     src={currentPuzzle.imageA} 
                     alt="Original" 
@@ -189,11 +201,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
                 </div>
 
                 {/* Interactive Image (Video Mode) */}
-                <div className="relative h-full flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] group">
-                  <div className="absolute top-0 left-0 bg-[#FF6B6B] text-black px-4 py-1 font-black uppercase tracking-wider border-b-4 border-r-4 border-black rounded-br-xl z-10 animate-pulse text-sm">
-                    Spot Differences
-                  </div>
-                  
+                <div className="relative flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] group w-full h-full">
                   <div className="relative w-full h-full">
                     <img 
                       src={currentPuzzle.imageB} 
@@ -274,19 +282,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
               </motion.div>
             </div>
           )}
-        </div>
-
-        {/* Progress Footer */}
-        <div className="h-16 bg-white border-t-4 border-black flex items-center justify-between px-6 shrink-0 z-20">
-          <div className="flex items-center space-x-4">
-            <span className="font-black uppercase text-sm tracking-wider text-black">Status:</span>
-            <div className="px-4 py-1 bg-black text-white rounded-full font-bold uppercase text-xs tracking-wider">
-              {phase}
-            </div>
-          </div>
-          <div className="font-black uppercase text-sm tracking-wider text-slate-400">
-            {currentIndex + 1} / {puzzles.length} Puzzles
-          </div>
         </div>
       </div>
     </div>

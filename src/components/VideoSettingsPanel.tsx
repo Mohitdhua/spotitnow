@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Play, Monitor, Smartphone, Square, Layout, Clock, Eye, Palette, MoveRight, ArrowLeft } from 'lucide-react';
+import { Play, Monitor, Smartphone, Square, Layout, Clock, Eye, Palette, MoveRight, ArrowLeft, Image as ImageIcon, Upload } from 'lucide-react';
 import { VideoSettings } from '../types';
 
 interface VideoSettingsPanelProps {
@@ -18,6 +18,19 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
 }) => {
   const updateSetting = <K extends keyof VideoSettings>(key: K, value: VideoSettings[K]) => {
     onSettingsChange({ ...settings, [key]: value });
+  };
+
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        if (event.target?.result) {
+          updateSetting('logo', event.target.result as string);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   return (
@@ -71,6 +84,41 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
             </div>
           </div>
 
+          {/* Branding / Logo */}
+          <div className="space-y-4">
+             <label className="flex items-center space-x-2 text-xl font-black uppercase">
+              <ImageIcon size={24} strokeWidth={3} />
+              <span>Branding Logo</span>
+            </label>
+            <div className="flex items-center space-x-4 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+              <div className="w-16 h-16 bg-white border-2 border-black rounded-lg flex items-center justify-center overflow-hidden">
+                {settings.logo ? (
+                  <img src={settings.logo} alt="Logo" className="w-full h-full object-contain" />
+                ) : (
+                  <ImageIcon size={32} className="text-slate-300" />
+                )}
+              </div>
+              <div className="flex-1">
+                <label className="cursor-pointer inline-flex items-center space-x-2 px-4 py-2 bg-black text-white font-bold rounded-lg uppercase text-sm hover:bg-slate-800 transition-colors">
+                  <Upload size={16} />
+                  <span>Upload Logo</span>
+                  <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
+                </label>
+                <p className="text-xs text-slate-500 mt-2 font-bold uppercase">
+                  Displayed in top-left corner during playback
+                </p>
+              </div>
+              {settings.logo && (
+                <button 
+                  onClick={() => updateSetting('logo', undefined)}
+                  className="px-3 py-1 text-xs font-bold uppercase text-red-500 hover:bg-red-50 rounded border-2 border-transparent hover:border-red-200"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             {/* Timing Settings */}
             <div className="space-y-6 p-6 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
@@ -88,7 +136,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   <input
                     type="range"
                     min="1"
-                    max="30"
+                    max="90"
                     value={settings.showDuration}
                     onChange={(e) => updateSetting('showDuration', Number(e.target.value))}
                     className="w-full h-4 bg-slate-200 rounded-full appearance-none cursor-pointer border-2 border-black accent-black"

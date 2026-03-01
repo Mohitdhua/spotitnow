@@ -32,6 +32,7 @@ export interface VideoSettings {
   revealColor: string;
   transitionStyle: 'fade' | 'slide' | 'none';
   transitionDuration: number; // Seconds
+  logo?: string; // Base64 or URL
 }
 
 export type GameMode = 'upload' | 'edit' | 'play' | 'video_setup' | 'video_play';
