@@ -314,46 +314,59 @@ export function ImageUploader({ onImagesSelected, onBatchSelected }: ImageUpload
     }
   };
 
+  const handleEditPuzzle = (index: number) => {
+    setEditingPuzzleIndex(index);
+  };
+
+  const handleSaveEditedPuzzle = (editedPuzzle: Puzzle) => {
+    if (editingPuzzleIndex === null) return;
+    
+    const newPuzzles = [...reviewPuzzles];
+    newPuzzles[editingPuzzleIndex] = editedPuzzle;
+    setReviewPuzzles(newPuzzles);
+    setEditingPuzzleIndex(null);
+  };
+
   return (
     <div className="w-full max-w-2xl mx-auto p-6">
       <div 
-        className={`relative border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-200 ${
-          dragActive ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'
+        className={`relative border-4 border-dashed rounded-2xl p-12 text-center transition-all duration-200 ${
+          dragActive ? 'border-[#FF6B6B] bg-[#FFF5F5]' : 'border-black hover:border-[#FF6B6B] hover:bg-white'
         }`}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
         onDrop={handleDrop}
       >
-        <div className="flex flex-col items-center space-y-4">
-          <div className="w-20 h-20 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mb-4">
-            <Layers size={40} />
+        <div className="flex flex-col items-center space-y-6">
+          <div className="w-24 h-24 bg-[#FFD93D] text-black rounded-full flex items-center justify-center mb-4 border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+            <Layers size={48} strokeWidth={2.5} />
           </div>
-          <h3 className="text-xl font-bold text-slate-800">
+          <h3 className="text-3xl font-black text-black font-display uppercase tracking-tight">
             Drag & Drop Images
           </h3>
-          <p className="text-slate-500 max-w-md mx-auto">
+          <p className="text-slate-700 font-bold max-w-md mx-auto border-2 border-black p-2 bg-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] -rotate-1">
             Upload single pairs or batch files. <br/>
-            <span className="text-xs text-slate-400">
-              For batch: use <code>name.png</code> and <code>namediff.png</code>
+            <span className="text-xs text-slate-500 font-mono mt-1 block">
+              Batch: <code>name.png</code> + <code>namediff.png</code>
             </span>
           </p>
           
-          <div className="flex gap-4 mt-6">
+          <div className="flex gap-4 mt-8">
             <button 
               onClick={() => fileInputRef.current?.click()}
-              className="px-6 py-3 bg-white border border-slate-300 text-slate-700 rounded-xl font-medium hover:bg-slate-50 transition-colors shadow-sm flex items-center space-x-2"
+              className="px-6 py-3 bg-white border-2 border-black text-black rounded-xl font-bold hover:bg-slate-50 transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2"
             >
-              <ImageIcon size={18} />
-              <span>Select Files</span>
+              <ImageIcon size={20} strokeWidth={2.5} />
+              <span>SELECT FILES</span>
             </button>
             {onBatchSelected && (
               <button 
                 onClick={() => batchInputRef.current?.click()}
-                className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors shadow-md flex items-center space-x-2"
+                className="px-6 py-3 bg-[#4ECDC4] border-2 border-black text-black rounded-xl font-bold hover:bg-[#3DBDB4] transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2"
               >
-                <Layers size={18} />
-                <span>Batch Select</span>
+                <Layers size={20} strokeWidth={2.5} />
+                <span>BATCH SELECT</span>
               </button>
             )}
           </div>
@@ -396,32 +409,31 @@ export function ImageUploader({ onImagesSelected, onBatchSelected }: ImageUpload
             <motion.div 
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
-              className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden flex flex-col max-h-[80vh]"
+              className="bg-white rounded-2xl border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] max-w-lg w-full overflow-hidden flex flex-col max-h-[80vh]"
             >
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-amber-50">
-                <div className="flex items-center space-x-3 text-amber-800">
-                  <AlertTriangle size={24} />
-                  <h3 className="text-lg font-bold">Incomplete Pairs Detected</h3>
+              <div className="p-6 border-b-4 border-black flex justify-between items-center bg-[#FFD93D]">
+                <div className="flex items-center space-x-3 text-black">
+                  <AlertTriangle size={28} strokeWidth={3} />
+                  <h3 className="text-xl font-black font-display uppercase">Incomplete Pairs</h3>
                 </div>
               </div>
               
-              <div className="p-6 overflow-y-auto flex-1 space-y-4">
-                <p className="text-slate-600 text-sm">
-                  The following puzzles are missing either the base or difference image. 
-                  Please resolve them to continue.
+              <div className="p-6 overflow-y-auto flex-1 space-y-4 bg-white">
+                <p className="text-slate-700 font-medium border-l-4 border-black pl-4 py-2 bg-slate-50">
+                  Some puzzles are missing files. Please resolve them to continue.
                 </p>
 
-                <div className="space-y-3">
+                <div className="space-y-4">
                   {incompletePairs.map(pair => (
-                    <div key={pair.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-200">
+                    <div key={pair.id} className="flex items-center justify-between p-4 bg-white rounded-xl border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
                       <div className="flex items-center space-x-3 overflow-hidden">
-                        <div className="w-10 h-10 bg-slate-200 rounded-lg flex items-center justify-center flex-shrink-0 text-slate-500">
-                          <FileWarning size={20} />
+                        <div className="w-12 h-12 bg-slate-100 rounded-lg border-2 border-black flex items-center justify-center flex-shrink-0 text-slate-500">
+                          <FileWarning size={24} strokeWidth={2.5} />
                         </div>
                         <div className="min-w-0">
-                          <div className="font-medium text-slate-900 truncate">{pair.baseName}</div>
-                          <div className="text-xs text-red-500 font-medium">
-                            Missing: {pair.missingType === 'base' ? 'Original Image' : 'Difference Image'}
+                          <div className="font-bold text-black truncate">{pair.baseName}</div>
+                          <div className="text-xs text-[#FF6B6B] font-bold uppercase tracking-wide">
+                            Missing: {pair.missingType === 'base' ? 'Original' : 'Difference'}
                           </div>
                         </div>
                       </div>
@@ -432,17 +444,17 @@ export function ImageUploader({ onImagesSelected, onBatchSelected }: ImageUpload
                             setResolvingId(pair.id);
                             missingFileInputRef.current?.click();
                           }}
-                          className="p-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors"
+                          className="p-2 bg-[#A7F3D0] border-2 border-black text-black rounded-lg hover:bg-[#6EE7B7] transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
                           title="Select Missing File"
                         >
-                          <Upload size={18} />
+                          <Upload size={20} strokeWidth={2.5} />
                         </button>
                         <button 
                           onClick={() => discardPair(pair.id)}
-                          className="p-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
+                          className="p-2 bg-[#FF6B6B] border-2 border-black text-black rounded-lg hover:bg-[#FF5252] transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
                           title="Discard Puzzle"
                         >
-                          <Trash2 size={18} />
+                          <Trash2 size={20} strokeWidth={2.5} />
                         </button>
                       </div>
                     </div>
@@ -450,19 +462,18 @@ export function ImageUploader({ onImagesSelected, onBatchSelected }: ImageUpload
                 </div>
               </div>
 
-              <div className="p-6 border-t border-slate-100 bg-slate-50 flex justify-end space-x-3">
+              <div className="p-6 border-t-4 border-black bg-slate-50 flex justify-end space-x-3">
                 <button 
                   onClick={() => {
                     setIncompletePairs([]);
                     setShowBatchModal(false);
-                    // If we have valid pairs, proceed with them
                     if (validPairsRef.current.size > 0) {
                       setShowOptionsModal(true);
                     }
                   }}
-                  className="px-4 py-2 text-slate-600 font-medium hover:text-slate-900"
+                  className="px-6 py-3 bg-white border-2 border-black text-black rounded-xl font-bold hover:bg-slate-50 transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
                 >
-                  Discard All Incomplete
+                  DISCARD ALL
                 </button>
               </div>
             </motion.div>
@@ -482,58 +493,58 @@ export function ImageUploader({ onImagesSelected, onBatchSelected }: ImageUpload
             <motion.div 
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
-              className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden"
+              className="bg-white rounded-2xl border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] max-w-lg w-full overflow-hidden"
             >
-              <div className="p-6 border-b border-slate-100 text-center">
-                <h3 className="text-2xl font-bold text-slate-800">Choose Detection Method</h3>
-                <p className="text-slate-500 mt-2">How would you like to find the differences?</p>
+              <div className="p-6 border-b-4 border-black text-center bg-[#4ECDC4]">
+                <h3 className="text-2xl font-black text-black font-display uppercase">Detection Method</h3>
+                <p className="text-black font-medium mt-1">How should we find the differences?</p>
               </div>
               
-              <div className="p-6 space-y-4">
+              <div className="p-6 space-y-4 bg-white">
                 <button 
                   onClick={() => handleProcessingChoice('manual')}
-                  className="w-full flex items-center p-4 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl transition-all group text-left"
+                  className="w-full flex items-center p-4 bg-white hover:bg-slate-50 border-2 border-black rounded-xl transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group text-left"
                 >
-                  <div className="w-12 h-12 bg-slate-200 text-slate-600 rounded-lg flex items-center justify-center mr-4 group-hover:bg-white group-hover:shadow-sm transition-all">
-                    <MousePointer2 size={24} />
+                  <div className="w-14 h-14 bg-slate-200 text-black border-2 border-black rounded-lg flex items-center justify-center mr-4 group-hover:bg-white transition-all">
+                    <MousePointer2 size={28} strokeWidth={2.5} />
                   </div>
                   <div>
-                    <div className="font-bold text-slate-900">Manual Selection</div>
-                    <div className="text-sm text-slate-500">I want to mark the differences myself</div>
+                    <div className="font-black text-lg text-black uppercase">Manual Selection</div>
+                    <div className="text-sm text-slate-600 font-medium">I'll mark them myself</div>
                   </div>
                 </button>
 
                 <button 
                   onClick={() => handleProcessingChoice('auto')}
-                  className="w-full flex items-center p-4 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition-all group text-left"
+                  className="w-full flex items-center p-4 bg-[#E0E7FF] hover:bg-[#C7D2FE] border-2 border-black rounded-xl transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group text-left"
                 >
-                  <div className="w-12 h-12 bg-indigo-200 text-indigo-600 rounded-lg flex items-center justify-center mr-4 group-hover:bg-white group-hover:shadow-sm transition-all">
-                    <Wand2 size={24} />
+                  <div className="w-14 h-14 bg-indigo-200 text-indigo-900 border-2 border-black rounded-lg flex items-center justify-center mr-4 group-hover:bg-white transition-all">
+                    <Wand2 size={28} strokeWidth={2.5} />
                   </div>
                   <div>
-                    <div className="font-bold text-indigo-900">Auto Detection (Fast)</div>
-                    <div className="text-sm text-indigo-700">Use client-side algorithm to find differences instantly</div>
+                    <div className="font-black text-lg text-black uppercase">Auto Detection (Fast)</div>
+                    <div className="text-sm text-slate-600 font-medium">Instant client-side algorithm</div>
                   </div>
                 </button>
 
                 <button 
                   onClick={() => handleProcessingChoice('ai')}
-                  className="w-full flex items-center p-4 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-xl transition-all group text-left"
+                  className="w-full flex items-center p-4 bg-[#F3E8FF] hover:bg-[#E9D5FF] border-2 border-black rounded-xl transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group text-left"
                 >
-                  <div className="w-12 h-12 bg-purple-200 text-purple-600 rounded-lg flex items-center justify-center mr-4 group-hover:bg-white group-hover:shadow-sm transition-all">
-                    <BrainCircuit size={24} />
+                  <div className="w-14 h-14 bg-purple-200 text-purple-900 border-2 border-black rounded-lg flex items-center justify-center mr-4 group-hover:bg-white transition-all">
+                    <BrainCircuit size={28} strokeWidth={2.5} />
                   </div>
                   <div>
-                    <div className="font-bold text-purple-900">AI Analysis (Smart)</div>
-                    <div className="text-sm text-purple-700">Use Gemini AI for advanced reasoning and detection</div>
+                    <div className="font-black text-lg text-black uppercase">AI Analysis (Smart)</div>
+                    <div className="text-sm text-slate-600 font-medium">Gemini AI reasoning</div>
                   </div>
                 </button>
               </div>
 
-              <div className="p-4 bg-slate-50 border-t border-slate-100 text-center">
+              <div className="p-4 bg-slate-50 border-t-4 border-black text-center">
                 <button 
                   onClick={() => setShowOptionsModal(false)}
-                  className="text-slate-500 hover:text-slate-800 text-sm font-medium"
+                  className="text-slate-500 hover:text-black font-bold text-sm uppercase tracking-wider"
                 >
                   Cancel
                 </button>
@@ -555,80 +566,89 @@ export function ImageUploader({ onImagesSelected, onBatchSelected }: ImageUpload
             <motion.div 
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
-              className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full overflow-hidden flex flex-col max-h-[85vh]"
+              className="bg-white rounded-2xl border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] max-w-5xl w-full overflow-hidden flex flex-col max-h-[85vh]"
             >
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+              <div className="p-6 border-b-4 border-black flex justify-between items-center bg-[#FFD93D]">
                 <div>
-                  <h3 className="text-xl font-bold text-slate-800">Review Puzzles</h3>
-                  <p className="text-slate-500 text-sm">Review detected differences and select puzzles to keep.</p>
+                  <h3 className="text-2xl font-black text-black font-display uppercase">Review Puzzles</h3>
+                  <p className="text-black font-medium text-sm">Check detected differences and confirm.</p>
                 </div>
                 <div className="flex items-center space-x-2">
-                  <span className="px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium">
-                    {reviewPuzzles.length} Puzzles
+                  <span className="px-4 py-1 bg-black text-[#FFD93D] border-2 border-black shadow-[2px_2px_0px_0px_rgba(255,255,255,0.5)] rounded-full text-sm font-bold">
+                    {reviewPuzzles.length} PUZZLES
                   </span>
                 </div>
               </div>
               
-              <div className="p-6 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-50/50">
+              <div className="p-6 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-6 bg-[#FFFDF5]">
                 {reviewPuzzles.map((puzzle, idx) => (
-                  <div key={idx} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col space-y-3 group hover:border-indigo-200 transition-all">
+                  <div key={idx} className="bg-white p-4 rounded-xl border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col space-y-3 group hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all">
                     <div className="flex justify-between items-start">
-                      <h4 className="font-medium text-slate-900 truncate pr-2" title={puzzle.title}>
+                      <h4 className="font-bold text-black truncate pr-2 font-display text-lg" title={puzzle.title}>
                         {puzzle.title || `Puzzle ${idx + 1}`}
                       </h4>
-                      <button 
-                        onClick={() => handleRemovePuzzle(idx)}
-                        className="text-slate-400 hover:text-red-500 transition-colors p-1"
-                        title="Remove Puzzle"
-                      >
-                        <Trash2 size={16} />
-                      </button>
+                      <div className="flex space-x-2">
+                        <button 
+                          onClick={() => handleEditPuzzle(idx)}
+                          className="text-black hover:text-[#4ECDC4] transition-colors p-1 border-2 border-transparent hover:border-black hover:bg-black rounded"
+                          title="Edit Puzzle"
+                        >
+                          <Edit size={20} strokeWidth={2.5} />
+                        </button>
+                        <button 
+                          onClick={() => handleRemovePuzzle(idx)}
+                          className="text-black hover:text-[#FF6B6B] transition-colors p-1 border-2 border-transparent hover:border-black hover:bg-black rounded"
+                          title="Remove Puzzle"
+                        >
+                          <Trash2 size={20} strokeWidth={2.5} />
+                        </button>
+                      </div>
                     </div>
                     
                     <div className="flex space-x-2 h-32">
-                      <div className="flex-1 relative rounded-lg overflow-hidden border border-slate-100 bg-slate-100">
+                      <div className="flex-1 relative rounded-lg overflow-hidden border-2 border-black bg-slate-100">
                         <img src={puzzle.imageA} alt="Original" className="w-full h-full object-contain" />
-                        <div className="absolute bottom-1 left-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded">Original</div>
+                        <div className="absolute bottom-1 left-1 bg-black text-white text-[10px] px-1.5 py-0.5 font-bold uppercase">Original</div>
                       </div>
-                      <div className="flex-1 relative rounded-lg overflow-hidden border border-slate-100 bg-slate-100">
+                      <div className="flex-1 relative rounded-lg overflow-hidden border-2 border-black bg-slate-100">
                         <img src={puzzle.imageB} alt="Modified" className="w-full h-full object-contain" />
-                        <div className="absolute bottom-1 left-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded">Modified</div>
+                        <div className="absolute bottom-1 left-1 bg-[#FF6B6B] text-black border border-black text-[10px] px-1.5 py-0.5 font-bold uppercase">Modified</div>
                       </div>
                     </div>
                     
-                    <div className="flex items-center justify-between text-xs text-slate-500 pt-2 border-t border-slate-100">
+                    <div className="flex items-center justify-between text-xs text-black font-bold pt-2 border-t-2 border-slate-100">
                       <div className="flex items-center">
-                        <span className="w-2 h-2 rounded-full bg-indigo-500 mr-2"></span>
-                        {puzzle.regions?.length || 0} Differences Detected
+                        <span className="w-3 h-3 rounded-full bg-[#4ECDC4] border border-black mr-2"></span>
+                        {puzzle.regions?.length || 0} DIFFERENCES
                       </div>
                     </div>
                   </div>
                 ))}
               </div>
 
-              <div className="p-6 border-t border-slate-100 bg-white flex justify-between items-center">
+              <div className="p-6 border-t-4 border-black bg-white flex justify-between items-center">
                 <button 
                   onClick={() => setShowReviewModal(false)}
-                  className="text-slate-500 hover:text-slate-800 font-medium px-4 py-2"
+                  className="text-slate-500 hover:text-black font-bold px-4 py-2 uppercase tracking-wide"
                 >
                   Cancel
                 </button>
                 
-                <div className="flex space-x-3">
+                <div className="flex space-x-4">
                   <button 
                     onClick={handleExport}
-                    className="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-xl font-medium hover:bg-slate-50 transition-colors shadow-sm flex items-center space-x-2"
+                    className="px-6 py-3 bg-white border-2 border-black text-black rounded-xl font-bold hover:bg-slate-50 transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2"
                   >
-                    <Download size={18} />
-                    <span>Export JSON</span>
+                    <Download size={20} strokeWidth={2.5} />
+                    <span>EXPORT JSON</span>
                   </button>
                   
                   <button 
                     onClick={handleConfirmBatch}
-                    className="px-6 py-2 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors shadow-md flex items-center space-x-2"
+                    className="px-8 py-3 bg-[#4ECDC4] text-black border-2 border-black rounded-xl font-black hover:bg-[#3DBDB4] transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 text-lg"
                   >
-                    <Play size={18} />
-                    <span>Start Game</span>
+                    <Play size={24} strokeWidth={3} />
+                    <span>START GAME</span>
                   </button>
                 </div>
               </div>
@@ -637,11 +657,55 @@ export function ImageUploader({ onImagesSelected, onBatchSelected }: ImageUpload
         )}
       </AnimatePresence>
 
+      {/* Editor Modal */}
+      <AnimatePresence>
+        {editingPuzzleIndex !== null && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white rounded-2xl border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] w-full h-full max-w-7xl overflow-hidden flex flex-col"
+            >
+              <div className="p-4 border-b-4 border-black flex justify-between items-center bg-[#FF6B6B]">
+                <h3 className="text-2xl font-black text-black font-display uppercase">Edit Puzzle</h3>
+                <button 
+                  onClick={() => setEditingPuzzleIndex(null)}
+                  className="p-2 bg-white border-2 border-black hover:bg-slate-100 rounded-lg text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all"
+                >
+                  <X size={24} strokeWidth={3} />
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-hidden bg-[#FFFDF5]">
+                <EditorCanvas 
+                  imageA={reviewPuzzles[editingPuzzleIndex].imageA}
+                  imageB={reviewPuzzles[editingPuzzleIndex].imageB}
+                  initialRegions={reviewPuzzles[editingPuzzleIndex].regions}
+                  onSave={(editedPuzzle) => handleSaveEditedPuzzle({
+                    ...editedPuzzle,
+                    title: reviewPuzzles[editingPuzzleIndex].title
+                  })}
+                  onPlay={() => {}} // Not needed in this context
+                  onAddToBatch={() => {}} // Not needed in this context
+                  batchCount={0}
+                  isModal={true}
+                />
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {processing && (
-        <div className="fixed inset-0 bg-white/80 flex items-center justify-center z-40">
-          <div className="flex flex-col items-center space-y-4">
-            <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
-            <p className="text-indigo-600 font-medium">{processingStatus || "Processing images..."}</p>
+        <div className="fixed inset-0 bg-white/90 flex items-center justify-center z-50 backdrop-blur-sm border-4 border-black m-4 rounded-3xl">
+          <div className="flex flex-col items-center space-y-6">
+            <div className="w-20 h-20 border-8 border-black border-t-[#FF6B6B] rounded-full animate-spin" />
+            <p className="text-black font-black text-2xl font-display uppercase tracking-wider">{processingStatus || "Processing..."}</p>
           </div>
         </div>
       )}

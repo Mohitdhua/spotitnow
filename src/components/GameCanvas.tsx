@@ -15,8 +15,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
   const [foundRegions, setFoundRegions] = useState<Set<string>>(new Set());
   const [missedRegions, setMissedRegions] = useState<Set<string>>(new Set());
   const [mistakes, setMistakes] = useState(0);
-  const [startTime] = useState(Date.now());
-  const [elapsedTime, setElapsedTime] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(90);
   const [clickFeedback, setClickFeedback] = useState<{ x: number, y: number, type: 'success' | 'error', id: number } | null>(null);
   const [gameOver, setGameOver] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -27,14 +26,34 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
   const imageRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Reset state when puzzle changes
+  useEffect(() => {
+    setFoundRegions(new Set());
+    setMissedRegions(new Set());
+    setMistakes(0);
+    setTimeLeft(90);
+    setGameOver(false);
+    setShowModal(false);
+    setIsFailed(false);
+    setClickFeedback(null);
+  }, [puzzle]);
+
   // Timer
   useEffect(() => {
     if (gameOver) return;
+    
+    if (timeLeft <= 0) {
+      setIsFailed(true);
+      setGameOver(true);
+      setShowModal(true);
+      return;
+    }
+
     const interval = setInterval(() => {
-      setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
+      setTimeLeft(prev => Math.max(0, prev - 1));
     }, 1000);
     return () => clearInterval(interval);
-  }, [startTime, gameOver]);
+  }, [timeLeft, gameOver]);
 
   // Check win condition
   useEffect(() => {
@@ -42,18 +61,31 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
     
     if (foundRegions.size === puzzle.regions.length && !gameOver) {
       setGameOver(true);
-      setShowModal(true);
+      
       confetti({
-        particleCount: 100,
-        spread: 70,
-        origin: { y: 0.6 }
+        particleCount: 150,
+        spread: 80,
+        origin: { y: 0.6 },
+        colors: ['#FFD700', '#FFA500', '#FF4500', '#00CED1', '#1E90FF']
       });
     }
-    return () => {
-      // Optional: clear confetti if component unmounts quickly
-      // confetti.reset(); 
-    };
   }, [foundRegions, puzzle.regions.length, gameOver, isFailed]);
+
+  // Handle navigation after win
+  useEffect(() => {
+    if (gameOver && !isFailed && foundRegions.size === puzzle.regions.length && !showModal) {
+      if (hasNextLevel && onNextLevel) {
+        // Auto advance after delay
+        const timer = setTimeout(() => {
+          onNextLevel();
+        }, 2000);
+        return () => clearTimeout(timer);
+      } else {
+        // Final level or single game
+        setShowModal(true);
+      }
+    }
+  }, [gameOver, isFailed, hasNextLevel, onNextLevel, foundRegions.size, puzzle.regions.length, showModal]);
 
   // Draw canvas
   useEffect(() => {
@@ -122,7 +154,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
       setMistakes(newMistakes);
       setClickFeedback({ x: e.clientX, y: e.clientY, type: 'error', id: Date.now() });
       
-      if (newMistakes >= 10) {
+      // Reduce time on mistake? Optional, but adds pressure. 
+      // For now, just keeping the mistake counter logic.
+      if (newMistakes >= 5) { // Reduced max mistakes to 5 for 90s game
         setIsFailed(true);
         setGameOver(true);
         setShowModal(true);
@@ -146,218 +180,230 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
   };
 
   return (
-    <div className="flex flex-col h-full w-full max-w-7xl mx-auto p-4 space-y-4">
-      {/* Header / HUD */}
-      <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-slate-200">
-        <div className="flex items-center space-x-4">
-          <button onClick={onExit} className="p-2 hover:bg-slate-100 rounded-full text-slate-600">
-            <ArrowLeft size={24} />
-          </button>
-          <div className="flex flex-col">
-            <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">Time</span>
-            <span className="text-xl font-mono font-bold text-slate-700">{formatTime(elapsedTime)}</span>
+    <div className="flex flex-col items-center justify-center min-h-screen bg-[#FFFDF5] p-4 lg:p-8 overflow-hidden">
+      {/* Game Container - 16:9 Aspect Ratio */}
+      <div className="relative w-full max-w-[1600px] aspect-video bg-white border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] rounded-2xl overflow-hidden flex flex-col">
+        
+        {/* HUD Header */}
+        <div className="h-20 bg-[#FFD93D] border-b-4 border-black flex items-center justify-between px-6 shrink-0 z-20">
+          <div className="flex items-center space-x-4">
+            <button 
+              onClick={onExit}
+              className="p-2 bg-white border-2 border-black rounded-lg hover:bg-black hover:text-white transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
+            >
+              <ArrowLeft size={24} strokeWidth={3} />
+            </button>
+            <div className="flex flex-col">
+              <h2 className="text-2xl font-black font-display uppercase leading-none tracking-tight text-black">
+                {puzzle.title || `Puzzle`}
+              </h2>
+              <span className="text-xs font-bold uppercase tracking-widest opacity-70 text-black">
+                Level {foundRegions.size} / {puzzle.regions.length} Found
+              </span>
+            </div>
+          </div>
+
+          {/* Timer & Score */}
+          <div className="flex items-center space-x-6">
+            <div className="flex flex-col items-end">
+              <div className="flex items-center space-x-2 bg-black px-4 py-1 rounded-full border-2 border-black">
+                <div className={`w-3 h-3 rounded-full ${timeLeft <= 10 ? 'bg-[#FF6B6B] animate-pulse' : 'bg-[#4ECDC4]'}`} />
+                <span className={`font-mono text-xl font-bold ${timeLeft <= 10 ? 'text-[#FF6B6B]' : 'text-white'}`}>
+                  {formatTime(timeLeft)}
+                </span>
+              </div>
+              <div className="w-32 h-3 bg-white border-2 border-black rounded-full mt-1 overflow-hidden shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+                <motion.div 
+                  className="h-full bg-[#FF6B6B]"
+                  initial={{ width: "100%" }}
+                  animate={{ width: `${(timeLeft / 90) * 100}%` }}
+                  transition={{ ease: "linear", duration: 1 }}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2 bg-white border-2 border-black px-4 py-2 rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+              <XCircle size={24} className="text-[#FF6B6B] fill-current stroke-black stroke-2" />
+              <span className="font-black text-2xl font-mono text-black">{mistakes}</span>
+            </div>
           </div>
         </div>
 
-        {gameOver && !showModal && (
-          <button 
-            onClick={() => setShowModal(true)}
-            className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold shadow-md animate-pulse"
-          >
-            Continue / Next
-          </button>
-        )}
+        {/* Game Area */}
+        <div className="flex-1 relative bg-[#4ECDC4] overflow-hidden flex items-center justify-center p-4">
+          {/* Background Pattern */}
+          <div className="absolute inset-0 opacity-10" 
+               style={{ backgroundImage: 'radial-gradient(circle, #000 2px, transparent 2px)', backgroundSize: '24px 24px' }} 
+          />
 
-        <div className="flex items-center space-x-8">
-          <div className="flex flex-col items-center">
-            <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">Found</span>
-            <span className="text-2xl font-bold text-indigo-600">
-              {foundRegions.size} <span className="text-slate-300 text-lg">/ {puzzle.regions.length}</span>
-            </span>
-          </div>
-          <div className="flex flex-col items-center">
-            <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">Mistakes</span>
-            <span className={`text-2xl font-bold ${mistakes > 0 ? 'text-red-500' : 'text-slate-700'}`}>
-              {mistakes}
-            </span>
+          <div className="relative w-full h-full flex gap-4 items-center justify-center" ref={containerRef}>
+            {/* Original Image */}
+            <div className="relative h-full flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] group">
+              <div className="absolute top-0 left-0 bg-black text-white px-4 py-1 font-black uppercase tracking-wider border-b-4 border-r-4 border-black rounded-br-xl z-10 text-sm">
+                Original
+              </div>
+              <img 
+                src={puzzle.imageA} 
+                alt="Original" 
+                className="w-full h-full object-contain pointer-events-none select-none bg-white"
+              />
+            </div>
+
+            {/* Interactive Image */}
+            <div 
+              className="relative h-full flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] cursor-crosshair group active:cursor-grabbing"
+              onClick={handleCanvasClick}
+            >
+              <div className="absolute top-0 left-0 bg-[#FF6B6B] text-black px-4 py-1 font-black uppercase tracking-wider border-b-4 border-r-4 border-black rounded-br-xl z-10 animate-pulse text-sm">
+                Spot Differences
+              </div>
+              
+              <div className="relative w-full h-full">
+                <img 
+                  ref={imageRef}
+                  src={puzzle.imageB} 
+                  alt="Find Differences" 
+                  className="w-full h-full object-contain select-none bg-white pointer-events-none"
+                  onLoad={() => {
+                    const img = imageRef.current;
+                    const canvas = canvasRef.current;
+                    if (img && canvas) {
+                      canvas.width = img.naturalWidth;
+                      canvas.height = img.naturalHeight;
+                    }
+                  }}
+                />
+                <canvas
+                  ref={canvasRef}
+                  className="absolute top-0 left-0 w-full h-full pointer-events-none"
+                />
+                
+                {/* Feedback Animations */}
+                <AnimatePresence>
+                  {clickFeedback && (
+                    <motion.div
+                      key={clickFeedback.id}
+                      initial={{ scale: 0, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 1.5, opacity: 0 }}
+                      className={`fixed w-16 h-16 -ml-8 -mt-8 rounded-full border-4 border-black flex items-center justify-center z-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] ${
+                        clickFeedback.type === 'success' 
+                          ? 'bg-[#4ECDC4] text-black' 
+                          : 'bg-[#FF6B6B] text-black'
+                      }`}
+                      style={{ 
+                        left: clickFeedback.x, 
+                        top: clickFeedback.y,
+                      }}
+                    >
+                      {clickFeedback.type === 'success' ? <CheckCircle size={32} strokeWidth={3} /> : <XCircle size={32} strokeWidth={3} />}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center space-x-2">
-          <button 
-            onClick={() => setZoom(z => Math.max(1, z - 0.2))}
-            className="p-2 hover:bg-slate-100 rounded-lg text-slate-600"
-            disabled={zoom <= 1}
-          >
-            <ZoomOut size={20} />
-          </button>
-          <span className="text-sm font-medium w-12 text-center">{Math.round(zoom * 100)}%</span>
-          <button 
-            onClick={() => setZoom(z => Math.min(3, z + 0.2))}
-            className="p-2 hover:bg-slate-100 rounded-lg text-slate-600"
-            disabled={zoom >= 3}
-          >
-            <ZoomIn size={20} />
-          </button>
+        {/* Progress Footer */}
+        <div className="h-16 bg-white border-t-4 border-black flex items-center justify-between px-6 shrink-0 z-20">
+          <div className="flex items-center space-x-4">
+            <span className="font-black uppercase text-sm tracking-wider text-black">Progress:</span>
+            <div className="flex space-x-2">
+              {puzzle.regions.map((region, idx) => (
+                <motion.div
+                  key={region.id}
+                  initial={false}
+                  animate={{
+                    scale: foundRegions.has(region.id) ? 1.2 : 1,
+                    backgroundColor: foundRegions.has(region.id) ? '#4ECDC4' : '#E2E8F0',
+                    borderColor: foundRegions.has(region.id) ? '#000' : '#CBD5E1'
+                  }}
+                  className={`w-4 h-4 rounded-full border-2 ${
+                    foundRegions.has(region.id) ? 'border-black' : 'border-slate-300'
+                  }`}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="font-black uppercase text-sm tracking-wider text-slate-400">
+            {foundRegions.size} / {puzzle.regions.length} Found
+          </div>
         </div>
       </div>
 
-      {/* Game Area */}
-      <div 
-        className="flex flex-col lg:flex-row gap-8 flex-1 min-h-0 justify-center items-start overflow-auto p-4 bg-slate-50 rounded-2xl border border-slate-200"
-        ref={containerRef}
-      >
-        {/* Original Image */}
-        <div className="relative rounded-xl overflow-hidden shadow-lg border border-slate-200 max-w-[45%] transition-transform duration-200" style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}>
-          <img src={puzzle.imageA} alt="Original" className="block max-h-[70vh] w-auto h-auto pointer-events-none" />
-        </div>
-
-        {/* Playable Image */}
-        <div 
-          className="relative rounded-xl overflow-hidden shadow-lg border border-slate-200 max-w-[45%] cursor-pointer transition-transform duration-200" 
-          style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}
-          onClick={handleCanvasClick}
-        >
-          <img 
-            ref={imageRef}
-            src={puzzle.imageB} 
-            alt="Find differences here" 
-            className="block max-h-[70vh] w-auto h-auto pointer-events-none select-none"
-            onLoad={() => {
-              const img = imageRef.current;
-              const canvas = canvasRef.current;
-              if (img && canvas) {
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-              }
-            }}
-          />
-          <canvas
-            ref={canvasRef}
-            className="absolute top-0 left-0 w-full h-full pointer-events-none"
-          />
-        </div>
-      </div>
-
-      {/* Click Feedback Overlay */}
+      {/* Level Complete / Game Over Modal */}
       <AnimatePresence>
-        {clickFeedback && (
-          <motion.div
-            key={clickFeedback.id}
-            initial={{ opacity: 1, scale: 0.5 }}
-            animate={{ opacity: 0, scale: 1.5 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.5 }}
-            style={{ 
-              position: 'fixed', 
-              left: clickFeedback.x - 20, 
-              top: clickFeedback.y - 20,
-              pointerEvents: 'none',
-              zIndex: 50
-            }}
-          >
-            {clickFeedback.type === 'success' ? (
-              <CheckCircle size={40} className="text-green-500 fill-green-100" />
-            ) : (
-              <XCircle size={40} className="text-red-500 fill-red-100" />
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Game Over Modal */}
-      <AnimatePresence>
-        {gameOver && showModal && (
-          <motion.div
+        {showModal && (
+          <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm"
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm p-4"
           >
-            <motion.div
-              initial={{ scale: 0.9, y: 20 }}
-              animate={{ scale: 1, y: 0 }}
-              className="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full text-center space-y-6"
+            <motion.div 
+              initial={{ scale: 0.8, rotate: -2 }}
+              animate={{ scale: 1, rotate: 0 }}
+              className={`p-12 rounded-3xl border-8 border-black shadow-[16px_16px_0px_0px_rgba(255,255,255,1)] text-center max-w-lg w-full relative overflow-hidden ${
+                isFailed ? 'bg-[#FF6B6B]' : 'bg-[#FFD93D]'
+              }`}
             >
-              {isFailed ? (
-                <>
-                  <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto text-red-600">
-                    <XCircle size={48} />
-                  </div>
-                  <div>
-                    <h2 className="text-3xl font-bold text-slate-900">Too Many Mistakes</h2>
-                    <p className="text-slate-500 mt-2">You reached 10 mistakes. The differences have been revealed.</p>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto text-green-600">
-                    <CheckCircle size={48} />
-                  </div>
-                  <div>
-                    <h2 className="text-3xl font-bold text-slate-900">Puzzle Solved!</h2>
-                    <p className="text-slate-500 mt-2">You found all {puzzle.regions.length} differences.</p>
-                  </div>
-                </>
-              )}
+              <div className="absolute top-0 left-0 w-full h-4 bg-white/20 -skew-y-2 transform origin-top-left" />
               
-              <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl">
-                <div className="text-center">
-                  <div className="text-sm text-slate-400 uppercase font-bold">Time</div>
-                  <div className="text-xl font-mono font-bold text-slate-700">{formatTime(elapsedTime)}</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-sm text-slate-400 uppercase font-bold">Mistakes</div>
-                  <div className={`text-xl font-mono font-bold ${mistakes > 0 ? 'text-red-500' : 'text-slate-700'}`}>{mistakes}</div>
-                </div>
-              </div>
-
-              {isFailed && (
-                <button
-                  onClick={() => setShowModal(false)}
-                  className="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors mb-2"
-                >
-                  Review Differences
-                </button>
-              )}
-
-              <div className="flex space-x-3">
-                <button 
-                  onClick={onExit}
-                  className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors"
-                >
-                  {hasNextLevel ? 'Exit Batch' : 'Back to Menu'}
-                </button>
-                
-                {hasNextLevel && onNextLevel ? (
+              <motion.div 
+                animate={!isFailed ? { rotate: [0, 10, -10, 0] } : {}}
+                transition={{ repeat: Infinity, duration: 2 }}
+                className="inline-block mb-6 bg-white p-6 rounded-full border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+              >
+                {isFailed ? (
+                  <XCircle size={64} className="text-[#FF6B6B] fill-current stroke-black stroke-2" />
+                ) : (
+                  <CheckCircle size={64} className="text-[#4ECDC4] fill-current stroke-black stroke-2" />
+                )}
+              </motion.div>
+              
+              <h2 className="text-5xl font-black font-display uppercase mb-2 text-black leading-none tracking-tight">
+                {isFailed ? 'Game Over!' : 'Level Complete!'}
+              </h2>
+              <p className="text-xl font-bold text-black/80 mb-8 font-mono">
+                {isFailed ? 'Better luck next time!' : `You found all differences!`}
+              </p>
+              
+              <div className="flex flex-col space-y-4">
+                {hasNextLevel && !isFailed ? (
                   <button 
                     onClick={() => {
-                      setGameOver(false);
-                      setIsFailed(false);
-                      setFoundRegions(new Set());
-                      setMissedRegions(new Set());
-                      setMistakes(0);
-                      onNextLevel();
+                      if (onNextLevel) onNextLevel();
                     }}
-                    className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center space-x-2"
+                    className="w-full py-4 bg-black text-white text-xl font-black uppercase tracking-wider rounded-xl hover:scale-105 transition-transform shadow-[8px_8px_0px_0px_rgba(255,255,255,1)] flex items-center justify-center space-x-3"
                   >
-                    <Play size={18} />
                     <span>Next Level</span>
+                    <Play size={24} strokeWidth={3} />
                   </button>
                 ) : (
-                  <button 
-                    onClick={() => {
-                      setGameOver(false);
-                      setIsFailed(false);
-                      setFoundRegions(new Set());
-                      setMissedRegions(new Set());
-                      setMistakes(0);
-                      onExit(); 
-                    }}
-                    className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center space-x-2"
-                  >
-                    <RotateCcw size={18} />
-                    <span>{isFailed ? 'Try Again' : 'Play Again'}</span>
-                  </button>
+                  <div className="flex space-x-4">
+                    <button 
+                      onClick={onExit}
+                      className="flex-1 py-4 bg-white text-black text-lg font-black uppercase tracking-wider rounded-xl hover:bg-slate-50 transition-colors border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+                    >
+                      Menu
+                    </button>
+                    <button 
+                      onClick={() => {
+                        // Reset logic handled by parent or effect
+                        setGameOver(false);
+                        setIsFailed(false);
+                        setFoundRegions(new Set());
+                        setMissedRegions(new Set());
+                        setMistakes(0);
+                        setTimeLeft(90);
+                        setShowModal(false);
+                      }}
+                      className="flex-1 py-4 bg-black text-white text-lg font-black uppercase tracking-wider rounded-xl hover:bg-slate-900 transition-colors border-4 border-black shadow-[4px_4px_0px_0px_rgba(255,255,255,1)]"
+                    >
+                      Retry
+                    </button>
+                  </div>
                 )}
               </div>
             </motion.div>

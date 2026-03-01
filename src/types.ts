@@ -24,4 +24,14 @@ export interface PuzzleSet {
   version: number;
 }
 
-export type GameMode = 'upload' | 'edit' | 'play';
+export interface VideoSettings {
+  aspectRatio: '16:9' | '9:16' | '1:1' | '4:3';
+  showDuration: number; // Seconds to show the puzzle before revealing
+  revealDuration: number; // Seconds to show the revealed differences
+  revealStyle: 'box' | 'circle' | 'highlight';
+  revealColor: string;
+  transitionStyle: 'fade' | 'slide' | 'none';
+  transitionDuration: number; // Seconds
+}
+
+export type GameMode = 'upload' | 'edit' | 'play' | 'video_setup' | 'video_play';
