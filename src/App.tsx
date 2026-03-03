@@ -5,13 +5,16 @@
 
 import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Plus, Upload, Gamepad2, Download, Layers, PlaySquare, Video } from 'lucide-react';
+import { Plus, Upload, Gamepad2, Download, Layers, PlaySquare, Video, LoaderCircle } from 'lucide-react';
 import { ImageUploader } from './components/ImageUploader';
 import { EditorCanvas } from './components/EditorCanvas';
 import { GameCanvas } from './components/GameCanvas';
 import { VideoSettingsPanel } from './components/VideoSettingsPanel';
 import { VideoPlayer } from './components/VideoPlayer'; // Assuming you created this file
+import { OverlayVideoEditor } from './components/OverlayVideoEditor';
 import { Puzzle, PuzzleSet, GameMode, Region, VideoSettings } from './types';
+import { cancelVideoExport, exportVideoWithWebCodecs } from './services/videoExport';
+import { cancelOverlayBatchExport, exportOverlayBatchWithWebCodecs } from './services/overlayVideoExport';
 
 export default function App() {
   const [mode, setMode] = useState<GameMode | 'home'>('home');
@@ -19,16 +22,32 @@ export default function App() {
   const [batch, setBatch] = useState<Puzzle[]>([]);
   const [playIndex, setPlayIndex] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isExportingVideo, setIsExportingVideo] = useState(false);
+  const [videoExportProgress, setVideoExportProgress] = useState(0);
+  const [videoExportStatus, setVideoExportStatus] = useState('');
+  const [isOverlayExporting, setIsOverlayExporting] = useState(false);
+  const [overlayExportProgress, setOverlayExportProgress] = useState(0);
+  const [overlayExportStatus, setOverlayExportStatus] = useState('');
   
   // Default Video Settings
   const [videoSettings, setVideoSettings] = useState<VideoSettings>({
     aspectRatio: '16:9',
+    visualStyle: 'classic',
     showDuration: 5,
-    revealDuration: 3,
+    revealDuration: 6,
+    sequentialRevealStep: 1,
+    blinkSpeed: 0.8,
+    circleThickness: 4,
     revealStyle: 'box',
+    revealVariant: 'box_glow',
     revealColor: '#FF6B6B',
+    outlineColor: '#000000',
+    outlineThickness: 2,
     transitionStyle: 'fade',
-    transitionDuration: 1
+    transitionDuration: 1,
+    exportResolution: '1080p',
+    exportBitrateMbps: 8,
+    exportCodec: 'h264'
   });
 
   const handleImagesSelected = (imageA: string, imageB: string, regions: Region[] = []) => {
@@ -168,6 +187,163 @@ export default function App() {
     setPlayIndex(0);
   };
 
+  const handleExportVideo = useCallback(async () => {
+    if (batch.length === 0) {
+      alert('Add or load at least one puzzle before exporting.');
+      return;
+    }
+    if (isOverlayExporting) {
+      alert('Another export is already running. Please wait or cancel it first.');
+      return;
+    }
+    if (isExportingVideo) return;
+
+    try {
+      setIsExportingVideo(true);
+      setVideoExportProgress(0);
+      setVideoExportStatus('Preparing export...');
+
+      await exportVideoWithWebCodecs({
+        puzzles: batch,
+        settings: videoSettings,
+        onProgress: (progress, label) => {
+          setVideoExportProgress(progress);
+          if (label) setVideoExportStatus(label);
+        }
+      });
+
+      setVideoExportProgress(1);
+      setVideoExportStatus('Export complete');
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Export failed. Please try different codec/resolution settings.';
+      if (message === 'Export canceled') {
+        setVideoExportStatus('Export canceled');
+        setVideoExportProgress(0);
+      } else {
+        setVideoExportStatus('');
+        alert(message);
+      }
+    } finally {
+      setIsExportingVideo(false);
+    }
+  }, [batch, videoSettings, isExportingVideo, isOverlayExporting]);
+
+  const handleCancelVideoExport = useCallback(() => {
+    cancelVideoExport();
+  }, []);
+
+  const handleOverlayBatchExport = useCallback(
+    async (payload: {
+      base: {
+        mode: 'video' | 'photo' | 'color';
+        color: string;
+        aspectRatio: number;
+        durationSeconds: number;
+        videoFile?: File;
+        photoFile?: File;
+      };
+      batchPhotos: Array<{
+        id: string;
+        name: string;
+        kind: 'image';
+        file: File;
+        transform: { x: number; y: number; width: number; height: number };
+        crop: { x: number; y: number; width: number; height: number };
+        background: { enabled: boolean; color: string };
+        chromaKey: { enabled: boolean; color: string; similarity: number; smoothness: number };
+        timeline: { start: number; end: number };
+      }>;
+      overlays: Array<{
+        id: string;
+        name: string;
+        kind: 'image' | 'video';
+        file: File;
+        transform: { x: number; y: number; width: number; height: number };
+        crop: { x: number; y: number; width: number; height: number };
+        background: { enabled: boolean; color: string };
+        chromaKey: { enabled: boolean; color: string; similarity: number; smoothness: number };
+        timeline: { start: number; end: number };
+      }>;
+    }) => {
+      if (isExportingVideo) {
+        alert('Another export is already running. Please wait or cancel it first.');
+        return;
+      }
+      if (isOverlayExporting) return;
+
+      try {
+        setIsOverlayExporting(true);
+        setOverlayExportProgress(0);
+        setOverlayExportStatus('Preparing batch export...');
+
+        await exportOverlayBatchWithWebCodecs({
+          base: payload.base,
+          batchPhotos: payload.batchPhotos,
+          overlays: payload.overlays,
+          settings: {
+            exportResolution: videoSettings.exportResolution,
+            exportBitrateMbps: videoSettings.exportBitrateMbps,
+            exportCodec: videoSettings.exportCodec
+          },
+          onProgress: (progress, status) => {
+            setOverlayExportProgress(progress);
+            if (status) setOverlayExportStatus(status);
+          }
+        });
+
+        setOverlayExportProgress(1);
+        setOverlayExportStatus('Batch export complete');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Overlay batch export failed.';
+        if (message === 'Export canceled') {
+          setOverlayExportStatus('Export canceled');
+          setOverlayExportProgress(0);
+        } else {
+          setOverlayExportStatus('');
+          alert(message);
+        }
+      } finally {
+        setIsOverlayExporting(false);
+      }
+    },
+    [
+      isOverlayExporting,
+      isExportingVideo,
+      videoSettings.exportResolution,
+      videoSettings.exportBitrateMbps,
+      videoSettings.exportCodec
+    ]
+  );
+
+  const handleCancelOverlayExport = useCallback(() => {
+    cancelOverlayBatchExport();
+  }, []);
+
+  const handleCancelActiveExport = useCallback(() => {
+    if (isOverlayExporting) {
+      handleCancelOverlayExport();
+      return;
+    }
+    if (isExportingVideo) {
+      handleCancelVideoExport();
+    }
+  }, [isOverlayExporting, isExportingVideo, handleCancelOverlayExport, handleCancelVideoExport]);
+
+  const isAnyExporting = isExportingVideo || isOverlayExporting;
+  const activeExportProgress = isOverlayExporting ? overlayExportProgress : videoExportProgress;
+  const activeExportLabel = isOverlayExporting
+    ? overlayExportStatus || 'Exporting Batch Videos'
+    : videoExportStatus || 'Exporting Video';
+  const activeExportFillColor = isOverlayExporting ? '#10B981' : '#6366F1';
+
+  const handleOverlayEditorSettingsChange = (patch: Partial<Pick<VideoSettings, 'exportResolution' | 'exportBitrateMbps' | 'exportCodec'>>) => {
+    setVideoSettings((current) => ({
+      ...current,
+      ...patch
+    }));
+  };
+
   return (
     <div className="min-h-screen bg-[#FFFDF5] text-slate-900 font-sans selection:bg-black selection:text-white">
       <header className="bg-white border-b-4 border-black sticky top-0 z-40">
@@ -183,6 +359,34 @@ export default function App() {
           </div>
           
           <div className="flex items-center space-x-4">
+            {isAnyExporting && (
+              <div className="flex items-center space-x-4">
+                <div className="min-w-[280px] px-4 py-2 bg-white border-2 border-black rounded-xl shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <LoaderCircle size={16} className="animate-spin text-indigo-600" />
+                      <span className="text-xs font-black uppercase tracking-wide">{activeExportLabel}</span>
+                    </div>
+                    <span className="text-sm font-black tabular-nums">{Math.round(activeExportProgress * 100)}%</span>
+                  </div>
+                  <div className="mt-1 h-2 border border-black rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className="h-full transition-all"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, activeExportProgress * 100))}%`,
+                        backgroundColor: activeExportFillColor
+                      }}
+                    />
+                  </div>
+                </div>
+                <button
+                  onClick={handleCancelActiveExport}
+                  className="px-4 py-2 bg-white hover:bg-red-50 text-black rounded-lg text-sm font-bold border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all"
+                >
+                  EXIT
+                </button>
+              </div>
+            )}
             {batch.length > 0 && mode === 'upload' && (
               <div className="flex items-center space-x-2 px-4 py-2 bg-[#A7F3D0] text-black rounded-lg text-sm font-bold border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
                 <Layers size={18} strokeWidth={2.5} />
@@ -328,6 +532,28 @@ export default function App() {
                   />
                 </button>
               </div>
+
+              <div className="w-full max-w-4xl px-4">
+                <button
+                  onClick={() => setMode('overlay_editor')}
+                  className="w-full group relative flex items-center justify-between p-6 bg-[#FDE68A] rounded-xl border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all cursor-pointer overflow-hidden"
+                >
+                  <div className="flex items-center space-x-6">
+                    <div className="w-16 h-16 bg-black text-[#FDE68A] rounded-xl flex items-center justify-center border-4 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,0.2)]">
+                      <PlaySquare size={32} strokeWidth={3} />
+                    </div>
+                    <div className="text-left">
+                      <h3 className="text-2xl font-black text-black font-display uppercase tracking-tight">
+                        Overlay Editor
+                      </h3>
+                      <p className="text-slate-700 font-bold">Batch photos + base video = 1 export per photo</p>
+                    </div>
+                  </div>
+                  <div className="bg-black text-white px-6 py-2 rounded-lg font-black uppercase tracking-wider transform group-hover:scale-105 transition-transform">
+                    Open Editor
+                  </div>
+                </button>
+              </div>
             </motion.div>
           )}
 
@@ -398,6 +624,28 @@ export default function App() {
             </motion.div>
           )}
 
+          {mode === 'overlay_editor' && (
+            <motion.div
+              key="overlay_editor"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="h-full"
+            >
+              <OverlayVideoEditor
+                settings={{
+                  exportResolution: videoSettings.exportResolution,
+                  exportBitrateMbps: videoSettings.exportBitrateMbps,
+                  exportCodec: videoSettings.exportCodec
+                }}
+                onSettingsChange={handleOverlayEditorSettingsChange}
+                onExport={handleOverlayBatchExport}
+                isExporting={isOverlayExporting}
+                onBack={() => setMode('home')}
+              />
+            </motion.div>
+          )}
+
           {mode === 'video_setup' && (
             <motion.div
               key="video_setup"
@@ -409,6 +657,10 @@ export default function App() {
               <VideoSettingsPanel
                 settings={videoSettings}
                 onSettingsChange={setVideoSettings}
+                onExport={handleExportVideo}
+                isExporting={isExportingVideo}
+                exportProgress={videoExportProgress}
+                exportStatus={videoExportStatus}
                 onStart={() => setMode('video_play')}
                 onBack={() => setMode('home')}
               />
