@@ -1,43 +1,41 @@
 import JSZip from 'jszip';
 import { Puzzle, Region, VideoSettings } from '../types';
+import { canvasToDataUrl } from './canvasRuntime';
 import {
   SplitterDefaults,
   type SplitterSharedRegion,
   type SuperImageExportMode
 } from './appSettings';
 import {
-  detectDifferencesClientSide,
   detectDifferencesClientSideCanvases,
   type DifferenceDetectionOptions,
   type ProcessedPuzzleCanvasData
 } from './imageProcessing';
 import { extractFrames, extractFramesStream, type ExtractFramesSummary, type ParsedTimestamp } from './frameExtractor';
 import {
-  dataUrlToPngBlob,
-  readFileAsDataUrl,
   splitCombinedBlobFromSelectionToCanvas,
   splitCombinedBlobSmartToCanvas,
-  splitCombinedFileSmart,
-  splitCombinedImageFromSelection
+  splitCombinedFileSmartToCanvas
 } from './imageSplitter';
 import {
   removeWatermark,
-  removeWatermarkDataUrl,
   removeWatermarkWithRegions,
   scaleWatermarkRegions,
   type WatermarkSelectionPreset
 } from './watermarkRemoval';
 import type {
-  SuperImageProcessorResultPayload,
-  SuperImageProcessorWorkerRequest,
-  SuperImageProcessorWorkerResponse
+  SuperImageProcessorResultPayload
 } from './superImageProcessorProtocol';
 import type {
   SuperImageExportWorkerDoneMessage,
   SuperImageExportWorkerRequest,
   SuperImageExportWorkerResponse
 } from './superImageExportProtocol';
-import { renderVideoWithWebCodecs } from './videoExport';
+import { runBatchExportTasks } from './batchExportScheduler';
+import { cancelVideoExport, renderVideoWithWebCodecs } from './videoExport';
+import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
+import { acquireSuperImageProcessingPool, disposeSuperImageProcessingPool, releaseSuperImageProcessingPool } from './superImageProcessingPool';
+import type { BinaryRenderablePuzzle } from './videoRenderSource';
 
 export type SuperProcessingStage = 'extracting' | 'processing' | 'cleaning' | 'packaging' | 'exporting';
 
@@ -75,6 +73,12 @@ export interface SuperImageExportResult extends SuperBaseResult {
 }
 
 let activeSuperImageExportWorker: Worker | null = null;
+let activeSuperImageExportController: { cancel: () => void } | null = null;
+let activeSuperExportController: { cancel: () => void } | null = null;
+
+const SUPER_VIDEO_COORDINATOR_ID = 'super-video-coordinator';
+const SUPER_IMAGE_COORDINATOR_ID = 'super-image-coordinator';
+const SUPER_IMAGE_POOL_ID = 'super-image-processing-pool';
 
 interface SuperWatermarkOptions {
   enabled: boolean;
@@ -107,13 +111,16 @@ interface RunFrameSuperImageExportOptions {
   onProgress?: (progress: SuperExportProgress) => void;
 }
 
-interface CollectedExactPuzzleResult {
+interface CollectedExactPuzzleResult<TPuzzle> {
   extractionSummary: ExtractFramesSummary;
   extractedFrameCount: number;
   processedFrameCount: number;
-  validPuzzles: Puzzle[];
+  validPuzzles: TPuzzle[];
   warnings: string[];
 }
+
+type CollectedExactCanvasPuzzleResult = CollectedExactPuzzleResult<CanvasPuzzle>;
+type CollectedExactBinaryPuzzleResult = CollectedExactPuzzleResult<BinaryRenderablePuzzle>;
 
 interface CanvasSplitResult {
   baseName: string;
@@ -160,6 +167,32 @@ const PROCESSING_PROGRESS_END = 0.72;
 const PACKAGING_PROGRESS_START = PROCESSING_PROGRESS_END;
 const PACKAGING_PROGRESS_END = 0.92;
 const CLEANING_PROGRESS_END = 0.84;
+const SUPER_IMAGE_HIGH_WATERMARK_BYTES = 96 * 1024 * 1024;
+const SUPER_IMAGE_LOW_WATERMARK_BYTES = 48 * 1024 * 1024;
+
+const createSuperImageExportJob = () =>
+  import.meta.env.DEV ? mediaDiagnosticsStore.startJob('super_image_export', 'Super Image Export') : null;
+const createSuperExportJob = () =>
+  import.meta.env.DEV ? mediaDiagnosticsStore.startJob('super_video_export', 'Super Video Export') : null;
+const createSuperImageExportCancellationError = () => new Error('Super Image export canceled.');
+const isSuperImageExportCancellationError = (error: unknown) =>
+  error instanceof Error && error.message === 'Super Image export canceled.';
+const createSuperExportCancellationError = () => new Error('Super Export canceled.');
+const isSuperExportCancellationError = (error: unknown) =>
+  error instanceof Error && error.message === 'Super Export canceled.';
+const handleSuperImageWorkerDiagnostics = (
+  job: MediaJobController | null,
+  message: SuperImageExportWorkerResponse
+) => {
+  if (!job) return;
+  if (message.type === 'task-event') {
+    job.handleTaskEvent(message.event);
+    return;
+  }
+  if (message.type === 'stats') {
+    job.updateWorkerStats(message.stats);
+  }
+};
 
 const sanitizePrefix = (value: string) => {
   const cleaned = value.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '').replace(/\s+/g, '');
@@ -226,161 +259,6 @@ const supportsSuperImageProcessorPool = () =>
   typeof OffscreenCanvas !== 'undefined' &&
   typeof createImageBitmap === 'function';
 
-interface SuperImageProcessorPoolTask {
-  blob: Blob;
-  filename: string;
-  sharedRegion?: SplitterSharedRegion | null;
-  watermarkEnabled: boolean;
-  watermarkSelectionPreset?: WatermarkSelectionPreset | null;
-}
-
-interface SuperImageProcessorPool {
-  run(task: SuperImageProcessorPoolTask): Promise<SuperImageProcessorResultPayload>;
-  destroy(): void;
-}
-
-const createSuperImageProcessorPool = (size: number): SuperImageProcessorPool => {
-  const safeSize = clamp(Math.floor(size) || 1, 1, 4);
-  const workers = Array.from(
-    { length: safeSize },
-    () =>
-      new Worker(new URL('../workers/superImageProcessor.worker.ts', import.meta.url), {
-        type: 'module'
-      })
-  );
-  const idleWorkers = [...workers];
-  const taskQueue: Array<{
-    id: number;
-    workerRequest: SuperImageProcessorWorkerRequest;
-    transferables: Transferable[];
-    resolve: (payload: SuperImageProcessorResultPayload) => void;
-    reject: (error: Error) => void;
-  }> = [];
-  const activeTasks = new Map<
-    number,
-    {
-      worker: Worker;
-      resolve: (payload: SuperImageProcessorResultPayload) => void;
-      reject: (error: Error) => void;
-    }
-  >();
-  let nextTaskId = 1;
-  let destroyed = false;
-
-  const failAll = (error: Error) => {
-    if (destroyed) {
-      return;
-    }
-
-    destroyed = true;
-    workers.forEach((worker) => worker.terminate());
-    idleWorkers.length = 0;
-
-    for (const task of taskQueue.splice(0)) {
-      task.reject(error);
-    }
-
-    activeTasks.forEach((task) => task.reject(error));
-    activeTasks.clear();
-  };
-
-  const dispatch = () => {
-    if (destroyed) {
-      return;
-    }
-
-    while (idleWorkers.length > 0 && taskQueue.length > 0) {
-      const worker = idleWorkers.shift();
-      const task = taskQueue.shift();
-      if (!worker || !task) {
-        return;
-      }
-
-      activeTasks.set(task.id, {
-        worker,
-        resolve: task.resolve,
-        reject: task.reject
-      });
-      worker.postMessage(task.workerRequest, task.transferables);
-    }
-  };
-
-  workers.forEach((worker) => {
-    worker.onmessage = (event: MessageEvent<SuperImageProcessorWorkerResponse>) => {
-      if (destroyed) {
-        return;
-      }
-
-      const message = event.data;
-      const activeTask = activeTasks.get(message.id);
-      if (!activeTask) {
-        return;
-      }
-
-      activeTasks.delete(message.id);
-      idleWorkers.push(worker);
-
-      if (message.type === 'result') {
-        activeTask.resolve(message.payload);
-        dispatch();
-        return;
-      }
-
-      failAll(new Error(message.message));
-    };
-
-    worker.onerror = (event) => {
-      const detail = event.message ? ` ${event.message}` : '';
-      failAll(new Error(`Super image processor worker crashed.${detail}`));
-    };
-  });
-
-  return {
-    run: async ({ blob, filename, sharedRegion, watermarkEnabled, watermarkSelectionPreset }) => {
-      if (destroyed) {
-        throw new Error('Super image processor pool is no longer available.');
-      }
-
-      const frameBuffer = await blob.arrayBuffer();
-      return await new Promise<SuperImageProcessorResultPayload>((resolve, reject) => {
-        const id = nextTaskId;
-        nextTaskId += 1;
-
-        taskQueue.push({
-          id,
-          workerRequest: {
-            type: 'process',
-            id,
-            payload: {
-              frameBuffer,
-              mimeType: blob.type || 'image/png',
-              filename,
-              sharedRegion,
-              watermarkEnabled,
-              watermarkSelectionPreset
-            }
-          },
-          transferables: [frameBuffer],
-          resolve,
-          reject
-        });
-        dispatch();
-      });
-    },
-    destroy: () => {
-      if (destroyed) {
-        return;
-      }
-
-      destroyed = true;
-      workers.forEach((worker) => worker.terminate());
-      idleWorkers.length = 0;
-      taskQueue.length = 0;
-      activeTasks.clear();
-    }
-  };
-};
-
 const sanitizeRegions = (regions: Region[]): Region[] =>
   regions.filter((region) => {
     if (region.width <= 0 || region.height <= 0) return false;
@@ -395,7 +273,7 @@ const stripExtension = (filename: string) => filename.replace(/\.[^/.]+$/, '');
 const mapProgress = (ratio: number, start: number, end: number) =>
   start + clamp(ratio, 0, 1) * (end - start);
 
-const buildBaseResult = (processed: CollectedExactPuzzleResult): SuperBaseResult => ({
+const buildBaseResult = <TPuzzle,>(processed: CollectedExactPuzzleResult<TPuzzle>): SuperBaseResult => ({
   extractionSummary: processed.extractionSummary,
   extractedFrameCount: processed.extractedFrameCount,
   processedFrameCount: processed.processedFrameCount,
@@ -403,48 +281,6 @@ const buildBaseResult = (processed: CollectedExactPuzzleResult): SuperBaseResult
   discardedFrameCount: Math.max(0, processed.processedFrameCount - processed.validPuzzles.length),
   warnings: processed.warnings
 });
-
-const applyWatermarkRemovalToPuzzle = async (
-  puzzle: Puzzle,
-  selectionPreset?: WatermarkSelectionPreset | null
-): Promise<{ imageA: string; imageB: string; applied: boolean }> => {
-  if (selectionPreset) {
-    const { width, height } = await readImageSize(puzzle.imageA);
-    const scaledRegionsA = scaleWatermarkRegions(
-      selectionPreset.regionsA,
-      selectionPreset.sourceWidth,
-      selectionPreset.sourceHeight,
-      width,
-      height
-    );
-    const scaledRegionsB = scaleWatermarkRegions(
-      selectionPreset.regionsB,
-      selectionPreset.sourceWidth,
-      selectionPreset.sourceHeight,
-      width,
-      height
-    );
-    const cleaned = await removeWatermarkWithRegions(
-      puzzle.imageA,
-      puzzle.imageB,
-      scaledRegionsA,
-      scaledRegionsB
-    );
-
-    return {
-      imageA: cleaned.imageA.toDataURL('image/png'),
-      imageB: cleaned.imageB.toDataURL('image/png'),
-      applied: true
-    };
-  }
-
-  const cleaned = await removeWatermarkDataUrl(puzzle.imageA, puzzle.imageB);
-  return {
-    imageA: cleaned.imageAData,
-    imageB: cleaned.imageBData,
-    applied: true
-  };
-};
 
 const shuffleArray = <T,>(items: T[]) => {
   const next = [...items];
@@ -502,12 +338,6 @@ const buildSuperImageZipFilename = (splitterDefaults: SplitterDefaults, puzzleCo
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   return `${prefix}-super-image-${puzzleCount}puzzle${puzzleCount === 1 ? '' : 's'}-${stamp}.zip`;
 };
-
-const createFrameFile = (blob: Blob, filename: string) =>
-  new File([blob], filename, {
-    type: blob.type || 'image/png',
-    lastModified: Date.now()
-  });
 
 const readBlobImageSize = async (blob: Blob): Promise<{ width: number; height: number }> => {
   if (typeof createImageBitmap === 'function') {
@@ -608,27 +438,6 @@ const clampRegionSelection = (
   };
 };
 
-const resolveFrameSplit = async (frameFile: File, sharedRegion?: SplitterSharedRegion | null) => {
-  if (!sharedRegion) {
-    return splitCombinedFileSmart(frameFile);
-  }
-
-  try {
-    const sourceUrl = await readFileAsDataUrl(frameFile);
-    const { width, height } = await readImageSize(sourceUrl);
-    const splitSelection = clampRegionSelection(sharedRegion, width, height);
-    const split = await splitCombinedImageFromSelection(sourceUrl, splitSelection);
-
-    return {
-      baseName: stripExtension(frameFile.name),
-      imageA: split.imageA,
-      imageB: split.imageB
-    };
-  } catch {
-    return splitCombinedFileSmart(frameFile);
-  }
-};
-
 const resolveFrameSplitToCanvases = async (
   frameBlob: Blob,
   frameFilename: string,
@@ -655,43 +464,17 @@ const resolveFrameSplitToCanvases = async (
       imageB: split.imageB
     };
   } catch {
-    const split = await splitCombinedBlobSmartToCanvas(frameBlob);
+    const frameFile = new File([frameBlob], frameFilename, {
+      type: frameBlob.type || 'image/png',
+      lastModified: Date.now()
+    });
+    const split = await splitCombinedFileSmartToCanvas(frameFile);
     return {
       baseName,
       imageA: split.imageA,
       imageB: split.imageB
     };
   }
-};
-
-const processExactThreeDifferencePuzzle = async (
-  imageA: string,
-  imageB: string,
-  title: string
-): Promise<Puzzle | null> => {
-  const defaultResult = await detectDifferencesClientSide(imageA, imageB, splitAutoDefault);
-  const defaultRegions = sanitizeRegions(defaultResult.regions);
-  if (defaultRegions.length === 3) {
-    return {
-      imageA: defaultResult.imageA,
-      imageB: defaultResult.imageB,
-      regions: defaultRegions,
-      title
-    };
-  }
-
-  const sensitiveResult = await detectDifferencesClientSide(imageA, imageB, splitAutoSensitive);
-  const sensitiveRegions = sanitizeRegions(sensitiveResult.regions);
-  if (sensitiveRegions.length === 3) {
-    return {
-      imageA: sensitiveResult.imageA,
-      imageB: sensitiveResult.imageB,
-      regions: sensitiveRegions,
-      title
-    };
-  }
-
-  return null;
 };
 
 const processExactThreeDifferencePuzzleCanvases = async (
@@ -768,6 +551,28 @@ const applyWatermarkRemovalToCanvasPuzzle = async (
   };
 };
 
+const releaseCanvasPuzzle = (puzzle: CanvasPuzzle | null | undefined) => {
+  if (!puzzle) return;
+  releaseCanvases(puzzle.imageA, puzzle.imageB);
+};
+
+const convertCanvasPuzzleToCompatibilityPuzzle = async (
+  puzzle: CanvasPuzzle
+): Promise<Puzzle> => {
+  // Compatibility boundary: the editor/video pipeline still expects string-backed puzzle images.
+  const [imageA, imageB] = await Promise.all([
+    canvasToDataUrl(puzzle.imageA, 'image/png'),
+    canvasToDataUrl(puzzle.imageB, 'image/png')
+  ]);
+
+  return {
+    imageA,
+    imageB,
+    regions: puzzle.regions,
+    title: puzzle.title
+  };
+};
+
 const collectExactThreeDifferencePuzzles = async ({
   videos,
   timestamps,
@@ -782,7 +587,7 @@ const collectExactThreeDifferencePuzzles = async ({
   jpegQuality: number;
   sharedRegion?: SplitterSharedRegion | null;
   onProgress?: (progress: SuperExportProgress) => void;
-}): Promise<CollectedExactPuzzleResult> => {
+}): Promise<CollectedExactCanvasPuzzleResult> => {
   const extracted = await extractFrames({
     videos,
     timestamps,
@@ -793,35 +598,40 @@ const collectExactThreeDifferencePuzzles = async ({
       onProgress?.({
         stage: 'extracting',
         progress: mapProgress(ratio, 0, 0.3),
-        label: progress.label
+        label: `Extracting frame ${progress.completed}/${progress.total}`
       });
     }
   });
 
   const warnings = [...extracted.summary.warnings];
-  const validPuzzles: Puzzle[] = [];
+  const validPuzzles: CanvasPuzzle[] = [];
 
   for (let index = 0; index < extracted.files.length; index += 1) {
     const item = extracted.files[index];
+    let split: CanvasSplitResult | null = null;
+    let puzzle: CanvasPuzzle | null = null;
     onProgress?.({
       stage: 'processing',
       progress: mapProgress((index + 1) / Math.max(1, extracted.files.length), 0.3, PROCESSING_PROGRESS_END),
-      label: `Processing frame ${index + 1}/${extracted.files.length}: ${item.filename}`
+      label: `Processing frame ${index + 1}/${extracted.files.length}`
     });
 
     try {
-      const frameFile = createFrameFile(item.blob, item.filename);
-      const split = await resolveFrameSplit(frameFile, sharedRegion);
+      split = await resolveFrameSplitToCanvases(item.blob, item.filename, sharedRegion);
       const title = stripExtension(split.baseName || item.filename);
-      const puzzle = await processExactThreeDifferencePuzzle(split.imageA, split.imageB, title);
+      puzzle = await processExactThreeDifferencePuzzleCanvases(split.imageA, split.imageB, title);
       if (puzzle) {
         validPuzzles.push(puzzle);
+        split = null;
+        puzzle = null;
       } else {
         warnings.push(`${item.filename}: skipped (did not resolve to exactly 3 differences).`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown split/processing error.';
       warnings.push(`${item.filename}: failed during split/processing (${message})`);
+    } finally {
+      releaseCanvases(split?.imageA, split?.imageB, puzzle?.imageA, puzzle?.imageB);
     }
   }
 
@@ -832,255 +642,6 @@ const collectExactThreeDifferencePuzzles = async ({
     validPuzzles,
     warnings
   };
-};
-
-const streamExactThreeDifferencePuzzlesToFolderWithProcessorPool = async ({
-  videos,
-  timestamps,
-  format,
-  jpegQuality,
-  maxConcurrentFrames = 1,
-  splitterDefaults,
-  targetDirectory,
-  sharedRegion,
-  watermarkRemoval,
-  onProgress
-}: {
-  videos: File[];
-  timestamps: ParsedTimestamp[];
-  format: 'jpeg' | 'png';
-  jpegQuality: number;
-  maxConcurrentFrames?: number;
-  splitterDefaults: SplitterDefaults;
-  targetDirectory: FileSystemDirectoryHandle;
-  sharedRegion?: SplitterSharedRegion | null;
-  watermarkRemoval?: SuperWatermarkOptions;
-  onProgress?: (progress: SuperExportProgress) => void;
-}): Promise<SuperImageExportResult> => {
-  const rootFolderName = `${sanitizePrefix(splitterDefaults.filenamePrefix)}-super-image`;
-  const warnings: string[] = [];
-  const manifest: Array<{
-    sequence: number;
-    title: string;
-    diffCount: number;
-    puzzleFilename: string;
-    diffFilename: string;
-  }> = [];
-  const totalRequests = Math.max(1, videos.length * timestamps.length);
-  const watermarkEnabled = Boolean(watermarkRemoval?.enabled);
-  const watermarkPresetName = watermarkRemoval?.selectionPreset?.name ?? null;
-  const safeMaxConcurrentFrames = clamp(Math.floor(maxConcurrentFrames) || 1, 1, 4);
-  let processedFrameCount = 0;
-  let exportedImagePairCount = 0;
-  let watermarkPairsCleaned = 0;
-  let lastProgress = 0;
-  let nextSequence = 1;
-  let nextFrameOrder = 1;
-  let nextCommitOrder = 1;
-  let isFlushingCommittedFrames = false;
-  const processorPool = createSuperImageProcessorPool(safeMaxConcurrentFrames);
-  const orderedFrames = new Map<
-    number,
-    {
-      resolve: () => void;
-      reject: (error: Error) => void;
-      settled?:
-        | { kind: 'resolved'; payload: SuperImageProcessorResultPayload }
-        | { kind: 'rejected'; error: Error };
-    }
-  >();
-
-  const emitProgress = (stage: SuperProcessingStage, progress: number, label: string) => {
-    const safeProgress = Math.max(lastProgress, clamp(progress, 0, 1));
-    lastProgress = safeProgress;
-    onProgress?.({
-      stage,
-      progress: safeProgress,
-      label
-    });
-  };
-
-  const rejectPendingFrames = (error: Error) => {
-    orderedFrames.forEach((entry) => entry.reject(error));
-    orderedFrames.clear();
-  };
-
-  const flushCommittedFrames = async () => {
-    if (isFlushingCommittedFrames) {
-      return;
-    }
-
-    isFlushingCommittedFrames = true;
-
-    try {
-      while (true) {
-        const nextFrame = orderedFrames.get(nextCommitOrder);
-        if (!nextFrame?.settled) {
-          break;
-        }
-
-        orderedFrames.delete(nextCommitOrder);
-        nextCommitOrder += 1;
-
-        if (nextFrame.settled.kind === 'rejected') {
-          throw nextFrame.settled.error;
-        }
-
-        const payload = nextFrame.settled.payload;
-        if (payload.kind === 'success') {
-          const sequence = nextSequence;
-          nextSequence += 1;
-          const filenames = buildImageFilenames(sequence, splitterDefaults);
-
-          if (payload.watermarkApplied) {
-            watermarkPairsCleaned += 1;
-          }
-
-          emitProgress(
-            'packaging',
-            mapProgress(processedFrameCount / totalRequests, watermarkEnabled ? 0.9 : 0.72, 0.98),
-            `Saving image pair ${sequence}: ${filenames.puzzleFilename}`
-          );
-
-          await writeBlobToDirectory(
-            targetDirectory,
-            filenames.puzzleFilename,
-            new Blob([payload.puzzleBuffer], { type: 'image/png' })
-          );
-          await writeBlobToDirectory(
-            targetDirectory,
-            filenames.diffFilename,
-            new Blob([payload.diffBuffer], { type: 'image/png' })
-          );
-
-          manifest.push({
-            sequence,
-            title: payload.title || `Puzzle ${sequence}`,
-            diffCount: payload.diffCount,
-            puzzleFilename: filenames.puzzleFilename,
-            diffFilename: filenames.diffFilename
-          });
-          exportedImagePairCount += 1;
-        } else {
-          warnings.push(payload.warning);
-        }
-
-        nextFrame.resolve();
-      }
-    } catch (error) {
-      const wrappedError = error instanceof Error ? error : new Error('Failed to write super image export files.');
-      rejectPendingFrames(wrappedError);
-      throw wrappedError;
-    } finally {
-      isFlushingCommittedFrames = false;
-      if ([...orderedFrames.values()].some((entry) => entry.settled)) {
-        await flushCommittedFrames();
-      }
-    }
-  };
-
-  try {
-    const extractionSummary = await extractFramesStream({
-      videos,
-      timestamps,
-      format,
-      jpegQuality,
-      onProgress: (progress) => {
-        const ratio = progress.total > 0 ? progress.completed / progress.total : 0;
-        emitProgress('extracting', mapProgress(ratio, 0, 0.28), progress.label);
-      },
-      onFrame: async (item) => {
-        processedFrameCount += 1;
-        emitProgress(
-          watermarkEnabled ? 'cleaning' : 'processing',
-          mapProgress(processedFrameCount / totalRequests, 0.28, watermarkEnabled ? 0.72 : 0.9),
-          `Processing frame ${processedFrameCount}/${totalRequests}: ${item.filename}`
-        );
-
-        const frameOrder = nextFrameOrder;
-        nextFrameOrder += 1;
-
-        await new Promise<void>((resolve, reject) => {
-          orderedFrames.set(frameOrder, {
-            resolve,
-            reject
-          });
-
-          void processorPool
-            .run({
-              blob: item.blob,
-              filename: item.filename,
-              sharedRegion,
-              watermarkEnabled,
-              watermarkSelectionPreset: watermarkRemoval?.selectionPreset ?? null
-            })
-            .then((payload) => {
-              const frameEntry = orderedFrames.get(frameOrder);
-              if (!frameEntry) {
-                return;
-              }
-
-              frameEntry.settled = {
-                kind: 'resolved',
-                payload
-              };
-              void flushCommittedFrames().catch((error) => {
-                rejectPendingFrames(error instanceof Error ? error : new Error('Failed to flush processed frames.'));
-              });
-            })
-            .catch((error) => {
-              const frameEntry = orderedFrames.get(frameOrder);
-              if (!frameEntry) {
-                return;
-              }
-
-              frameEntry.settled = {
-                kind: 'rejected',
-                error: error instanceof Error ? error : new Error('Super image processor task failed.')
-              };
-              void flushCommittedFrames().catch(() => {
-                // The ordered frame promises have already been rejected.
-              });
-            });
-        });
-      }
-    });
-
-    const manifestContent = JSON.stringify(
-      {
-        totalPuzzles: manifest.length,
-        generatedAt: new Date().toISOString(),
-        puzzles: [...manifest].sort((a, b) => a.sequence - b.sequence)
-      },
-      null,
-      2
-    );
-
-    await writeBlobToDirectory(
-      targetDirectory,
-      'manifest.json',
-      new Blob([manifestContent], { type: 'application/json' })
-    );
-
-    emitProgress('packaging', 1, `Saved folder ${rootFolderName}`);
-
-    return {
-      extractionSummary,
-      extractedFrameCount: extractionSummary.extractedCount,
-      processedFrameCount,
-      validPuzzleCount: exportedImagePairCount,
-      discardedFrameCount: Math.max(0, processedFrameCount - exportedImagePairCount),
-      warnings: [...extractionSummary.warnings, ...warnings],
-      exportedImagePairCount,
-      outputMode: 'folder',
-      outputName: rootFolderName,
-      watermarkRemovalEnabled: watermarkEnabled,
-      watermarkPairsCleaned,
-      watermarkPresetName
-    };
-  } finally {
-    processorPool.destroy();
-  }
 };
 
 const streamExactThreeDifferencePuzzlesToFolder = async ({
@@ -1138,14 +699,18 @@ const streamExactThreeDifferencePuzzlesToFolder = async ({
     jpegQuality,
     onProgress: (progress) => {
       const ratio = progress.total > 0 ? progress.completed / progress.total : 0;
-      emitProgress('extracting', mapProgress(ratio, 0, 0.28), progress.label);
+      emitProgress(
+        'extracting',
+        mapProgress(ratio, 0, 0.28),
+        `Extracting frame ${progress.completed}/${progress.total}`
+      );
     },
     onFrame: async (item) => {
       processedFrameCount += 1;
       emitProgress(
         'processing',
         mapProgress(processedFrameCount / totalRequests, 0.28, watermarkEnabled ? 0.72 : 0.9),
-        `Processing frame ${processedFrameCount}/${totalRequests}: ${item.filename}`
+        `Processing frame ${processedFrameCount}/${totalRequests}`
       );
 
       let split: CanvasSplitResult | null = null;
@@ -1172,7 +737,7 @@ const streamExactThreeDifferencePuzzlesToFolder = async ({
           emitProgress(
             'cleaning',
             mapProgress(processedFrameCount / totalRequests, 0.72, 0.9),
-            `Removing watermark ${sequence}: ${filenames.puzzleFilename}`
+            `Removing watermark ${sequence}`
           );
 
           try {
@@ -1194,7 +759,7 @@ const streamExactThreeDifferencePuzzlesToFolder = async ({
         emitProgress(
           'packaging',
           mapProgress(processedFrameCount / totalRequests, watermarkEnabled ? 0.9 : 0.72, 0.98),
-          `Saving image pair ${sequence}: ${filenames.puzzleFilename}`
+          `Saving image pair ${sequence}`
         );
 
         const puzzleBlob = await canvasToPngBlob(outputImageA);
@@ -1260,7 +825,7 @@ const streamExactThreeDifferencePuzzlesToFolder = async ({
   };
 };
 
-export const runFrameSuperExport = async ({
+const runFrameSuperExportOnMainThread = async ({
   videos,
   timestamps,
   format,
@@ -1284,82 +849,632 @@ export const runFrameSuperExport = async ({
   const watermarkPresetName = watermarkRemoval?.selectionPreset?.name ?? null;
   let watermarkPairsCleaned = 0;
   let cleanedPuzzles = processed.validPuzzles;
+  try {
+    if (watermarkEnabled && processed.validPuzzles.length > 0) {
+      const nextPuzzles: CanvasPuzzle[] = [];
 
-  if (watermarkEnabled && processed.validPuzzles.length > 0) {
-    const nextPuzzles: Puzzle[] = [];
+      for (let index = 0; index < processed.validPuzzles.length; index += 1) {
+        const puzzle = processed.validPuzzles[index];
+        const sequence = index + 1;
+        const labelName = puzzle.title?.trim() || `Puzzle ${sequence}`;
 
-    for (let index = 0; index < processed.validPuzzles.length; index += 1) {
-      const puzzle = processed.validPuzzles[index];
-      const sequence = index + 1;
-      const labelName = puzzle.title?.trim() || `Puzzle ${sequence}`;
-
-      onProgress?.({
-        stage: 'cleaning',
-        progress: mapProgress(sequence / Math.max(1, processed.validPuzzles.length), PROCESSING_PROGRESS_END, CLEANING_PROGRESS_END),
-        label: `Removing watermark ${sequence}/${processed.validPuzzles.length}: ${labelName}`
-      });
-
-      try {
-        const cleaned = await applyWatermarkRemovalToPuzzle(puzzle, watermarkRemoval?.selectionPreset ?? null);
-        nextPuzzles.push({
-          ...puzzle,
-          imageA: cleaned.imageA,
-          imageB: cleaned.imageB
+        onProgress?.({
+          stage: 'cleaning',
+          progress: mapProgress(
+            sequence / Math.max(1, processed.validPuzzles.length),
+            PROCESSING_PROGRESS_END,
+            CLEANING_PROGRESS_END
+          ),
+          label: `Removing watermark ${sequence}/${processed.validPuzzles.length}: ${labelName}`
         });
-        if (cleaned.applied) {
-          watermarkPairsCleaned += 1;
+
+        try {
+          const cleaned = await applyWatermarkRemovalToCanvasPuzzle(
+            puzzle,
+            watermarkRemoval?.selectionPreset ?? null
+          );
+          nextPuzzles.push({
+            ...puzzle,
+            imageA: cleaned.imageA,
+            imageB: cleaned.imageB
+          });
+          if (cleaned.applied) {
+            watermarkPairsCleaned += 1;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown watermark removal error.';
+          processed.warnings.push(`${labelName}: watermark removal failed (${message})`);
+          nextPuzzles.push(puzzle);
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown watermark removal error.';
-        processed.warnings.push(`${labelName}: watermark removal failed (${message})`);
-        nextPuzzles.push(puzzle);
       }
+
+      cleanedPuzzles = nextPuzzles;
     }
 
-    cleanedPuzzles = nextPuzzles;
+    const randomizedPuzzles = shuffleArray(cleanedPuzzles);
+    const batches = chunkArray(randomizedPuzzles, Math.max(1, imagesPerVideo));
+
+    for (let index = 0; index < batches.length; index += 1) {
+      const canvasBatch = batches[index];
+      const exportStart = watermarkEnabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END;
+      const batchStart = exportStart + (index / Math.max(1, batches.length)) * (1 - exportStart);
+      const batchEnd = exportStart + ((index + 1) / Math.max(1, batches.length)) * (1 - exportStart);
+      const compatibilityBatch = await Promise.all(
+        canvasBatch.map((puzzle) => convertCanvasPuzzleToCompatibilityPuzzle(puzzle))
+      );
+
+      const rendered = await renderVideoWithWebCodecs({
+        puzzles: compatibilityBatch,
+        settings: videoSettings,
+        onProgress: (progress, label) => {
+          onProgress?.({
+            stage: 'exporting',
+            progress: mapProgress(progress, batchStart, batchEnd),
+            label:
+              label ||
+              `Exporting video ${index + 1}/${batches.length} (${compatibilityBatch.length} puzzle${
+                compatibilityBatch.length === 1 ? '' : 's'
+              })`
+          });
+        }
+      });
+
+      triggerBlobDownload(
+        rendered.blob,
+        buildBatchVideoFilename(
+          videoSettings,
+          splitterDefaults,
+          index,
+          batches.length,
+          compatibilityBatch.length
+        )
+      );
+      canvasBatch.forEach((puzzle) => releaseCanvasPuzzle(puzzle));
+      await delay(120);
+    }
+
+    return {
+      ...buildBaseResult(processed),
+      exportedVideoCount: batches.length,
+      batchSizes: batches.map((batch) => batch.length),
+      imagesPerVideo: Math.max(1, imagesPerVideo),
+      watermarkRemovalEnabled: watermarkEnabled,
+      watermarkPairsCleaned,
+      watermarkPresetName
+    };
+  } finally {
+    cleanedPuzzles.forEach((puzzle) => releaseCanvasPuzzle(puzzle));
   }
+};
 
-  const randomizedPuzzles = shuffleArray(cleanedPuzzles);
-  const batches = chunkArray(randomizedPuzzles, Math.max(1, imagesPerVideo));
+const convertProcessorPayloadToBinaryPuzzle = (
+  payload: Extract<SuperImageProcessorResultPayload, { kind: 'success' }>
+): BinaryRenderablePuzzle => ({
+  imageABuffer: payload.puzzleBuffer,
+  imageBBuffer: payload.diffBuffer,
+  mimeType: payload.mimeType || 'image/png',
+  regions: payload.regions,
+  title: payload.title
+});
 
-  for (let index = 0; index < batches.length; index += 1) {
-    const puzzles = batches[index];
-    const exportStart = watermarkEnabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END;
-    const batchStart = exportStart + (index / Math.max(1, batches.length)) * (1 - exportStart);
-    const batchEnd = exportStart + ((index + 1) / Math.max(1, batches.length)) * (1 - exportStart);
+const estimateBinaryRenderablePuzzleBytes = (puzzle: BinaryRenderablePuzzle) =>
+  puzzle.imageABuffer.byteLength + puzzle.imageBBuffer.byteLength;
 
-    const rendered = await renderVideoWithWebCodecs({
-      puzzles,
-      settings: videoSettings,
-      onProgress: (progress, label) => {
-        onProgress?.({
-          stage: 'exporting',
-          progress: mapProgress(progress, batchStart, batchEnd),
-          label:
-            label ||
-            `Exporting video ${index + 1}/${batches.length} (${puzzles.length} puzzle${
-              puzzles.length === 1 ? '' : 's'
-            })`
-        });
+const collectExactThreeDifferenceBinaryPuzzlesWithSharedPool = async ({
+  videos,
+  timestamps,
+  format,
+  jpegQuality,
+  sharedRegion,
+  watermarkRemoval,
+  onProgress,
+  abortController,
+  job
+}: {
+  videos: File[];
+  timestamps: ParsedTimestamp[];
+  format: 'jpeg' | 'png';
+  jpegQuality: number;
+  sharedRegion?: SplitterSharedRegion | null;
+  watermarkRemoval?: SuperWatermarkOptions;
+  onProgress?: (progress: SuperExportProgress) => void;
+  abortController: AbortController;
+  job: MediaJobController | null;
+}): Promise<{
+  processed: CollectedExactBinaryPuzzleResult;
+  watermarkPairsCleaned: number;
+  retainedOutputBytes: number;
+}> => {
+  const warnings: string[] = [];
+  const validPuzzles: BinaryRenderablePuzzle[] = [];
+  const watermarkEnabled = Boolean(watermarkRemoval?.enabled);
+  const totalRequests = Math.max(1, videos.length * timestamps.length);
+  const pool = acquireSuperImageProcessingPool();
+  let extractionSummary: ExtractFramesSummary | null = null;
+  let processedFrameCount = 0;
+  let watermarkPairsCleaned = 0;
+  let nextFrameOrder = 1;
+  let nextCommitOrder = 1;
+  let lastProgress = 0;
+  let isFlushingCommittedFrames = false;
+  let queueBytesInFlight = 0;
+  let retainedOutputBytes = 0;
+  const orderedFrames = new Map<
+    number,
+    {
+      estimatedBytes: number;
+      resolve: () => void;
+      reject: (error: Error) => void;
+      settled?:
+        | { kind: 'resolved'; payload: SuperImageProcessorResultPayload }
+        | { kind: 'rejected'; error: Error };
+    }
+  >();
+  const pendingFrameCommits: Promise<void>[] = [];
+  const drainWaiters: Array<() => void> = [];
+  const jobStartedAt = performance.now();
+
+  const throwIfCanceled = () => {
+    if (abortController.signal.aborted) {
+      throw createSuperExportCancellationError();
+    }
+  };
+
+  const maybeResolveDrainWaiters = () => {
+    if (queueBytesInFlight > SUPER_IMAGE_LOW_WATERMARK_BYTES) {
+      return;
+    }
+    while (drainWaiters.length > 0) {
+      drainWaiters.shift()?.();
+    }
+  };
+
+  const waitForLowWatermark = async () => {
+    if (queueBytesInFlight < SUPER_IMAGE_HIGH_WATERMARK_BYTES) {
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      if (abortController.signal.aborted) {
+        reject(createSuperExportCancellationError());
+        return;
+      }
+      const handleAbort = () => {
+        abortController.signal.removeEventListener('abort', handleAbort);
+        reject(createSuperExportCancellationError());
+      };
+      abortController.signal.addEventListener('abort', handleAbort, { once: true });
+      drainWaiters.push(() => {
+        abortController.signal.removeEventListener('abort', handleAbort);
+        resolve();
+      });
+    });
+  };
+
+  const emitProgress = (stage: SuperProcessingStage, progress: number, label: string) => {
+    const safeProgress = Math.max(lastProgress, clamp(progress, 0, 1));
+    lastProgress = safeProgress;
+    onProgress?.({
+      stage,
+      progress: safeProgress,
+      label
+    });
+    job?.setProgress(safeProgress, label);
+  };
+
+  const emitCoordinatorStats = () => {
+    if (!job) return;
+    const unresolvedFrames = [...orderedFrames.values()].filter((entry) => !entry.settled).length;
+    const settledFrames = [...orderedFrames.values()].filter((entry) => entry.settled).length;
+    const elapsedSeconds = Math.max(0.001, (performance.now() - jobStartedAt) / 1000);
+    job.updateWorkerStats({
+      workerId: SUPER_VIDEO_COORDINATOR_ID,
+      label: 'Super Video Coordinator',
+      runtimeKind: 'coordinator',
+      activeWorkers: 1,
+      queueSize: unresolvedFrames + settledFrames,
+      runningTasks: unresolvedFrames,
+      avgTaskMs: 0,
+      fps: processedFrameCount / elapsedSeconds,
+      bytesInFlight: queueBytesInFlight + retainedOutputBytes,
+      stageQueueDepths: {
+        decode: queueBytesInFlight >= SUPER_IMAGE_HIGH_WATERMARK_BYTES ? 1 : 0,
+        detect: unresolvedFrames + settledFrames,
+        render: validPuzzles.length
+      },
+      metrics: {
+        processedFrames: processedFrameCount,
+        retainedPuzzles: validPuzzles.length,
+        retainedOutputMb: retainedOutputBytes / (1024 * 1024),
+        queueMb: queueBytesInFlight / (1024 * 1024)
       }
     });
+  };
 
-    triggerBlobDownload(
-      rendered.blob,
-      buildBatchVideoFilename(videoSettings, splitterDefaults, index, batches.length, puzzles.length)
-    );
-    await delay(120);
-  }
+  const rejectPendingFrames = (error: Error) => {
+    orderedFrames.forEach((entry) => entry.reject(error));
+    orderedFrames.clear();
+    maybeResolveDrainWaiters();
+    emitCoordinatorStats();
+  };
+
+  const flushCommittedFrames = async () => {
+    if (isFlushingCommittedFrames) {
+      return;
+    }
+
+    isFlushingCommittedFrames = true;
+    try {
+      while (true) {
+        throwIfCanceled();
+        const frameEntry = orderedFrames.get(nextCommitOrder);
+        if (!frameEntry?.settled) {
+          break;
+        }
+
+        orderedFrames.delete(nextCommitOrder);
+        nextCommitOrder += 1;
+
+        try {
+          if (frameEntry.settled.kind === 'rejected') {
+            throw frameEntry.settled.error;
+          }
+
+          const payload = frameEntry.settled.payload;
+          if (payload.kind === 'success') {
+            if (payload.watermarkApplied) {
+              watermarkPairsCleaned += 1;
+            }
+            const binaryPuzzle = convertProcessorPayloadToBinaryPuzzle(payload);
+            retainedOutputBytes += estimateBinaryRenderablePuzzleBytes(binaryPuzzle);
+            validPuzzles.push(binaryPuzzle);
+          } else {
+            warnings.push(payload.warning);
+          }
+        } finally {
+          queueBytesInFlight = Math.max(0, queueBytesInFlight - frameEntry.estimatedBytes);
+          maybeResolveDrainWaiters();
+          emitCoordinatorStats();
+          frameEntry.resolve();
+        }
+      }
+    } catch (error) {
+      const wrappedError =
+        error instanceof Error ? error : new Error('Failed to collect Super Video export frames.');
+      rejectPendingFrames(wrappedError);
+      throw wrappedError;
+    } finally {
+      isFlushingCommittedFrames = false;
+    }
+  };
+
+  emitProgress('extracting', 0, 'Preparing Super Export...');
+  emitCoordinatorStats();
+
+  extractionSummary = await extractFramesStream({
+    videos,
+    timestamps,
+    format,
+    jpegQuality,
+    signal: abortController.signal,
+    diagnosticsJob: job,
+    onProgress: (progress) => {
+      throwIfCanceled();
+      const ratio = progress.total > 0 ? progress.completed / progress.total : 0;
+      emitProgress(
+        'extracting',
+        mapProgress(ratio, 0, 0.28),
+        `Extracting frame ${progress.completed}/${progress.total}`
+      );
+    },
+    onFrame: async (item) => {
+      throwIfCanceled();
+      processedFrameCount += 1;
+      queueBytesInFlight += item.estimatedBytes;
+      emitProgress(
+        watermarkEnabled ? 'cleaning' : 'processing',
+        mapProgress(processedFrameCount / totalRequests, 0.28, watermarkEnabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END),
+        `Processing frame ${processedFrameCount}/${totalRequests}`
+      );
+      emitCoordinatorStats();
+
+      const frameOrder = nextFrameOrder;
+      nextFrameOrder += 1;
+      const frameTaskId = `super-video-process:${frameOrder}`;
+
+      const frameCommit = new Promise<void>((resolve, reject) => {
+        orderedFrames.set(frameOrder, {
+          estimatedBytes: item.estimatedBytes,
+          resolve,
+          reject
+        });
+      });
+      pendingFrameCommits.push(frameCommit);
+
+      void pool
+        .run({
+          blob: item.blob,
+          filename: item.filename,
+          sharedRegion,
+          watermarkEnabled,
+          watermarkSelectionPreset: watermarkRemoval?.selectionPreset ?? null,
+          taskId: frameTaskId,
+          taskLabel: `Process frame ${processedFrameCount}`,
+          onTaskEvent: (event) => job?.handleTaskEvent(event),
+          onStats: (stats) => job?.updateWorkerStats(stats)
+        })
+        .then((payload) => {
+          const frameEntry = orderedFrames.get(frameOrder);
+          if (!frameEntry) {
+            return;
+          }
+          frameEntry.settled = {
+            kind: 'resolved',
+            payload
+          };
+          emitCoordinatorStats();
+          void flushCommittedFrames().catch((error) => {
+            rejectPendingFrames(
+              error instanceof Error ? error : new Error('Failed to flush Super Video frames.')
+            );
+          });
+        })
+        .catch((error) => {
+          const frameEntry = orderedFrames.get(frameOrder);
+          if (!frameEntry) {
+            return;
+          }
+          frameEntry.settled = {
+            kind: 'rejected',
+            error: error instanceof Error ? error : new Error('Super Video processor task failed.')
+          };
+          emitCoordinatorStats();
+          void flushCommittedFrames().catch(() => {
+            // Pending frame promises are already rejected by rejectPendingFrames.
+          });
+        });
+
+      if (queueBytesInFlight >= SUPER_IMAGE_HIGH_WATERMARK_BYTES) {
+        emitProgress(
+          'processing',
+          mapProgress(
+            processedFrameCount / totalRequests,
+            0.28,
+            watermarkEnabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END
+          ),
+          `Processing queue reached ${Math.round(queueBytesInFlight / (1024 * 1024))} MB. Waiting for drain...`
+        );
+        await waitForLowWatermark();
+      }
+    }
+  });
+
+  await Promise.all(pendingFrameCommits);
+  throwIfCanceled();
 
   return {
-    ...buildBaseResult(processed),
-    exportedVideoCount: batches.length,
-    batchSizes: batches.map((batch) => batch.length),
-    imagesPerVideo: Math.max(1, imagesPerVideo),
-    watermarkRemovalEnabled: watermarkEnabled,
+    processed: {
+      extractionSummary,
+      extractedFrameCount: extractionSummary.extractedCount,
+      processedFrameCount,
+      validPuzzles,
+      warnings: [...extractionSummary.warnings, ...warnings]
+    },
     watermarkPairsCleaned,
-    watermarkPresetName
+    retainedOutputBytes
   };
+};
+
+const runFrameSuperExportWithSharedPool = async ({
+  videos,
+  timestamps,
+  format,
+  jpegQuality,
+  videoSettings,
+  splitterDefaults,
+  imagesPerVideo,
+  sharedRegion,
+  watermarkRemoval,
+  onProgress
+}: RunFrameSuperExportOptions): Promise<SuperExportResult> => {
+  if (activeSuperExportController || activeSuperImageExportController || activeSuperImageExportWorker) {
+    throw new Error('Another export is already running.');
+  }
+
+  const job = createSuperExportJob();
+  const abortController = new AbortController();
+  activeSuperExportController = {
+    cancel: () => {
+      abortController.abort();
+      disposeSuperImageProcessingPool();
+      cancelVideoExport();
+    }
+  };
+
+  const emitProgress = (stage: SuperProcessingStage, progress: number, label: string) => {
+    onProgress?.({ stage, progress, label });
+    job?.setProgress(progress, label);
+  };
+
+  try {
+    const { processed, watermarkPairsCleaned } = await collectExactThreeDifferenceBinaryPuzzlesWithSharedPool({
+      videos,
+      timestamps,
+      format,
+      jpegQuality,
+      sharedRegion,
+      watermarkRemoval,
+      onProgress,
+      abortController,
+      job
+    });
+    disposeSuperImageProcessingPool();
+    job?.removeWorkerStats(SUPER_IMAGE_POOL_ID);
+
+    if (processed.validPuzzles.length === 0) {
+      const result: SuperExportResult = {
+        ...buildBaseResult(processed),
+        exportedVideoCount: 0,
+        batchSizes: [],
+        imagesPerVideo: Math.max(1, imagesPerVideo),
+        watermarkRemovalEnabled: Boolean(watermarkRemoval?.enabled),
+        watermarkPairsCleaned,
+        watermarkPresetName: watermarkRemoval?.selectionPreset?.name ?? null
+      };
+      emitProgress('exporting', 1, 'Super Export finished, but no exact 3-difference puzzles were available to export.');
+      job?.complete('Super Export finished with no exact 3-difference puzzles');
+      return result;
+    }
+
+    emitProgress('exporting', watermarkRemoval?.enabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END, 'Preparing video batches...');
+
+    const batchSize = Math.max(1, imagesPerVideo);
+    const randomizedPuzzles = shuffleArray(processed.validPuzzles);
+    processed.validPuzzles.length = 0;
+    const batches = Array.from({ length: Math.ceil(randomizedPuzzles.length / batchSize) }, (_value, index) => {
+      const batch = randomizedPuzzles.slice(index * batchSize, (index + 1) * batchSize);
+      return {
+        batch,
+        batchBytes: batch.reduce((total, puzzle) => total + estimateBinaryRenderablePuzzleBytes(puzzle), 0),
+        index
+      };
+    });
+    const totalBatches = batches.length;
+    const batchSizes = batches.map(({ batch }) => batch.length);
+    const exportStart = watermarkRemoval?.enabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END;
+    const activeBatchStats = new Map<string, { batchBytes: number; puzzleCount: number }>();
+    let queuedPuzzles = randomizedPuzzles.length;
+    let completedBatches = 0;
+
+    const emitCoordinatorStats = () => {
+      const activePuzzles = [...activeBatchStats.values()].reduce((sum, batch) => sum + batch.puzzleCount, 0);
+      const activeBatchBytes = [...activeBatchStats.values()].reduce((sum, batch) => sum + batch.batchBytes, 0);
+      job?.updateWorkerStats({
+        workerId: SUPER_VIDEO_COORDINATOR_ID,
+        label: 'Super Video Coordinator',
+        runtimeKind: 'coordinator',
+        activeWorkers: 1,
+        queueSize: Math.max(0, queuedPuzzles),
+        runningTasks: activeBatchStats.size,
+        avgTaskMs: 0,
+        bytesInFlight: Math.max(0, activeBatchBytes),
+        stageQueueDepths: {
+          render: Math.max(0, queuedPuzzles + activePuzzles),
+          encode: activeBatchStats.size
+        },
+        metrics: {
+          remainingPuzzles: Math.max(0, queuedPuzzles),
+          activeBatches: activeBatchStats.size,
+          completedBatches,
+          totalBatches
+        }
+      });
+    };
+
+    const batchTasks = batches.map(({ batch, batchBytes, index }) => {
+      const taskId = `super-video-batch:${index + 1}`;
+      return {
+        id: taskId,
+        label: `Super Video ${index + 1}/${totalBatches}`,
+        weight: Math.max(1, batch.length),
+        cancel: () => {
+          cancelVideoExport();
+        },
+        run: async (reportProgress: (progress: number, status?: string) => void) => {
+          if (abortController.signal.aborted) {
+            throw createSuperExportCancellationError();
+          }
+
+          queuedPuzzles = Math.max(0, queuedPuzzles - batch.length);
+          activeBatchStats.set(taskId, {
+            batchBytes,
+            puzzleCount: batch.length
+          });
+          emitCoordinatorStats();
+
+          try {
+            const rendered = await renderVideoWithWebCodecs({
+              source: 'binary',
+              puzzles: batch,
+              settings: videoSettings,
+              diagnosticsJob: job,
+              manageDiagnosticsLifecycle: false,
+              onProgress: (progress, label) => {
+                reportProgress(
+                  progress,
+                  label ||
+                    `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${batch.length === 1 ? '' : 's'})`
+                );
+              }
+            });
+
+            triggerBlobDownload(
+              rendered.blob,
+              buildBatchVideoFilename(videoSettings, splitterDefaults, index, totalBatches, batch.length)
+            );
+            await delay(120);
+            completedBatches += 1;
+            return rendered;
+          } finally {
+            activeBatchStats.delete(taskId);
+            emitCoordinatorStats();
+          }
+        }
+      };
+    });
+
+    emitCoordinatorStats();
+    await runBatchExportTasks({
+      tasks: batchTasks,
+      maxConcurrency: Math.min(2, Math.max(1, totalBatches)),
+      signal: abortController.signal,
+      cancelMessage: createSuperExportCancellationError().message,
+      onProgress: (progress, label) => {
+        emitProgress(
+          'exporting',
+          mapProgress(progress, exportStart, 1),
+          label || `Exporting ${totalBatches} Super Video batch${totalBatches === 1 ? '' : 'es'}`
+        );
+      }
+    });
+    emitCoordinatorStats();
+
+    const result: SuperExportResult = {
+      ...buildBaseResult(processed),
+      exportedVideoCount: totalBatches,
+      batchSizes,
+      imagesPerVideo: batchSize,
+      watermarkRemovalEnabled: Boolean(watermarkRemoval?.enabled),
+      watermarkPairsCleaned,
+      watermarkPresetName: watermarkRemoval?.selectionPreset?.name ?? null
+    };
+    emitProgress('exporting', 1, `Exported ${totalBatches} video${totalBatches === 1 ? '' : 's'}.`);
+    job?.complete(`Exported ${totalBatches} Super Video batch${totalBatches === 1 ? '' : 'es'}`);
+    return result;
+  } catch (error) {
+    if (abortController.signal.aborted || isSuperExportCancellationError(error)) {
+      job?.cancel('Super Export canceled');
+      throw isSuperExportCancellationError(error) ? error : createSuperExportCancellationError();
+    }
+    const message = error instanceof Error ? error.message : 'Super Export failed.';
+    job?.fail(message, 'Super Export failed');
+    throw error instanceof Error ? error : new Error(message);
+  } finally {
+    activeSuperExportController = null;
+    disposeSuperImageProcessingPool();
+    job?.removeWorkerStats(SUPER_IMAGE_POOL_ID);
+  }
+};
+
+export const cancelSuperExport = () => {
+  activeSuperExportController?.cancel();
+};
+
+export const runFrameSuperExport = async (options: RunFrameSuperExportOptions): Promise<SuperExportResult> => {
+  if (supportsSuperImageProcessorPool()) {
+    return await runFrameSuperExportWithSharedPool(options);
+  }
+
+  return await runFrameSuperExportOnMainThread(options);
 };
 
 const runFrameSuperImageExportOnMainThread = async ({
@@ -1436,129 +1551,658 @@ const runFrameSuperImageExportOnMainThread = async ({
   const watermarkEnabled = Boolean(watermarkRemoval?.enabled);
   const watermarkPresetName = watermarkRemoval?.selectionPreset?.name ?? null;
 
-  for (let index = 0; index < processed.validPuzzles.length; index += 1) {
-    const puzzle = processed.validPuzzles[index];
-    const sequence = index + 1;
-    const filenames = buildImageFilenames(sequence, splitterDefaults);
-    let imageA = puzzle.imageA;
-    let imageB = puzzle.imageB;
+  try {
+    for (let index = 0; index < processed.validPuzzles.length; index += 1) {
+      const puzzle = processed.validPuzzles[index];
+      const sequence = index + 1;
+      const filenames = buildImageFilenames(sequence, splitterDefaults);
+      let outputImageA = puzzle.imageA;
+      let outputImageB = puzzle.imageB;
 
-    if (watermarkEnabled) {
+      if (watermarkEnabled) {
+        onProgress?.({
+          stage: 'cleaning',
+          progress: mapProgress(
+            sequence / Math.max(1, processed.validPuzzles.length),
+            PACKAGING_PROGRESS_START,
+            CLEANING_PROGRESS_END
+          ),
+          label: `Removing watermark ${sequence}/${processed.validPuzzles.length}`
+        });
+
+        try {
+          const cleaned = await applyWatermarkRemovalToCanvasPuzzle(
+            puzzle,
+            watermarkRemoval?.selectionPreset ?? null
+          );
+          outputImageA = cleaned.imageA;
+          outputImageB = cleaned.imageB;
+          if (cleaned.applied) {
+            watermarkPairsCleaned += 1;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown watermark removal error.';
+          processed.warnings.push(`${filenames.puzzleFilename}: watermark removal failed (${message})`);
+        }
+      }
+
       onProgress?.({
-        stage: 'cleaning',
+        stage: 'packaging',
         progress: mapProgress(
           sequence / Math.max(1, processed.validPuzzles.length),
-          PACKAGING_PROGRESS_START,
-          CLEANING_PROGRESS_END
+          watermarkEnabled ? CLEANING_PROGRESS_END : PACKAGING_PROGRESS_START,
+          PACKAGING_PROGRESS_END
         ),
-        label: `Removing watermark ${sequence}/${processed.validPuzzles.length}: ${filenames.puzzleFilename}`
+        label: `Packing image pair ${sequence}/${processed.validPuzzles.length}`
       });
 
-      try {
-        const cleaned = await applyWatermarkRemovalToPuzzle(puzzle, watermarkRemoval?.selectionPreset ?? null);
-        imageA = cleaned.imageA;
-        imageB = cleaned.imageB;
-        if (cleaned.applied) {
-          watermarkPairsCleaned += 1;
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown watermark removal error.';
-        processed.warnings.push(`${filenames.puzzleFilename}: watermark removal failed (${message})`);
+      const [puzzleBlob, diffBlob] = await Promise.all([
+        canvasToPngBlob(outputImageA),
+        canvasToPngBlob(outputImageB)
+      ]);
+
+      if (resolvedOutputMode === 'folder' && targetDirectory) {
+        await writeBlobToDirectory(targetDirectory, filenames.puzzleFilename, puzzleBlob);
+        await writeBlobToDirectory(targetDirectory, filenames.diffFilename, diffBlob);
+      } else if (folder) {
+        folder.file(filenames.puzzleFilename, puzzleBlob);
+        folder.file(filenames.diffFilename, diffBlob);
       }
+
+      manifest.push({
+        sequence,
+        title: puzzle.title || `Puzzle ${sequence}`,
+        diffCount: puzzle.regions.length,
+        puzzleFilename: filenames.puzzleFilename,
+        diffFilename: filenames.diffFilename
+      });
+
+      releaseCanvases(
+        outputImageA !== puzzle.imageA && outputImageA !== puzzle.imageB ? outputImageA : null,
+        outputImageB !== puzzle.imageA && outputImageB !== puzzle.imageB ? outputImageB : null
+      );
+      releaseCanvasPuzzle(puzzle);
     }
 
-    onProgress?.({
-      stage: 'packaging',
-      progress: mapProgress(
-        sequence / Math.max(1, processed.validPuzzles.length),
-        watermarkEnabled ? CLEANING_PROGRESS_END : PACKAGING_PROGRESS_START,
-        PACKAGING_PROGRESS_END
-      ),
-      label: `Packing image pair ${sequence}/${processed.validPuzzles.length}: ${filenames.puzzleFilename}`
-    });
-
-    const [puzzleBlob, diffBlob] = await Promise.all([
-      dataUrlToPngBlob(imageA),
-      dataUrlToPngBlob(imageB)
-    ]);
+    const manifestContent = JSON.stringify(
+      {
+        totalPuzzles: manifest.length,
+        generatedAt: new Date().toISOString(),
+        puzzles: manifest
+      },
+      null,
+      2
+    );
 
     if (resolvedOutputMode === 'folder' && targetDirectory) {
-      await writeBlobToDirectory(targetDirectory, filenames.puzzleFilename, puzzleBlob);
-      await writeBlobToDirectory(targetDirectory, filenames.diffFilename, diffBlob);
-    } else if (folder) {
-      folder.file(filenames.puzzleFilename, puzzleBlob);
-      folder.file(filenames.diffFilename, diffBlob);
+      await writeBlobToDirectory(
+        targetDirectory,
+        'manifest.json',
+        new Blob([manifestContent], { type: 'application/json' })
+      );
+      onProgress?.({
+        stage: 'packaging',
+        progress: 1,
+        label: `Saved folder ${rootFolderName}`
+      });
+
+      return {
+        ...buildBaseResult(processed),
+        exportedImagePairCount: processed.validPuzzles.length,
+        outputMode: 'folder',
+        outputName: rootFolderName,
+        watermarkRemovalEnabled: watermarkEnabled,
+        watermarkPairsCleaned,
+        watermarkPresetName
+      };
     }
 
-    manifest.push({
-      sequence,
-      title: puzzle.title || `Puzzle ${sequence}`,
-      diffCount: puzzle.regions.length,
-      puzzleFilename: filenames.puzzleFilename,
-      diffFilename: filenames.diffFilename
-    });
-  }
+    if (folder && zip) {
+      folder.file('manifest.json', manifestContent);
+    }
 
-  const manifestContent = JSON.stringify(
-    {
-      totalPuzzles: manifest.length,
-      generatedAt: new Date().toISOString(),
-      puzzles: manifest
-    },
-    null,
-    2
-  );
-
-  if (resolvedOutputMode === 'folder' && targetDirectory) {
-    await writeBlobToDirectory(
-      targetDirectory,
-      'manifest.json',
-      new Blob([manifestContent], { type: 'application/json' })
-    );
-    onProgress?.({
-      stage: 'packaging',
-      progress: 1,
-      label: `Saved folder ${rootFolderName}`
+    const zipFilename = buildSuperImageZipFilename(splitterDefaults, processed.validPuzzles.length);
+    const archive = await (zip ?? new JSZip()).generateAsync({ type: 'blob' }, (metadata) => {
+      onProgress?.({
+        stage: 'packaging',
+        progress: mapProgress(metadata.percent / 100, PACKAGING_PROGRESS_END, 1),
+        label: `Building zip folder ${Math.round(metadata.percent)}%`
+      });
     });
+
+    triggerBlobDownload(archive, zipFilename);
 
     return {
       ...buildBaseResult(processed),
       exportedImagePairCount: processed.validPuzzles.length,
-      outputMode: 'folder',
-      outputName: rootFolderName,
+      outputMode: 'zip',
+      outputName: zipFilename,
       watermarkRemovalEnabled: watermarkEnabled,
       watermarkPairsCleaned,
       watermarkPresetName
     };
+  } finally {
+    processed.validPuzzles.forEach((puzzle) => releaseCanvasPuzzle(puzzle));
+  }
+};
+
+const runFrameSuperImageExportWithSharedPool = async ({
+  videos,
+  timestamps,
+  format,
+  jpegQuality,
+  splitterDefaults,
+  outputMode,
+  targetDirectory: preselectedTargetDirectory = null,
+  sharedRegion,
+  watermarkRemoval,
+  onProgress
+}: RunFrameSuperImageExportOptions): Promise<SuperImageExportResult> => {
+  if (activeSuperExportController || activeSuperImageExportController || activeSuperImageExportWorker) {
+    throw new Error('Another Super Image export is already running.');
   }
 
-  if (folder && zip) {
-    folder.file('manifest.json', manifestContent);
-  }
-
-  const zipFilename = buildSuperImageZipFilename(splitterDefaults, processed.validPuzzles.length);
-  const archive = await (zip ?? new JSZip()).generateAsync({ type: 'blob' }, (metadata) => {
-    onProgress?.({
-      stage: 'packaging',
-      progress: mapProgress(metadata.percent / 100, PACKAGING_PROGRESS_END, 1),
-      label: `Building zip folder ${Math.round(metadata.percent)}%`
-    });
-  });
-
-  triggerBlobDownload(archive, zipFilename);
-
-  return {
-    ...buildBaseResult(processed),
-    exportedImagePairCount: processed.validPuzzles.length,
-    outputMode: 'zip',
-    outputName: zipFilename,
-    watermarkRemovalEnabled: watermarkEnabled,
-    watermarkPairsCleaned,
-    watermarkPresetName
+  const job = createSuperImageExportJob();
+  const abortController = new AbortController();
+  activeSuperImageExportController = {
+    cancel: () => {
+      abortController.abort();
+      disposeSuperImageProcessingPool();
+    }
   };
+
+  let resolvedOutputMode = outputMode;
+  const preWarnings: string[] = [];
+  let targetDirectory = preselectedTargetDirectory;
+  if (outputMode === 'folder') {
+    if (!supportsDirectoryExport()) {
+      preWarnings.push('Folder export is not supported in this browser. Falling back to zip download.');
+      resolvedOutputMode = 'zip';
+      targetDirectory = null;
+    } else if (!targetDirectory) {
+      preWarnings.push('No output folder was selected. Falling back to zip download.');
+      resolvedOutputMode = 'zip';
+    }
+  }
+
+  const throwIfCanceled = () => {
+    if (abortController.signal.aborted) {
+      throw createSuperImageExportCancellationError();
+    }
+  };
+
+  const rootFolderName = `${sanitizePrefix(splitterDefaults.filenamePrefix)}-super-image`;
+  const warnings: string[] = [];
+  const watermarkEnabled = Boolean(watermarkRemoval?.enabled);
+  const watermarkPresetName = watermarkRemoval?.selectionPreset?.name ?? null;
+  const manifest: Array<{
+    sequence: number;
+    title: string;
+    diffCount: number;
+    puzzleFilename: string;
+    diffFilename: string;
+  }> = [];
+  const zip = resolvedOutputMode === 'zip' ? new JSZip() : null;
+  const zipFolder = zip ? zip.folder(rootFolderName) ?? zip : null;
+  const totalRequests = Math.max(1, videos.length * timestamps.length);
+  const pool = acquireSuperImageProcessingPool();
+  let extractionSummary: ExtractFramesSummary | null = null;
+  let processedFrameCount = 0;
+  let exportedImagePairCount = 0;
+  let watermarkPairsCleaned = 0;
+  let nextSequence = 1;
+  let nextFrameOrder = 1;
+  let nextCommitOrder = 1;
+  let lastProgress = 0;
+  let isFlushingCommittedFrames = false;
+  let bytesInFlight = 0;
+  const orderedFrames = new Map<
+    number,
+    {
+      estimatedBytes: number;
+      resolve: () => void;
+      reject: (error: Error) => void;
+      settled?:
+        | { kind: 'resolved'; payload: SuperImageProcessorResultPayload }
+        | { kind: 'rejected'; error: Error };
+    }
+  >();
+  const pendingFrameCommits: Promise<void>[] = [];
+  const watermarkWaiters: Array<() => void> = [];
+  const jobStartedAt = performance.now();
+
+  const maybeResolveWatermarkWaiters = () => {
+    if (bytesInFlight > SUPER_IMAGE_LOW_WATERMARK_BYTES) {
+      return;
+    }
+    while (watermarkWaiters.length > 0) {
+      watermarkWaiters.shift()?.();
+    }
+  };
+
+  const waitForLowWatermark = async () => {
+    if (bytesInFlight < SUPER_IMAGE_HIGH_WATERMARK_BYTES) {
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      if (abortController.signal.aborted) {
+        reject(createSuperImageExportCancellationError());
+        return;
+      }
+      const handleAbort = () => {
+        abortController.signal.removeEventListener('abort', handleAbort);
+        reject(createSuperImageExportCancellationError());
+      };
+      abortController.signal.addEventListener('abort', handleAbort, { once: true });
+      watermarkWaiters.push(() => {
+        abortController.signal.removeEventListener('abort', handleAbort);
+        resolve();
+      });
+    });
+  };
+
+  const emitProgress = (stage: SuperProcessingStage, progress: number, label: string) => {
+    const safeProgress = Math.max(lastProgress, clamp(progress, 0, 1));
+    lastProgress = safeProgress;
+    onProgress?.({
+      stage,
+      progress: safeProgress,
+      label
+    });
+    job?.setProgress(safeProgress, label);
+  };
+
+  const emitCoordinatorStats = () => {
+    if (!job) return;
+    const unresolvedFrames = [...orderedFrames.values()].filter((entry) => !entry.settled).length;
+    const settledFrames = [...orderedFrames.values()].filter((entry) => entry.settled).length;
+    const elapsedSeconds = Math.max(0.001, (performance.now() - jobStartedAt) / 1000);
+    job.updateWorkerStats({
+      workerId: SUPER_IMAGE_COORDINATOR_ID,
+      label: 'Super Image Coordinator',
+      runtimeKind: 'coordinator',
+      activeWorkers: 1,
+      queueSize: unresolvedFrames + settledFrames,
+      runningTasks: unresolvedFrames,
+      avgTaskMs: 0,
+      fps: processedFrameCount / elapsedSeconds,
+      bytesInFlight,
+      stageQueueDepths: {
+        decode: bytesInFlight >= SUPER_IMAGE_HIGH_WATERMARK_BYTES ? 1 : 0,
+        detect: unresolvedFrames,
+        package: resolvedOutputMode === 'zip' ? settledFrames : 0,
+        write: resolvedOutputMode === 'folder' ? settledFrames : 0
+      },
+      metrics: {
+        processedFrames: processedFrameCount,
+        exportedPairs: exportedImagePairCount,
+        highWatermarkMb: SUPER_IMAGE_HIGH_WATERMARK_BYTES / (1024 * 1024),
+        lowWatermarkMb: SUPER_IMAGE_LOW_WATERMARK_BYTES / (1024 * 1024)
+      }
+    });
+  };
+
+  const rejectPendingFrames = (error: Error) => {
+    orderedFrames.forEach((entry) => entry.reject(error));
+    orderedFrames.clear();
+    maybeResolveWatermarkWaiters();
+    emitCoordinatorStats();
+  };
+
+  const flushCommittedFrames = async () => {
+    if (isFlushingCommittedFrames) {
+      return;
+    }
+
+    isFlushingCommittedFrames = true;
+    try {
+      while (true) {
+        throwIfCanceled();
+        const frameEntry = orderedFrames.get(nextCommitOrder);
+        if (!frameEntry?.settled) {
+          break;
+        }
+
+        orderedFrames.delete(nextCommitOrder);
+        nextCommitOrder += 1;
+
+        try {
+          if (frameEntry.settled.kind === 'rejected') {
+            throw frameEntry.settled.error;
+          }
+
+          const payload = frameEntry.settled.payload;
+          if (payload.kind === 'success') {
+            const sequence = nextSequence;
+            nextSequence += 1;
+            const filenames = buildImageFilenames(sequence, splitterDefaults);
+            const taskStage = resolvedOutputMode === 'folder' ? 'write' : 'package';
+            const taskLabel =
+              resolvedOutputMode === 'folder'
+                ? `Save ${filenames.puzzleFilename}`
+                : `Package ${filenames.puzzleFilename}`;
+            const taskId = `${taskStage}:${sequence}`;
+
+            if (payload.watermarkApplied) {
+              watermarkPairsCleaned += 1;
+            }
+
+            job?.handleTaskEvent({
+              taskId,
+              label: taskLabel,
+              stage: taskStage,
+              state: 'running',
+              workerId: 'super-image-coordinator'
+            });
+
+            emitProgress(
+              'packaging',
+              mapProgress(
+                processedFrameCount / totalRequests,
+                watermarkEnabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END,
+                PACKAGING_PROGRESS_END
+              ),
+              resolvedOutputMode === 'folder'
+                ? `Saving image pair ${sequence}`
+                : `Packing image pair ${sequence}`
+            );
+
+            if (resolvedOutputMode === 'folder') {
+              if (!targetDirectory) {
+                throw new Error('Missing folder target while saving Super Image export files.');
+              }
+              await writeBlobToDirectory(
+                targetDirectory,
+                filenames.puzzleFilename,
+                new Blob([payload.puzzleBuffer], { type: 'image/png' })
+              );
+              await writeBlobToDirectory(
+                targetDirectory,
+                filenames.diffFilename,
+                new Blob([payload.diffBuffer], { type: 'image/png' })
+              );
+            } else if (zipFolder) {
+              zipFolder.file(filenames.puzzleFilename, payload.puzzleBuffer);
+              zipFolder.file(filenames.diffFilename, payload.diffBuffer);
+            }
+
+            manifest.push({
+              sequence,
+              title: payload.title || `Puzzle ${sequence}`,
+              diffCount: payload.diffCount,
+              puzzleFilename: filenames.puzzleFilename,
+              diffFilename: filenames.diffFilename
+            });
+            exportedImagePairCount += 1;
+
+            job?.handleTaskEvent({
+              taskId,
+              label: taskLabel,
+              stage: taskStage,
+              state: 'done',
+              workerId: 'super-image-coordinator'
+            });
+          } else {
+            warnings.push(payload.warning);
+          }
+        } finally {
+          bytesInFlight = Math.max(0, bytesInFlight - frameEntry.estimatedBytes);
+          maybeResolveWatermarkWaiters();
+          emitCoordinatorStats();
+          frameEntry.resolve();
+        }
+      }
+    } catch (error) {
+      const wrappedError = error instanceof Error ? error : new Error('Failed to package Super Image export frames.');
+      rejectPendingFrames(wrappedError);
+      throw wrappedError;
+    } finally {
+      isFlushingCommittedFrames = false;
+    }
+  };
+
+  try {
+    emitProgress('extracting', 0, 'Preparing Super Image export...');
+    emitCoordinatorStats();
+
+    extractionSummary = await extractFramesStream({
+      videos,
+      timestamps,
+      format,
+      jpegQuality,
+      signal: abortController.signal,
+      diagnosticsJob: job,
+      onProgress: (progress) => {
+        throwIfCanceled();
+        const ratio = progress.total > 0 ? progress.completed / progress.total : 0;
+        emitProgress(
+          'extracting',
+          mapProgress(ratio, 0, 0.28),
+          `Extracting frame ${progress.completed}/${progress.total}`
+        );
+      },
+      onFrame: async (item) => {
+        throwIfCanceled();
+        processedFrameCount += 1;
+        bytesInFlight += item.estimatedBytes;
+        emitProgress(
+          watermarkEnabled ? 'cleaning' : 'processing',
+          mapProgress(processedFrameCount / totalRequests, 0.28, watermarkEnabled ? 0.72 : PACKAGING_PROGRESS_END),
+          `Processing frame ${processedFrameCount}/${totalRequests}`
+        );
+        emitCoordinatorStats();
+
+        const frameOrder = nextFrameOrder;
+        nextFrameOrder += 1;
+        const frameTaskId = `process:${frameOrder}`;
+
+        const frameCommit = new Promise<void>((resolve, reject) => {
+          orderedFrames.set(frameOrder, {
+            estimatedBytes: item.estimatedBytes,
+            resolve,
+            reject
+          });
+        });
+        pendingFrameCommits.push(frameCommit);
+
+        void pool
+          .run({
+            blob: item.blob,
+            filename: item.filename,
+            sharedRegion,
+            watermarkEnabled,
+            watermarkSelectionPreset: watermarkRemoval?.selectionPreset ?? null,
+            taskId: frameTaskId,
+            taskLabel: `Process ${item.filename}`,
+            onTaskEvent: (event) => job?.handleTaskEvent(event),
+            onStats: (stats) => job?.updateWorkerStats(stats)
+          })
+          .then((payload) => {
+            const frameEntry = orderedFrames.get(frameOrder);
+            if (!frameEntry) {
+              return;
+            }
+            frameEntry.settled = {
+              kind: 'resolved',
+              payload
+            };
+            emitCoordinatorStats();
+            void flushCommittedFrames().catch((error) => {
+              rejectPendingFrames(error instanceof Error ? error : new Error('Failed to flush processed frames.'));
+            });
+          })
+          .catch((error) => {
+            const frameEntry = orderedFrames.get(frameOrder);
+            if (!frameEntry) {
+              return;
+            }
+            frameEntry.settled = {
+              kind: 'rejected',
+              error: error instanceof Error ? error : new Error('Super Image processor task failed.')
+            };
+            emitCoordinatorStats();
+            void flushCommittedFrames().catch(() => {
+              // The per-frame promises are already rejected by rejectPendingFrames.
+            });
+          });
+
+        if (bytesInFlight >= SUPER_IMAGE_HIGH_WATERMARK_BYTES) {
+          emitProgress(
+            'processing',
+            mapProgress(processedFrameCount / totalRequests, 0.28, watermarkEnabled ? 0.72 : PACKAGING_PROGRESS_END),
+            `Processing queue reached ${Math.round(bytesInFlight / (1024 * 1024))} MB. Waiting for drain...`
+          );
+          await waitForLowWatermark();
+        }
+      }
+    });
+
+    await Promise.all(pendingFrameCommits);
+    throwIfCanceled();
+
+    if (exportedImagePairCount === 0) {
+      emitProgress('packaging', 1, 'Super Image finished, but no exact 3-difference puzzles were available to export.');
+      const result: SuperImageExportResult = {
+        extractionSummary,
+        extractedFrameCount: extractionSummary.extractedCount,
+        processedFrameCount,
+        validPuzzleCount: 0,
+        discardedFrameCount: Math.max(0, processedFrameCount),
+        warnings: [...extractionSummary.warnings, ...warnings, ...preWarnings],
+        exportedImagePairCount: 0,
+        outputMode: resolvedOutputMode,
+        outputName: null,
+        watermarkRemovalEnabled: watermarkEnabled,
+        watermarkPairsCleaned,
+        watermarkPresetName
+      };
+      job?.complete('Super Image export finished with no exact 3-difference puzzles');
+      return result;
+    }
+
+    const manifestContent = JSON.stringify(
+      {
+        totalPuzzles: manifest.length,
+        generatedAt: new Date().toISOString(),
+        puzzles: [...manifest].sort((a, b) => a.sequence - b.sequence)
+      },
+      null,
+      2
+    );
+
+    if (resolvedOutputMode === 'folder') {
+      if (!targetDirectory) {
+        throw new Error('Missing folder target while finalizing Super Image export.');
+      }
+
+      job?.handleTaskEvent({
+        taskId: 'write:manifest',
+        label: 'Write manifest.json',
+        stage: 'write',
+        state: 'running',
+        workerId: 'super-image-coordinator'
+      });
+      await writeBlobToDirectory(
+        targetDirectory,
+        'manifest.json',
+        new Blob([manifestContent], { type: 'application/json' })
+      );
+      job?.handleTaskEvent({
+        taskId: 'write:manifest',
+        label: 'Write manifest.json',
+        stage: 'write',
+        state: 'done',
+        workerId: 'super-image-coordinator'
+      });
+      emitProgress('packaging', 1, `Saved folder ${rootFolderName}`);
+
+      const result: SuperImageExportResult = {
+        extractionSummary,
+        extractedFrameCount: extractionSummary.extractedCount,
+        processedFrameCount,
+        validPuzzleCount: exportedImagePairCount,
+        discardedFrameCount: Math.max(0, processedFrameCount - exportedImagePairCount),
+        warnings: [...extractionSummary.warnings, ...warnings, ...preWarnings],
+        exportedImagePairCount,
+        outputMode: 'folder',
+        outputName: rootFolderName,
+        watermarkRemovalEnabled: watermarkEnabled,
+        watermarkPairsCleaned,
+        watermarkPresetName
+      };
+      job?.complete(`Saved folder ${rootFolderName}`);
+      return result;
+    }
+
+    if (zipFolder && zip) {
+      zipFolder.file('manifest.json', manifestContent);
+    }
+
+    const zipFilename = buildSuperImageZipFilename(splitterDefaults, exportedImagePairCount);
+    job?.handleTaskEvent({
+      taskId: 'package:zip',
+      label: `Build ${zipFilename}`,
+      stage: 'package',
+      state: 'running',
+      workerId: 'super-image-coordinator'
+    });
+    const archive = await (zip ?? new JSZip()).generateAsync({ type: 'blob' }, (metadata) => {
+      emitProgress(
+        'packaging',
+        mapProgress(metadata.percent / 100, PACKAGING_PROGRESS_END, 1),
+        `Building zip folder ${Math.round(metadata.percent)}%`
+      );
+      emitCoordinatorStats();
+    });
+    throwIfCanceled();
+    triggerBlobDownload(archive, zipFilename);
+    job?.handleTaskEvent({
+      taskId: 'package:zip',
+      label: `Build ${zipFilename}`,
+      stage: 'package',
+      state: 'done',
+      workerId: 'super-image-coordinator'
+    });
+
+    const result: SuperImageExportResult = {
+      extractionSummary,
+      extractedFrameCount: extractionSummary.extractedCount,
+      processedFrameCount,
+      validPuzzleCount: exportedImagePairCount,
+      discardedFrameCount: Math.max(0, processedFrameCount - exportedImagePairCount),
+      warnings: [...extractionSummary.warnings, ...warnings, ...preWarnings],
+      exportedImagePairCount,
+      outputMode: 'zip',
+      outputName: zipFilename,
+      watermarkRemovalEnabled: watermarkEnabled,
+      watermarkPairsCleaned,
+      watermarkPresetName
+    };
+    job?.complete(`Downloaded ${zipFilename}`);
+    return result;
+  } catch (error) {
+    if (abortController.signal.aborted || isSuperImageExportCancellationError(error)) {
+      job?.cancel('Super Image export canceled');
+      throw isSuperImageExportCancellationError(error)
+        ? error
+        : createSuperImageExportCancellationError();
+    }
+    const message = error instanceof Error ? error.message : 'Super Image export failed.';
+    job?.fail(message, 'Super Image export failed');
+    throw error instanceof Error ? error : new Error(message);
+  } finally {
+    activeSuperImageExportController = null;
+    if (!abortController.signal.aborted) {
+      releaseSuperImageProcessingPool();
+    }
+  }
 };
 
 export const cancelSuperImageExport = () => {
+  if (activeSuperImageExportController) {
+    activeSuperImageExportController.cancel();
+    return;
+  }
   if (!activeSuperImageExportWorker) return;
   activeSuperImageExportWorker.postMessage({ type: 'cancel' } satisfies SuperImageExportWorkerRequest);
 };
@@ -1575,7 +2219,7 @@ const runFrameSuperImageExportInWorker = async ({
   watermarkRemoval,
   onProgress
 }: RunFrameSuperImageExportOptions): Promise<SuperImageExportResult> => {
-  if (activeSuperImageExportWorker) {
+  if (activeSuperExportController || activeSuperImageExportWorker) {
     throw new Error('Another Super Image export is already running.');
   }
 
@@ -1598,6 +2242,8 @@ const runFrameSuperImageExportInWorker = async ({
       type: 'module'
     });
     activeSuperImageExportWorker = worker;
+    const job = createSuperImageExportJob();
+    job?.setProgress(0, 'Preparing Super Image export');
     let settled = false;
     let writeQueue: Promise<void> = Promise.resolve();
 
@@ -1616,6 +2262,11 @@ const runFrameSuperImageExportInWorker = async ({
         await writeQueue;
       } catch {
         // ignore pending write failures when already failing
+      }
+      if (isSuperImageExportCancellationError(error)) {
+        job?.cancel('Super Image export canceled');
+      } else {
+        job?.fail(error.message, 'Super Image export failed');
       }
       reject(error);
     };
@@ -1644,6 +2295,8 @@ const runFrameSuperImageExportInWorker = async ({
         }
 
         cleanup();
+        job?.setProgress(1, message.result.outputMode === 'folder' ? `Saved folder ${message.result.outputName}` : 'Super Image export complete');
+        job?.complete(message.result.outputMode === 'folder' ? `Saved folder ${message.result.outputName}` : 'Super Image export complete');
         resolve({
           ...message.result,
           warnings: [...message.result.warnings, ...preWarnings]
@@ -1657,12 +2310,18 @@ const runFrameSuperImageExportInWorker = async ({
     worker.onmessage = (event: MessageEvent<SuperImageExportWorkerResponse>) => {
       const message = event.data;
 
+      if (message.type === 'task-event' || message.type === 'stats') {
+        handleSuperImageWorkerDiagnostics(job, message);
+        return;
+      }
+
       if (message.type === 'progress') {
         onProgress?.({
           stage: message.stage,
           progress: message.progress,
           label: message.label
         });
+        job?.setProgress(message.progress, message.label);
         return;
       }
 
@@ -1727,6 +2386,10 @@ const runFrameSuperImageExportInWorker = async ({
 };
 
 export const runFrameSuperImageExport = async (options: RunFrameSuperImageExportOptions): Promise<SuperImageExportResult> => {
+  if (supportsSuperImageProcessorPool()) {
+    return await runFrameSuperImageExportWithSharedPool(options);
+  }
+
   if (typeof Worker === 'undefined') {
     return await runFrameSuperImageExportOnMainThread(options);
   }

@@ -14,6 +14,8 @@ import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
 import { resolveVideoLayoutSettings } from '../constants/videoLayoutCustom';
 import { VIDEO_PACKAGE_PRESETS, resolvePackageImageArrangement } from '../constants/videoPackages';
 import { applyLogoChromaKey, clampLogoZoom } from '../utils/logoProcessing';
+import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
+import type { BinaryRenderablePuzzle, VideoExportWorkerStartPayload, VideoRenderSource } from '../services/videoRenderSource';
 
 type FramePhase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro';
 type SceneCardKind = 'intro' | 'transition' | 'outro';
@@ -40,12 +42,24 @@ interface RenderScene {
   cardEyebrow: string;
 }
 
-interface ExportVideoOptions {
-  puzzles: Puzzle[];
-  settings: VideoSettings;
-  streamOutput?: boolean;
-  onProgress?: (progress: number, status?: string) => void;
-}
+type RenderablePuzzle = Puzzle | BinaryRenderablePuzzle;
+type RenderSourceKind = VideoRenderSource['source'];
+
+type ExportVideoOptions =
+  | {
+      source: 'legacy';
+      puzzles: Puzzle[];
+      settings: VideoSettings;
+      streamOutput?: boolean;
+      onProgress?: (progress: number, status?: string) => void;
+    }
+  | {
+      source: 'binary';
+      puzzles: BinaryRenderablePuzzle[];
+      settings: VideoSettings;
+      streamOutput?: boolean;
+      onProgress?: (progress: number, status?: string) => void;
+    };
 
 interface PreviewFrameOptions {
   puzzles: Puzzle[];
@@ -55,11 +69,7 @@ interface PreviewFrameOptions {
 
 interface WorkerStartMessage {
   type: 'start';
-  payload: {
-    puzzles: Puzzle[];
-    settings: VideoSettings;
-    streamOutput?: boolean;
-  };
+  payload: VideoExportWorkerStartPayload;
 }
 
 interface WorkerPreviewFrameMessage {
@@ -84,7 +94,9 @@ type WorkerResponse =
   | { type: 'preview-frame-done'; buffer: ArrayBuffer; mimeType: string }
   | { type: 'done'; buffer: ArrayBuffer; mimeType: string; fileName: string }
   | { type: 'error'; message: string }
-  | { type: 'cancelled' };
+  | { type: 'cancelled' }
+  | MediaTaskEventMessage
+  | MediaWorkerStatsMessage;
 
 interface Rect {
   x: number;
@@ -106,7 +118,21 @@ interface LoadedPuzzleImages {
   modified: ImageBitmap;
 }
 
+interface VideoExportTelemetryState {
+  startedAt: number;
+  lastStatsAt: number;
+  renderedFrames: number;
+  totalRenderMs: number;
+  totalEncodeMs: number;
+  cacheEntries: number;
+  hotPuzzleCount: number;
+}
+
 let isCanceled = false;
+let currentWorkerSessionId = 'primary';
+
+const getVideoWorkerId = () => `video-export-worker:${currentWorkerSessionId}`;
+const getScopedTaskId = (taskId: string) => `${getVideoWorkerId()}:${taskId}`;
 
 const FPS = 30;
 
@@ -298,6 +324,76 @@ const throwIfCanceled = () => {
   }
 };
 
+const createTelemetryState = (): VideoExportTelemetryState => ({
+  startedAt: performance.now(),
+  lastStatsAt: 0,
+  renderedFrames: 0,
+  totalRenderMs: 0,
+  totalEncodeMs: 0,
+  cacheEntries: 0,
+  hotPuzzleCount: 0
+});
+
+const emitTaskEvent = (event: MediaTaskEventMessage['event']) => {
+  postMessageToMain({
+    type: 'task-event',
+    event: {
+      workerId: getVideoWorkerId(),
+      timestamp: Date.now(),
+      ...event
+    }
+  });
+};
+
+const emitStats = (
+  telemetry: VideoExportTelemetryState,
+  {
+    queueSize,
+    runningTasks,
+    remainingFrames,
+    force = false
+  }: {
+    queueSize: number;
+    runningTasks: number;
+    remainingFrames: number;
+    force?: boolean;
+  }
+) => {
+  const now = Date.now();
+  if (!force && now - telemetry.lastStatsAt < 250) {
+    return;
+  }
+  telemetry.lastStatsAt = now;
+  const elapsedSeconds = Math.max(0.001, (performance.now() - telemetry.startedAt) / 1000);
+  const totalTaskMs = telemetry.totalRenderMs + telemetry.totalEncodeMs;
+  postMessageToMain({
+    type: 'stats',
+    stats: {
+      workerId: getVideoWorkerId(),
+      label: 'Video Export Worker',
+      runtimeKind: 'worker',
+      activeWorkers: 1,
+      queueSize: Math.max(0, queueSize),
+      runningTasks: Math.max(0, runningTasks),
+      avgTaskMs: telemetry.renderedFrames > 0 ? totalTaskMs / telemetry.renderedFrames : 0,
+      fps: telemetry.renderedFrames / elapsedSeconds,
+      bytesInFlight: 0,
+      stageQueueDepths: {
+        render: Math.max(0, remainingFrames),
+        encode: runningTasks > 0 ? 1 : 0
+      },
+      metrics: {
+        cacheEntries: telemetry.cacheEntries,
+        hotPuzzleCount: telemetry.hotPuzzleCount,
+        renderedFrames: telemetry.renderedFrames,
+        avgRenderMs: telemetry.renderedFrames > 0 ? telemetry.totalRenderMs / telemetry.renderedFrames : 0,
+        avgEncodeMs: telemetry.renderedFrames > 0 ? telemetry.totalEncodeMs / telemetry.renderedFrames : 0
+      },
+      updatedAt: now
+    }
+  });
+};
+
 const loadImage = async (src: string): Promise<ImageBitmap> => {
   const response = await fetch(src);
   if (!response.ok) {
@@ -306,6 +402,122 @@ const loadImage = async (src: string): Promise<ImageBitmap> => {
   const blob = await response.blob();
   throwIfCanceled();
   return await createImageBitmap(blob);
+};
+
+const loadBinaryImage = async (buffer: ArrayBuffer, mimeType: string): Promise<ImageBitmap> => {
+  throwIfCanceled();
+  return await createImageBitmap(new Blob([buffer], { type: mimeType || 'image/png' }));
+};
+
+const releaseBitmap = (bitmap: ImageBitmap | null | undefined) => {
+  if (!bitmap) return;
+  if (typeof bitmap.close === 'function') {
+    bitmap.close();
+  }
+};
+
+const releaseLoadedPuzzleImages = (images: LoadedPuzzleImages | null | undefined) => {
+  if (!images) return;
+  releaseBitmap(images.original);
+  releaseBitmap(images.modified);
+};
+
+const createPuzzleAssetCache = (
+  source: RenderSourceKind,
+  puzzles: RenderablePuzzle[],
+  telemetry: VideoExportTelemetryState
+) => {
+  const loadedImages: Array<LoadedPuzzleImages | null> = new Array(puzzles.length).fill(null);
+  const pendingLoads = new Map<number, Promise<LoadedPuzzleImages>>();
+
+  const updateTelemetry = () => {
+    telemetry.cacheEntries = loadedImages.filter(Boolean).length;
+    telemetry.hotPuzzleCount = loadedImages.reduce((count, entry) => count + (entry ? 1 : 0), 0);
+  };
+
+  const ensureLoaded = async (index: number): Promise<LoadedPuzzleImages | null> => {
+    if (index < 0 || index >= puzzles.length) {
+      return null;
+    }
+
+    const existing = loadedImages[index];
+    if (existing) {
+      updateTelemetry();
+      return existing;
+    }
+
+    const pending = pendingLoads.get(index);
+    if (pending) {
+      return await pending;
+    }
+
+    const loadPromise = (async () => {
+      const puzzle = puzzles[index];
+      const [original, modified] =
+        source === 'binary'
+          ? await Promise.all([
+              loadBinaryImage((puzzle as BinaryRenderablePuzzle).imageABuffer, (puzzle as BinaryRenderablePuzzle).mimeType),
+              loadBinaryImage((puzzle as BinaryRenderablePuzzle).imageBBuffer, (puzzle as BinaryRenderablePuzzle).mimeType)
+            ])
+          : await Promise.all([
+              loadImage((puzzle as Puzzle).imageA),
+              loadImage((puzzle as Puzzle).imageB)
+            ]);
+      const images = {
+        original,
+        modified
+      };
+      loadedImages[index] = images;
+      pendingLoads.delete(index);
+      updateTelemetry();
+      return images;
+    })().catch((error) => {
+      pendingLoads.delete(index);
+      throw error;
+    });
+
+    pendingLoads.set(index, loadPromise);
+    return await loadPromise;
+  };
+
+  const evictOutsideWindow = (keepIndices: Set<number>) => {
+    loadedImages.forEach((images, index) => {
+      if (!images) return;
+      if (keepIndices.has(index) || pendingLoads.has(index)) {
+        return;
+      }
+      releaseLoadedPuzzleImages(images);
+      loadedImages[index] = null;
+    });
+    updateTelemetry();
+  };
+
+  const ensureWindow = async (centerIndex: number) => {
+    const keepIndices = new Set<number>();
+    for (let offset = -1; offset <= 2; offset += 1) {
+      const nextIndex = centerIndex + offset;
+      if (nextIndex < 0 || nextIndex >= puzzles.length) continue;
+      keepIndices.add(nextIndex);
+    }
+    await Promise.all([...keepIndices].map((index) => ensureLoaded(index)));
+    evictOutsideWindow(keepIndices);
+  };
+
+  const releaseAll = () => {
+    pendingLoads.clear();
+    loadedImages.forEach((images, index) => {
+      if (!images) return;
+      releaseLoadedPuzzleImages(images);
+      loadedImages[index] = null;
+    });
+    updateTelemetry();
+  };
+
+  return {
+    loadedImages,
+    ensureWindow,
+    releaseAll
+  };
 };
 
 const getExportDimensions = (
@@ -502,7 +714,7 @@ const getMarkerBounds = (
 
 const resolveSceneText = (
   segment: TimelineSegment,
-  puzzles: Puzzle[],
+  puzzles: RenderablePuzzle[],
   settings: VideoSettings
 ) => {
   const currentPuzzleNumber = segment.puzzleIndex + 1;
@@ -558,7 +770,7 @@ const resolveSceneText = (
   };
 };
 
-const buildTimeline = (puzzles: Puzzle[], settings: VideoSettings): TimelineSegment[] => {
+const buildTimeline = (puzzles: RenderablePuzzle[], settings: VideoSettings): TimelineSegment[] => {
   const showDuration = Math.max(0.1, settings.showDuration);
   const revealDuration = Math.max(0.5, settings.revealDuration);
   const transitionDuration = Math.max(0, settings.transitionDuration);
@@ -631,7 +843,7 @@ const buildTimeline = (puzzles: Puzzle[], settings: VideoSettings): TimelineSegm
 const getSceneAtTime = (
   timestamp: number,
   timeline: TimelineSegment[],
-  puzzles: Puzzle[],
+  puzzles: RenderablePuzzle[],
   settings: VideoSettings
 ): RenderScene => {
   const segment =
@@ -1282,7 +1494,7 @@ const drawFrame = (
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  puzzles: Puzzle[],
+  puzzles: RenderablePuzzle[],
   loadedImages: Array<LoadedPuzzleImages | null>,
   brandLogo: ImageBitmap | null,
   settings: VideoSettings,
@@ -2203,48 +2415,62 @@ const renderPreviewFrameInWorker = async ({
 
   const loadedImages: Array<LoadedPuzzleImages | null> = new Array(puzzles.length).fill(null);
   const sceneNeedsImages = scene.segment.phase !== 'intro' && scene.segment.phase !== 'outro';
+  let rawLogo: ImageBitmap | null = null;
+  let brandLogo: ImageBitmap | null = null;
 
-  if (sceneNeedsImages) {
-    const puzzle = puzzles[scene.segment.puzzleIndex];
-    const [original, modified] = await Promise.all([loadImage(puzzle.imageA), loadImage(puzzle.imageB)]);
-    loadedImages[scene.segment.puzzleIndex] = {
-      original,
-      modified
+  try {
+    if (sceneNeedsImages) {
+      const puzzle = puzzles[scene.segment.puzzleIndex];
+      const [original, modified] = await Promise.all([loadImage(puzzle.imageA), loadImage(puzzle.imageB)]);
+      loadedImages[scene.segment.puzzleIndex] = {
+        original,
+        modified
+      };
+    }
+    if (settings.logo) {
+      rawLogo = await loadImage(settings.logo);
+      brandLogo = await processLogoBitmap(rawLogo, settings);
+      if (brandLogo !== rawLogo) {
+        releaseBitmap(rawLogo);
+        rawLogo = null;
+      }
+    }
+    throwIfCanceled();
+
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Unable to initialize canvas renderer for preview.');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    drawFrame(
+      ctx as unknown as CanvasRenderingContext2D,
+      width,
+      height,
+      puzzles,
+      loadedImages,
+      brandLogo,
+      settings,
+      scene
+    );
+    throwIfCanceled();
+
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    throwIfCanceled();
+
+    return {
+      buffer: await blob.arrayBuffer(),
+      mimeType: blob.type || 'image/png'
     };
+  } finally {
+    loadedImages.forEach((images) => releaseLoadedPuzzleImages(images));
+    releaseBitmap(brandLogo);
+    releaseBitmap(rawLogo);
   }
-  const brandLogo = settings.logo
-    ? await processLogoBitmap(await loadImage(settings.logo), settings)
-    : null;
-  throwIfCanceled();
-
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Unable to initialize canvas renderer for preview.');
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-
-  drawFrame(
-    ctx as unknown as CanvasRenderingContext2D,
-    width,
-    height,
-    puzzles,
-    loadedImages,
-    brandLogo,
-    settings,
-    scene
-  );
-  throwIfCanceled();
-
-  const blob = await canvas.convertToBlob({ type: 'image/png' });
-  throwIfCanceled();
-
-  return {
-    buffer: await blob.arrayBuffer(),
-    mimeType: blob.type || 'image/png'
-  };
 };
 
 const exportVideoInWorker = async ({
+  source,
   puzzles,
   settings,
   streamOutput = false,
@@ -2263,6 +2489,10 @@ const exportVideoInWorker = async ({
   const totalFrames = Math.max(1, Math.ceil(totalDuration * FPS));
   const bitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
+  const telemetry = createTelemetryState();
+  const loadAssetsTaskId = getScopedTaskId('video-export-load-assets');
+  const encodeTaskId = getScopedTaskId('video-export-encode');
+  const renderTaskId = getScopedTaskId('video-export-render');
 
   const canEncode = await canEncodeVideo(codecConfig.codec, { width, height, bitrate });
   if (!canEncode) {
@@ -2272,130 +2502,200 @@ const exportVideoInWorker = async ({
   }
   throwIfCanceled();
 
+  emitTaskEvent({
+    taskId: loadAssetsTaskId,
+    label: 'Load export assets',
+    stage: 'load',
+    state: 'running'
+  });
   onProgress?.(0, 'Loading puzzle images...');
-  const imageCache = new Map<string, ImageBitmap>();
-  const getImage = async (src: string) => {
-    const cached = imageCache.get(src);
-    if (cached) return cached;
-    const loaded = await loadImage(src);
-    imageCache.set(src, loaded);
-    return loaded;
-  };
 
-  const loadedImages: Array<LoadedPuzzleImages | null> = [];
-  for (let index = 0; index < puzzles.length; index += 1) {
-    const puzzle = puzzles[index];
-    const [original, modified] = await Promise.all([getImage(puzzle.imageA), getImage(puzzle.imageB)]);
-    loadedImages.push({
-      original,
-      modified
-    });
-    onProgress?.((index + 1) / (puzzles.length * 12), `Loaded images ${index + 1}/${puzzles.length}`);
-    throwIfCanceled();
-  }
-  const brandLogo = settings.logo
-    ? await processLogoBitmap(await getImage(settings.logo), settings)
-    : null;
+  const puzzleAssetCache = createPuzzleAssetCache(source, puzzles, telemetry);
+  const loadedImages = puzzleAssetCache.loadedImages;
+  let rawLogo: ImageBitmap | null = null;
+  let brandLogo: ImageBitmap | null = null;
+  let activePuzzleIndex = -1;
 
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Unable to initialize canvas renderer for export.');
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-
-  const target = streamOutput
-    ? new StreamTarget(
-        new WritableStream({
-          write: async (chunk: { type: 'write'; data: Uint8Array; position: number }) => {
-            const payload =
-              chunk.data.byteOffset === 0 && chunk.data.byteLength === chunk.data.buffer.byteLength
-                ? chunk.data
-                : chunk.data.slice();
-            postMessageToMain(
-              {
-                type: 'stream-chunk',
-                position: chunk.position,
-                data: payload.buffer
-              },
-              [payload.buffer]
-            );
-          }
-        }),
-        {
-          chunked: true,
-          chunkSize: 16 * 1024 * 1024
-        }
-      )
-    : new BufferTarget();
-  const output = new Output({
-    format: codecConfig.format,
-    target
-  });
-  const videoSource = new CanvasSource(canvas, {
-    codec: codecConfig.codec,
-    bitrate,
-    bitrateMode: 'constant',
-    latencyMode: 'quality',
-    contentHint: 'detail'
-  });
-  output.addVideoTrack(videoSource, { frameRate: FPS });
-
-  onProgress?.(0.1, 'Starting encoder...');
-  await output.start();
-  throwIfCanceled();
-
-  const progressStep = Math.max(1, Math.floor(totalFrames / 150));
-  for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
-    const timestamp = frameIndex / FPS;
-    const scene = getSceneAtTime(timestamp, timeline, puzzles, settings);
-    drawFrame(
-      ctx as unknown as CanvasRenderingContext2D,
-      width,
-      height,
-      puzzles,
-      loadedImages,
-      brandLogo,
-      settings,
-      scene
-    );
-    await videoSource.add(timestamp, 1 / FPS);
-    throwIfCanceled();
-
-    if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
-      const exportProgress = 0.1 + ((frameIndex + 1) / totalFrames) * 0.85;
-      onProgress?.(exportProgress, `Encoding frame ${frameIndex + 1}/${totalFrames}`);
+  try {
+    if (puzzles.length > 0) {
+      await puzzleAssetCache.ensureWindow(0);
     }
-  }
+    if (settings.logo) {
+      rawLogo = await loadImage(settings.logo);
+      brandLogo = await processLogoBitmap(rawLogo, settings);
+      if (brandLogo !== rawLogo) {
+        releaseBitmap(rawLogo);
+        rawLogo = null;
+      }
+    }
+    emitTaskEvent({
+      taskId: loadAssetsTaskId,
+      label: 'Load export assets',
+      stage: 'load',
+      state: 'done'
+    });
+    emitStats(telemetry, {
+      queueSize: Math.max(0, totalFrames),
+      runningTasks: 0,
+      remainingFrames: totalFrames,
+      force: true
+    });
+    throwIfCanceled();
 
-  onProgress?.(0.96, 'Finalizing file...');
-  await output.finalize();
-  throwIfCanceled();
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Unable to initialize canvas renderer for export.');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
-  const now = new Date();
-  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
-    now.getDate()
-  ).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(
-    2,
-    '0'
-  )}${String(now.getSeconds()).padStart(2, '0')}`;
-  const fileName = `spotitnow-${settings.aspectRatio.replace(':', 'x')}-${settings.exportResolution}-${settings.exportCodec}-${stamp}.${codecConfig.extension}`;
+    const target = streamOutput
+      ? new StreamTarget(
+          new WritableStream({
+            write: async (chunk: { type: 'write'; data: Uint8Array; position: number }) => {
+              const payload =
+                chunk.data.byteOffset === 0 && chunk.data.byteLength === chunk.data.buffer.byteLength
+                  ? chunk.data
+                  : chunk.data.slice();
+              postMessageToMain(
+                {
+                  type: 'stream-chunk',
+                  position: chunk.position,
+                  data: payload.buffer
+                },
+                [payload.buffer]
+              );
+            }
+          }),
+          {
+            chunked: true,
+            chunkSize: 16 * 1024 * 1024
+          }
+        )
+      : new BufferTarget();
+    const output = new Output({
+      format: codecConfig.format,
+      target
+    });
+    const videoSource = new CanvasSource(canvas, {
+      codec: codecConfig.codec,
+      bitrate,
+      bitrateMode: 'constant',
+      latencyMode: 'quality',
+      contentHint: 'detail'
+    });
+    output.addVideoTrack(videoSource, { frameRate: FPS });
 
-  if (streamOutput) {
+    emitTaskEvent({
+      taskId: encodeTaskId,
+      label: 'Encode video output',
+      stage: 'encode',
+      state: 'running'
+    });
+    emitTaskEvent({
+      taskId: renderTaskId,
+      label: 'Render export frames',
+      stage: 'render',
+      state: 'running'
+    });
+
+    onProgress?.(0.1, 'Starting encoder...');
+    await output.start();
+    throwIfCanceled();
+
+    const progressStep = Math.max(1, Math.floor(totalFrames / 150));
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+      const timestamp = frameIndex / FPS;
+      const scene = getSceneAtTime(timestamp, timeline, puzzles, settings);
+      const sceneNeedsImages = scene.segment.phase !== 'intro' && scene.segment.phase !== 'outro';
+
+      if (sceneNeedsImages && scene.segment.puzzleIndex !== activePuzzleIndex) {
+        activePuzzleIndex = scene.segment.puzzleIndex;
+        await puzzleAssetCache.ensureWindow(activePuzzleIndex);
+      }
+
+      const renderStart = performance.now();
+      drawFrame(
+        ctx as unknown as CanvasRenderingContext2D,
+        width,
+        height,
+        puzzles,
+        loadedImages,
+        brandLogo,
+        settings,
+        scene
+      );
+      telemetry.totalRenderMs += Math.max(0, performance.now() - renderStart);
+      const encodeStart = performance.now();
+      await videoSource.add(timestamp, 1 / FPS);
+      telemetry.totalEncodeMs += Math.max(0, performance.now() - encodeStart);
+      telemetry.renderedFrames += 1;
+      throwIfCanceled();
+
+      if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
+        const exportProgress = 0.1 + ((frameIndex + 1) / totalFrames) * 0.85;
+        onProgress?.(exportProgress, `Encoding frame ${frameIndex + 1}/${totalFrames}`);
+      }
+
+      emitStats(telemetry, {
+        queueSize: Math.max(0, totalFrames - frameIndex - 1),
+        runningTasks: 1,
+        remainingFrames: Math.max(0, totalFrames - frameIndex - 1)
+      });
+    }
+
+    emitTaskEvent({
+      taskId: renderTaskId,
+      label: 'Render export frames',
+      stage: 'render',
+      state: 'done'
+    });
+
+    onProgress?.(0.96, 'Finalizing file...');
+    await output.finalize();
+    throwIfCanceled();
+    emitTaskEvent({
+      taskId: encodeTaskId,
+      label: 'Encode video output',
+      stage: 'encode',
+      state: 'done'
+    });
+    emitStats(telemetry, {
+      queueSize: 0,
+      runningTasks: 0,
+      remainingFrames: 0,
+      force: true
+    });
+
+    const now = new Date();
+    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
+      now.getDate()
+    ).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(
+      2,
+      '0'
+    )}${String(now.getSeconds()).padStart(2, '0')}`;
+    const fileName = `spotitnow-${settings.aspectRatio.replace(':', 'x')}-${settings.exportResolution}-${settings.exportCodec}-${stamp}.${codecConfig.extension}`;
+
+    if (streamOutput) {
+      return {
+        mode: 'stream',
+        fileName,
+        mimeType: codecConfig.mimeType
+      };
+    }
+
+    const buffer = (target as BufferTarget).buffer;
+    if (!buffer) throw new Error('Failed to build exported video buffer.');
     return {
-      mode: 'stream',
+      mode: 'buffer',
+      buffer,
       fileName,
       mimeType: codecConfig.mimeType
     };
+  } finally {
+    puzzleAssetCache.releaseAll();
+    releaseBitmap(brandLogo);
+    releaseBitmap(rawLogo);
   }
-
-  const buffer = (target as BufferTarget).buffer;
-  if (!buffer) throw new Error('Failed to build exported video buffer.');
-  return {
-    mode: 'buffer',
-    buffer,
-    fileName,
-    mimeType: codecConfig.mimeType
-  };
 };
 
 self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
@@ -2422,15 +2722,28 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
         [result.buffer]
       );
     } else {
-      const { puzzles, settings, streamOutput } = message.payload;
-      const result = await exportVideoInWorker({
-        puzzles,
-        settings,
-        streamOutput,
-        onProgress: (progress, status) => {
-          postMessageToMain({ type: 'progress', progress, status });
-        }
-      });
+      currentWorkerSessionId = message.payload.workerSessionId || 'primary';
+      const result = await exportVideoInWorker(
+        message.payload.source === 'binary'
+          ? {
+              source: 'binary',
+              puzzles: message.payload.puzzles,
+              settings: message.payload.settings,
+              streamOutput: message.payload.streamOutput,
+              onProgress: (progress, status) => {
+                postMessageToMain({ type: 'progress', progress, status });
+              }
+            }
+          : {
+              source: 'legacy',
+              puzzles: message.payload.puzzles,
+              settings: message.payload.settings,
+              streamOutput: message.payload.streamOutput,
+              onProgress: (progress, status) => {
+                postMessageToMain({ type: 'progress', progress, status });
+              }
+            }
+      );
 
       if (result.mode === 'stream') {
         postMessageToMain({
@@ -2461,5 +2774,6 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
     }
   } finally {
     isCanceled = false;
+    currentWorkerSessionId = 'primary';
   }
 };

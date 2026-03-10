@@ -1,10 +1,24 @@
 import { Puzzle, VideoSettings } from '../types';
+import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
+import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from './mediaTelemetry';
+import type { BinaryRenderablePuzzle, VideoExportWorkerStartPayload } from './videoRenderSource';
 
-interface ExportVideoOptions {
-  puzzles: Puzzle[];
+interface ExportVideoBaseOptions {
   settings: VideoSettings;
   onProgress?: (progress: number, status?: string) => void;
+  diagnosticsJob?: MediaJobController | null;
+  manageDiagnosticsLifecycle?: boolean;
 }
+
+type ExportVideoOptions =
+  | (ExportVideoBaseOptions & {
+      source?: 'legacy';
+      puzzles: Puzzle[];
+    })
+  | (ExportVideoBaseOptions & {
+      source: 'binary';
+      puzzles: BinaryRenderablePuzzle[];
+    });
 
 interface RenderedVideoResult {
   blob: Blob;
@@ -31,9 +45,24 @@ type WorkerResponse =
   | { type: 'preview-frame-done'; buffer: ArrayBuffer; mimeType: string }
   | { type: 'done'; buffer: ArrayBuffer; mimeType: string; fileName: string }
   | { type: 'error'; message: string }
-  | { type: 'cancelled' };
+  | { type: 'cancelled' }
+  | MediaTaskEventMessage
+  | MediaWorkerStatsMessage;
 
-let activeWorker: Worker | null = null;
+interface DiagnosticsContext {
+  job: MediaJobController | null;
+  mirrorProgress: boolean;
+  manageLifecycle: boolean;
+}
+
+interface ActiveVideoExportSession {
+  worker: Worker;
+  workerId: string;
+  cancel: () => void;
+}
+
+const activeSessions = new Set<ActiveVideoExportSession>();
+let nextVideoExportSessionId = 1;
 
 const CODEC_EXTENSION: Record<VideoSettings['exportCodec'], string> = {
   h264: 'mp4',
@@ -56,9 +85,87 @@ const downloadBlob = (blob: Blob, fileName: string) => {
   URL.revokeObjectURL(url);
 };
 
-export const cancelVideoExport = () => {
-  if (!activeWorker) return;
-  activeWorker.postMessage({ type: 'cancel' });
+const createVideoExportJob = () =>
+  import.meta.env.DEV ? mediaDiagnosticsStore.startJob('video_export', 'Video Export') : null;
+
+const createVideoExportSessionId = () => `session-${nextVideoExportSessionId++}`;
+const getWorkerIdForSession = (sessionId: string) => `video-export-worker:${sessionId}`;
+
+const registerSession = (worker: Worker, workerId: string): ActiveVideoExportSession => {
+  const session: ActiveVideoExportSession = {
+    worker,
+    workerId,
+    cancel: () => {
+      worker.postMessage({ type: 'cancel' });
+    }
+  };
+  activeSessions.add(session);
+  return session;
+};
+
+const cleanupSession = (session: ActiveVideoExportSession, job: MediaJobController | null) => {
+  session.worker.terminate();
+  activeSessions.delete(session);
+  job?.removeWorkerStats(session.workerId);
+};
+
+const resolveDiagnosticsContext = (options: ExportVideoOptions): DiagnosticsContext => {
+  if (options.diagnosticsJob) {
+    return {
+      job: options.diagnosticsJob,
+      mirrorProgress: options.manageDiagnosticsLifecycle === true,
+      manageLifecycle: options.manageDiagnosticsLifecycle === true
+    };
+  }
+
+  return {
+    job: createVideoExportJob(),
+    mirrorProgress: true,
+    manageLifecycle: true
+  };
+};
+
+const handleWorkerDiagnostics = (job: MediaJobController | null, message: WorkerResponse) => {
+  if (!job) return false;
+  if (message.type === 'task-event') {
+    job.handleTaskEvent(message.event);
+    return true;
+  }
+  if (message.type === 'stats') {
+    job.updateWorkerStats(message.stats);
+    return true;
+  }
+  return false;
+};
+
+const buildWorkerStartPayload = (
+  options: ExportVideoOptions,
+  sessionId: string,
+  jobId?: string
+): { payload: VideoExportWorkerStartPayload; transferables: Transferable[] } => {
+  if (options.source === 'binary') {
+    return {
+      payload: {
+        source: 'binary',
+        puzzles: options.puzzles,
+        settings: options.settings,
+        jobId,
+        workerSessionId: sessionId
+      },
+      transferables: options.puzzles.flatMap((puzzle) => [puzzle.imageABuffer, puzzle.imageBBuffer])
+    };
+  }
+
+  return {
+    payload: {
+      source: 'legacy',
+      puzzles: options.puzzles,
+      settings: options.settings,
+      jobId,
+      workerSessionId: sessionId
+    },
+    transferables: []
+  };
 };
 
 const supportsStreamingSave = () =>
@@ -66,52 +173,63 @@ const supportsStreamingSave = () =>
   typeof (window as any).showSaveFilePicker === 'function' &&
   typeof WritableStream !== 'undefined';
 
-const isAbortError = (error: unknown) =>
-  error instanceof DOMException && error.name === 'AbortError';
+const isAbortError = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
 
 const getSuggestedFileName = (settings: VideoSettings) => {
   const extension = CODEC_EXTENSION[settings.exportCodec];
   return `spotitnow-${settings.aspectRatio.replace(':', 'x')}-${settings.exportResolution}-${settings.exportCodec}.${extension}`;
 };
 
-const streamVideoWithWebCodecs = async ({
-  puzzles,
-  settings,
-  onProgress,
-  writable
-}: ExportVideoOptions & { writable: FileSystemWritableFileStream }): Promise<void> => {
-  if (activeWorker) {
-    throw new Error('Another export is already running.');
-  }
+export const cancelVideoExport = () => {
+  activeSessions.forEach((session) => {
+    session.cancel();
+  });
+};
 
-  return new Promise<void>((resolve, reject) => {
-    const worker = new Worker(new URL('../workers/videoExport.worker.ts', import.meta.url), {
-      type: 'module'
-    });
-    activeWorker = worker;
+const streamVideoWithWebCodecs = async (
+  options: ExportVideoOptions & { writable: FileSystemWritableFileStream }
+): Promise<void> => {
+  const { onProgress, writable } = options;
+
+  return await new Promise<void>((resolve, reject) => {
+    const diagnostics = resolveDiagnosticsContext(options);
+    const job = diagnostics.job;
+    const sessionId = createVideoExportSessionId();
+    const session = registerSession(
+      new Worker(new URL('../workers/videoExport.worker.ts', import.meta.url), {
+        type: 'module'
+      }),
+      getWorkerIdForSession(sessionId)
+    );
     let settled = false;
     let writeQueue: Promise<void> = Promise.resolve();
 
-    const cleanupWorker = () => {
-      worker.terminate();
-      if (activeWorker === worker) {
-        activeWorker = null;
-      }
+    if (diagnostics.mirrorProgress) {
+      job?.setProgress(0, 'Preparing export...');
+    }
+
+    const cleanup = () => {
+      cleanupSession(session, job);
     };
 
     const fail = async (error: Error) => {
       if (settled) return;
       settled = true;
-      cleanupWorker();
+      cleanup();
       try {
         await writeQueue;
       } catch {
-        // ignore write queue failures when already failing
+        // Ignore write-queue failures when the session is already failing.
       }
       try {
         await writable.abort(error.message);
       } catch {
-        // ignore abort failures
+        // Ignore abort failures.
+      }
+      if (diagnostics.manageLifecycle && error.message === 'Export canceled') {
+        job?.cancel('Export canceled');
+      } else if (diagnostics.manageLifecycle) {
+        job?.fail(error.message, 'Video export failed');
       }
       reject(error);
     };
@@ -119,7 +237,7 @@ const streamVideoWithWebCodecs = async ({
     const complete = async (fileName: string) => {
       if (settled) return;
       settled = true;
-      cleanupWorker();
+      cleanup();
       try {
         await writeQueue;
         await writable.close();
@@ -129,14 +247,26 @@ const streamVideoWithWebCodecs = async ({
         return;
       }
       onProgress?.(1, `Rendered ${fileName}`);
+      if (diagnostics.mirrorProgress) {
+        job?.setProgress(1, `Rendered ${fileName}`);
+      }
+      if (diagnostics.manageLifecycle) {
+        job?.complete(`Rendered ${fileName}`);
+      }
       resolve();
     };
 
-    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    session.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data;
+      if (handleWorkerDiagnostics(job, message)) {
+        return;
+      }
 
       if (message.type === 'progress') {
         onProgress?.(message.progress, message.status);
+        if (diagnostics.mirrorProgress) {
+          job?.setProgress(message.progress, message.status || 'Exporting video');
+        }
         return;
       }
 
@@ -168,55 +298,71 @@ const streamVideoWithWebCodecs = async ({
       }
     };
 
-    worker.onerror = (event) => {
+    session.worker.onerror = (event) => {
+      if (settled) return;
       const detail = event.message ? ` ${event.message}` : '';
       void fail(new Error(`Video export worker crashed.${detail}`));
     };
 
-    worker.postMessage({
-      type: 'start',
-      payload: {
-        puzzles,
-        settings,
-        streamOutput: true
-      }
-    });
+    const { payload, transferables } = buildWorkerStartPayload(options, sessionId, job?.jobId);
+    session.worker.postMessage(
+      {
+        type: 'start',
+        payload: {
+          ...payload,
+          streamOutput: true
+        }
+      },
+      transferables
+    );
   });
 };
 
-export const renderVideoWithWebCodecs = async ({
-  puzzles,
-  settings,
-  onProgress
-}: ExportVideoOptions): Promise<RenderedVideoResult> => {
-  if (activeWorker) {
-    throw new Error('Another export is already running.');
-  }
+export const renderVideoWithWebCodecs = async (options: ExportVideoOptions): Promise<RenderedVideoResult> => {
+  const { onProgress } = options;
 
-  return new Promise<RenderedVideoResult>((resolve, reject) => {
-    const worker = new Worker(new URL('../workers/videoExport.worker.ts', import.meta.url), {
-      type: 'module'
-    });
-    activeWorker = worker;
+  return await new Promise<RenderedVideoResult>((resolve, reject) => {
+    const diagnostics = resolveDiagnosticsContext(options);
+    const job = diagnostics.job;
+    const sessionId = createVideoExportSessionId();
+    const session = registerSession(
+      new Worker(new URL('../workers/videoExport.worker.ts', import.meta.url), {
+        type: 'module'
+      }),
+      getWorkerIdForSession(sessionId)
+    );
+
+    if (diagnostics.mirrorProgress) {
+      job?.setProgress(0, 'Preparing export...');
+    }
 
     const cleanup = () => {
-      worker.terminate();
-      if (activeWorker === worker) {
-        activeWorker = null;
-      }
+      cleanupSession(session, job);
     };
 
-    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    session.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data;
+      if (handleWorkerDiagnostics(job, message)) {
+        return;
+      }
 
       if (message.type === 'progress') {
         onProgress?.(message.progress, message.status);
+        if (diagnostics.mirrorProgress) {
+          job?.setProgress(message.progress, message.status || 'Exporting video');
+        }
         return;
       }
 
       if (message.type === 'done') {
         const blob = new Blob([message.buffer], { type: message.mimeType });
         onProgress?.(1, `Rendered ${message.fileName}`);
+        if (diagnostics.mirrorProgress) {
+          job?.setProgress(1, `Rendered ${message.fileName}`);
+        }
+        if (diagnostics.manageLifecycle) {
+          job?.complete(`Rendered ${message.fileName}`);
+        }
         cleanup();
         resolve({
           blob,
@@ -228,30 +374,40 @@ export const renderVideoWithWebCodecs = async ({
 
       if (message.type === 'cancelled') {
         onProgress?.(0, 'Export canceled');
+        if (diagnostics.manageLifecycle) {
+          job?.cancel('Export canceled');
+        }
         cleanup();
         reject(new Error('Export canceled'));
         return;
       }
 
       if (message.type === 'error') {
+        if (diagnostics.manageLifecycle) {
+          job?.fail(message.message, 'Video export failed');
+        }
         cleanup();
         reject(new Error(message.message));
       }
     };
 
-    worker.onerror = (event) => {
+    session.worker.onerror = (event) => {
+      if (diagnostics.manageLifecycle) {
+        job?.fail(`Video export worker crashed.${event.message ? ` ${event.message}` : ''}`, 'Video export failed');
+      }
       cleanup();
       const detail = event.message ? ` ${event.message}` : '';
       reject(new Error(`Video export worker crashed.${detail}`));
     };
 
-    worker.postMessage({
-      type: 'start',
-      payload: {
-        puzzles,
-        settings
-      }
-    });
+    const { payload, transferables } = buildWorkerStartPayload(options, sessionId, job?.jobId);
+    session.worker.postMessage(
+      {
+        type: 'start',
+        payload
+      },
+      transferables
+    );
   });
 };
 
@@ -261,7 +417,7 @@ export const renderVideoFramePreview = async ({
   timestamp,
   signal
 }: RenderVideoFramePreviewOptions): Promise<RenderedVideoFramePreview> => {
-  return new Promise<RenderedVideoFramePreview>((resolve, reject) => {
+  return await new Promise<RenderedVideoFramePreview>((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException('Preview canceled', 'AbortError'));
       return;
@@ -368,7 +524,7 @@ export const exportVideoWithWebCodecs = async (options: ExportVideoOptions): Pro
         if (isAbortError(error)) {
           throw new Error('Export canceled');
         }
-        // If streaming path fails unexpectedly, fall back to in-memory export.
+        // If streaming unexpectedly fails, fall back to in-memory export.
       }
     }
   }

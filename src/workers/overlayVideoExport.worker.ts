@@ -11,96 +11,25 @@ import {
   WebMOutputFormat,
   canEncodeVideo
 } from 'mediabunny';
-import { OverlayTransform, VideoSettings } from '../types';
-
-type OverlayExportSettings = Pick<VideoSettings, 'exportResolution' | 'exportBitrateMbps' | 'exportCodec'>;
-
-type OverlayBaseSourceMode = 'video' | 'photo' | 'color';
-type OverlayEditorMode = 'standard' | 'linked_pairs';
-type OverlayLinkedPairExportMode = 'single_video' | 'one_per_pair';
-
-interface OverlayCrop {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-interface OverlayBackgroundFill {
-  enabled: boolean;
-  color: string;
-}
-
-interface OverlayChromaKey {
-  enabled: boolean;
-  color: string;
-  similarity: number;
-  smoothness: number;
-}
-
-interface OverlayTimeline {
-  start: number;
-  end: number;
-}
-
-interface WorkerOverlayMedia {
-  id: string;
-  name: string;
-  kind: 'image' | 'video';
-  file: File;
-  transform: OverlayTransform;
-  crop: OverlayCrop;
-  background: OverlayBackgroundFill;
-  chromaKey: OverlayChromaKey;
-  timeline: OverlayTimeline;
-}
-
-interface WorkerBatchPhoto extends WorkerOverlayMedia {
-  kind: 'image';
-}
-
-interface WorkerLinkedPairLayout {
-  x: number;
-  y: number;
-  size: number;
-  gap: number;
-}
-
-interface WorkerLinkedPairStyle {
-  outlineColor: string;
-  outlineWidth: number;
-  cornerRadius: number;
-}
-
-interface WorkerLinkedPairInput {
-  id: string;
-  name: string;
-  puzzleFile: File;
-  diffFile: File;
-}
-
-interface WorkerBaseInput {
-  mode: OverlayBaseSourceMode;
-  color: string;
-  aspectRatio: number;
-  durationSeconds: number;
-  videoFile?: File;
-  photoFile?: File;
-}
+import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
+import type {
+  OverlayBaseInput as WorkerBaseInput,
+  OverlayBatchPhotoInput as WorkerBatchPhoto,
+  OverlayChromaKey,
+  OverlayCrop,
+  OverlayExportSettings,
+  OverlayLinkedPairInput as WorkerLinkedPairInput,
+  OverlayLinkedPairLayout as WorkerLinkedPairLayout,
+  OverlayLinkedPairStyle as WorkerLinkedPairStyle,
+  OverlayMediaClipInput as WorkerOverlayMedia,
+  OverlayTimeline,
+  OverlayWorkerOutputTarget,
+  OverlayWorkerStartPayload
+} from '../services/overlayVideoExport';
 
 interface WorkerStartMessage {
   type: 'start';
-  payload: {
-    editorMode?: OverlayEditorMode;
-    base: WorkerBaseInput;
-    batchPhotos: WorkerBatchPhoto[];
-    overlays: WorkerOverlayMedia[];
-    linkedPairs?: WorkerLinkedPairInput[];
-    linkedPairLayout?: WorkerLinkedPairLayout;
-    linkedPairStyle?: WorkerLinkedPairStyle;
-    linkedPairExportMode?: OverlayLinkedPairExportMode;
-    settings: OverlayExportSettings;
-  };
+  payload: OverlayWorkerStartPayload;
 }
 
 interface WorkerCancelMessage {
@@ -111,10 +40,11 @@ type WorkerMessage = WorkerStartMessage | WorkerCancelMessage;
 
 type WorkerResponse =
   | { type: 'progress'; progress: number; status?: string }
-  | { type: 'file'; fileName: string; mimeType: string; buffer: ArrayBuffer; index: number; total: number }
-  | { type: 'done' }
+  | { type: 'done'; fileName: string; mimeType: string; buffer: ArrayBuffer }
   | { type: 'cancelled' }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | MediaTaskEventMessage
+  | MediaWorkerStatsMessage;
 
 interface OverlayImageResource {
   kind: 'image';
@@ -183,9 +113,54 @@ const FORMAT_BY_CODEC: Record<
 
 let isCanceled = false;
 let activeConversion: Conversion | null = null;
+let activeTaskId: string | null = null;
+let activeTaskStartedAt = 0;
+let currentWorkerSessionId = 'primary';
+
+const getOverlayWorkerId = () => `overlay-export-worker:${currentWorkerSessionId}`;
 
 const postToMain = (message: WorkerResponse, transfer: Transferable[] = []) => {
   (self as any).postMessage(message, transfer);
+};
+
+const emitTaskEvent = (event: MediaTaskEventMessage['event']) => {
+  postToMain({
+    type: 'task-event',
+    event: {
+      workerId: getOverlayWorkerId(),
+      timestamp: Date.now(),
+      ...event
+    }
+  });
+};
+
+const emitStats = ({
+  queueSize,
+  runningTasks,
+  avgTaskMs = 0
+}: {
+  queueSize: number;
+  runningTasks: number;
+  avgTaskMs?: number;
+}) => {
+  postToMain({
+    type: 'stats',
+    stats: {
+      workerId: getOverlayWorkerId(),
+      label: 'Overlay Export Worker',
+      runtimeKind: 'worker',
+      activeWorkers: 1,
+      queueSize,
+      runningTasks,
+      avgTaskMs,
+      stageQueueDepths: {
+        render: runningTasks > 0 ? 1 : 0,
+        encode: runningTasks > 0 ? 1 : 0,
+        write: runningTasks > 0 ? 1 : 0
+      },
+      updatedAt: Date.now()
+    }
+  });
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -519,11 +494,9 @@ const exportWithVideoBase = async (options: {
   outputLabel: string;
   overlayResources: OverlayResource[];
   settings: OverlayExportSettings;
-  outputIndex: number;
-  totalOutputs: number;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
-  const { base, outputLabel, overlayResources, settings, outputIndex, totalOutputs, onProgress } = options;
+  const { base, outputLabel, overlayResources, settings, onProgress } = options;
   if (!base.videoFile) throw new Error('Missing base video file.');
 
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
@@ -618,8 +591,7 @@ const exportWithVideoBase = async (options: {
   activeConversion = conversion;
 
   conversion.onProgress = (progress) => {
-    const overall = (outputIndex + progress) / totalOutputs;
-    onProgress(clamp(overall, 0, 0.995), `Exporting ${outputLabel} (${outputIndex + 1}/${totalOutputs})`);
+    onProgress(clamp(progress, 0, 0.995), `Exporting ${outputLabel}`);
   };
 
   await conversion.execute();
@@ -785,11 +757,10 @@ const exportWithStaticBase = async (options: {
   photo: WorkerBatchPhoto;
   overlayResources: OverlayResource[];
   settings: OverlayExportSettings;
-  photoIndex: number;
-  totalPhotos: number;
+  outputLabel: string;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
-  const { base, basePhotoBitmap, photo, overlayResources, settings, photoIndex, totalPhotos, onProgress } = options;
+  const { base, basePhotoBitmap, photo, overlayResources, settings, outputLabel, onProgress } = options;
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
 
   const maxTimelineEnd = overlayResources.reduce((acc, resource) => {
@@ -865,10 +836,9 @@ const exportWithStaticBase = async (options: {
 
     if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
       const localProgress = (frameIndex + 1) / totalFrames;
-      const overall = (photoIndex + localProgress) / totalPhotos;
       onProgress(
-        clamp(overall, 0, 0.995),
-        `Rendering ${photo.name} (${photoIndex + 1}/${totalPhotos}) frame ${frameIndex + 1}/${totalFrames}`
+        clamp(localProgress, 0, 0.995),
+        `Rendering ${outputLabel} frame ${frameIndex + 1}/${totalFrames}`
       );
     }
   }
@@ -900,8 +870,6 @@ const encodeLinkedPairTimeline = async (options: {
   linkedPairLayout: WorkerLinkedPairLayout;
   linkedPairStyle: WorkerLinkedPairStyle;
   outputLabel: string;
-  outputIndex: number;
-  totalOutputs: number;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
   const {
@@ -914,8 +882,6 @@ const encodeLinkedPairTimeline = async (options: {
     linkedPairLayout,
     linkedPairStyle,
     outputLabel,
-    outputIndex,
-    totalOutputs,
     onProgress
   } = options;
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
@@ -998,10 +964,9 @@ const encodeLinkedPairTimeline = async (options: {
 
     if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
       const localProgress = (frameIndex + 1) / totalFrames;
-      const overall = (outputIndex + localProgress) / totalOutputs;
       onProgress(
-        clamp(overall, 0, 0.995),
-        `Rendering ${outputLabel} (${outputIndex + 1}/${totalOutputs}) frame ${frameIndex + 1}/${totalFrames}`
+        clamp(localProgress, 0, 0.995),
+        `Rendering ${outputLabel} frame ${frameIndex + 1}/${totalFrames}`
       );
     }
   }
@@ -1023,22 +988,17 @@ const encodeLinkedPairTimeline = async (options: {
   };
 };
 
-const exportLinkedPairBatch = async (
+const exportLinkedPairOutput = async (
   base: WorkerBaseInput,
-  linkedPairs: WorkerLinkedPairInput[],
   overlays: WorkerOverlayMedia[],
   settings: OverlayExportSettings,
-  linkedPairLayout: WorkerLinkedPairLayout | undefined,
-  linkedPairStyle: WorkerLinkedPairStyle | undefined,
-  linkedPairExportMode: OverlayLinkedPairExportMode
+  target: Extract<OverlayWorkerOutputTarget, { kind: 'linked_pairs' }>
 ) => {
-  if (!linkedPairs.length) {
-    throw new Error('No linked puzzle pairs provided.');
+  if (!target.segments.length) {
+    throw new Error('No linked puzzle pair segments provided.');
   }
   if (base.mode === 'video' && !base.videoFile) throw new Error('Missing base video file.');
   if (base.mode === 'photo' && !base.photoFile) throw new Error('Missing base photo file.');
-
-  postToMain({ type: 'progress', progress: 0, status: 'Preparing linked pair export...' });
 
   const commonOverlayResources: OverlayResource[] = [];
   const linkedPairResources: LinkedPairImageResource[] = [];
@@ -1051,9 +1011,9 @@ const exportLinkedPairBatch = async (
       commonOverlayResources.push(await prepareOverlayResource(overlays[index]));
     }
 
-    for (let index = 0; index < linkedPairs.length; index += 1) {
+    for (let index = 0; index < target.segments.length; index += 1) {
       throwIfCanceled();
-      linkedPairResources.push(await prepareLinkedPairResource(linkedPairs[index]));
+      linkedPairResources.push(await prepareLinkedPairResource(target.segments[index].pair));
     }
 
     if (base.mode === 'photo' && base.photoFile) {
@@ -1063,113 +1023,53 @@ const exportLinkedPairBatch = async (
       baseVideoResource = await prepareBaseVideoResource(base.videoFile);
     }
 
-    const outputTargets =
-      linkedPairExportMode === 'single_video'
-        ? [
-            {
-              name:
-                linkedPairs.length === 1
-                  ? linkedPairs[0].name
-                  : `linked_pairs_${linkedPairs.length}_items`,
-              segments: linkedPairResources.map((pair, index) => ({
-                pair,
-                start: index * Math.max(0.5, base.durationSeconds),
-                end: (index + 1) * Math.max(0.5, base.durationSeconds)
-              }))
-            }
-          ]
-        : linkedPairResources.map((pair) => ({
-            name: pair.pair.name,
-            segments: [
-              {
-                pair,
-                start: 0,
-                end: Math.max(0.5, base.durationSeconds)
-              }
-            ]
-          }));
+    const result = await encodeLinkedPairTimeline({
+      base,
+      basePhotoBitmap,
+      baseVideoResource,
+      segments: target.segments.map((segment, index) => ({
+        pair: linkedPairResources[index],
+        start: segment.start,
+        end: segment.end
+      })),
+      overlayResources: commonOverlayResources,
+      settings,
+      linkedPairLayout: target.linkedPairLayout ?? { x: 0.14, y: 0.18, size: 0.34, gap: 0.04 },
+      linkedPairStyle: normalizeLinkedPairStyle(target.linkedPairStyle),
+      outputLabel: target.outputLabel,
+      onProgress: (progress, status) => {
+        postToMain({ type: 'progress', progress, status });
+      }
+    });
 
-    for (let index = 0; index < outputTargets.length; index += 1) {
-      throwIfCanceled();
-      const target = outputTargets[index];
-      const result = await encodeLinkedPairTimeline({
-        base,
-        basePhotoBitmap,
-        baseVideoResource,
-        segments: target.segments,
-        overlayResources: commonOverlayResources,
-        settings,
-        linkedPairLayout: linkedPairLayout ?? { x: 0.14, y: 0.18, size: 0.34, gap: 0.04 },
-        linkedPairStyle: normalizeLinkedPairStyle(linkedPairStyle),
-        outputLabel: target.name,
-        outputIndex: index,
-        totalOutputs: outputTargets.length,
-        onProgress: (progress, status) => {
-          postToMain({
-            type: 'progress',
-            progress,
-            status
-          });
-        }
-      });
-
-      const fileName = `${sanitizeName(target.name)}-${result.width}x${result.height}.${result.extension}`;
-      postToMain(
-        {
-          type: 'file',
-          fileName,
-          mimeType: result.mimeType,
-          buffer: result.buffer,
-          index: index + 1,
-          total: outputTargets.length
-        },
-        [result.buffer]
-      );
-
-      postToMain({
-        type: 'progress',
-        progress: clamp((index + 1) / outputTargets.length, 0, 1),
-        status: `Completed ${index + 1}/${outputTargets.length}`
-      });
-    }
+    return {
+      fileName: `${sanitizeName(target.outputLabel)}-${result.width}x${result.height}.${result.extension}`,
+      mimeType: result.mimeType,
+      buffer: result.buffer
+    };
   } finally {
     commonOverlayResources.forEach(releaseOverlayResource);
     linkedPairResources.forEach(releaseLinkedPairResource);
     basePhotoBitmap?.close();
     activeConversion = null;
   }
-
-  postToMain({ type: 'done' });
 };
 
-const exportOverlayBatch = async (
-  editorMode: OverlayEditorMode,
+const exportStandardOutput = async (
   base: WorkerBaseInput,
-  batchPhotos: WorkerBatchPhoto[],
   overlays: WorkerOverlayMedia[],
-  linkedPairs: WorkerLinkedPairInput[],
-  linkedPairLayout: WorkerLinkedPairLayout | undefined,
-  linkedPairStyle: WorkerLinkedPairStyle | undefined,
-  linkedPairExportMode: OverlayLinkedPairExportMode,
-  settings: OverlayExportSettings
+  settings: OverlayExportSettings,
+  target: Extract<OverlayWorkerOutputTarget, { kind: 'standard' }>
 ) => {
-  if (editorMode === 'linked_pairs') {
-    await exportLinkedPairBatch(base, linkedPairs, overlays, settings, linkedPairLayout, linkedPairStyle, linkedPairExportMode);
-    return;
-  }
-
-  if (!batchPhotos.length && base.mode !== 'video') {
-    throw new Error('No photos provided. Add at least one batch image for photo/color base.');
+  if (!target.photo && base.mode !== 'video') {
+    throw new Error('Missing batch image for non-video overlay export.');
   }
   if (base.mode === 'video' && !base.videoFile) throw new Error('Missing base video file.');
   if (base.mode === 'photo' && !base.photoFile) throw new Error('Missing base photo file.');
 
-  postToMain({ type: 'progress', progress: 0, status: 'Preparing batch export...' });
-
   const commonOverlayResources: OverlayResource[] = [];
   let basePhotoBitmap: ImageBitmap | null = null;
-  const outputTargets = batchPhotos.length > 0 ? batchPhotos : [null];
-  const totalOutputs = outputTargets.length;
+  let primaryResource: OverlayResource | null = null;
 
   try {
     for (let index = 0; index < overlays.length; index += 1) {
@@ -1181,90 +1081,67 @@ const exportOverlayBatch = async (
       basePhotoBitmap = await createImageBitmap(base.photoFile);
     }
 
-    for (let index = 0; index < outputTargets.length; index += 1) {
-      throwIfCanceled();
-      const photo = outputTargets[index];
-      const outputLabel = photo?.name || base.videoFile?.name || `timeline_${index + 1}`;
-
-      let primaryResource: OverlayResource | null = null;
-      const clipResources = [...commonOverlayResources];
-      if (photo) {
-        primaryResource = await prepareOverlayResource(photo);
-        clipResources.unshift(primaryResource);
-      }
-
-      try {
-        const result =
-          base.mode === 'video'
-            ? await exportWithVideoBase({
-                base,
-                outputLabel,
-                overlayResources: clipResources,
-                settings,
-                outputIndex: index,
-                totalOutputs,
-                onProgress: (progress, status) => {
-                  postToMain({
-                    type: 'progress',
-                    progress,
-                    status
-                  });
-                }
-              })
-            : await (() => {
-                if (!photo) {
-                  throw new Error('Missing batch image for static-base export.');
-                }
-                return exportWithStaticBase({
-                  base,
-                  basePhotoBitmap,
-                  photo,
-                  overlayResources: clipResources,
-                  settings,
-                  photoIndex: index,
-                  totalPhotos: totalOutputs,
-                  onProgress: (progress, status) => {
-                    postToMain({
-                      type: 'progress',
-                      progress,
-                      status
-                    });
-                  }
-                });
-              })();
-
-        const nameSource = photo?.name || base.videoFile?.name || `timeline_${index + 1}`;
-        const fileName = `${sanitizeName(nameSource)}-${result.width}x${result.height}.${result.extension}`;
-        postToMain(
-          {
-            type: 'file',
-            fileName,
-            mimeType: result.mimeType,
-            buffer: result.buffer,
-            index: index + 1,
-            total: totalOutputs
-          },
-          [result.buffer]
-        );
-      } finally {
-        if (primaryResource) {
-          releaseOverlayResource(primaryResource);
-        }
-        activeConversion = null;
-      }
-
-      postToMain({
-        type: 'progress',
-        progress: clamp((index + 1) / totalOutputs, 0, 1),
-        status: `Completed ${index + 1}/${totalOutputs}`
-      });
+    const clipResources = [...commonOverlayResources];
+    if (target.photo) {
+      primaryResource = await prepareOverlayResource(target.photo);
+      clipResources.unshift(primaryResource);
     }
+
+    const result =
+      base.mode === 'video'
+        ? await exportWithVideoBase({
+            base,
+            outputLabel: target.outputLabel,
+            overlayResources: clipResources,
+            settings,
+            onProgress: (progress, status) => {
+              postToMain({ type: 'progress', progress, status });
+            }
+          })
+        : await exportWithStaticBase({
+            base,
+            basePhotoBitmap,
+            photo: target.photo as WorkerBatchPhoto,
+            overlayResources: clipResources,
+            settings,
+            outputLabel: target.outputLabel,
+            onProgress: (progress, status) => {
+              postToMain({ type: 'progress', progress, status });
+            }
+          });
+
+    return {
+      fileName: `${sanitizeName(target.outputLabel)}-${result.width}x${result.height}.${result.extension}`,
+      mimeType: result.mimeType,
+      buffer: result.buffer
+    };
   } finally {
     commonOverlayResources.forEach(releaseOverlayResource);
+    if (primaryResource) {
+      releaseOverlayResource(primaryResource);
+    }
     basePhotoBitmap?.close();
+    activeConversion = null;
+  }
+};
+
+const exportOverlayOutput = async (
+  base: WorkerBaseInput,
+  overlays: WorkerOverlayMedia[],
+  settings: OverlayExportSettings,
+  target: OverlayWorkerOutputTarget
+) => {
+  postToMain({
+    type: 'progress',
+    progress: 0,
+    status: `Preparing ${target.outputLabel}...`
+  });
+
+  if (target.kind === 'linked_pairs') {
+    return await exportLinkedPairOutput(base, overlays, settings, target);
   }
 
-  postToMain({ type: 'done' });
+  return await exportStandardOutput(base, overlays, settings, target);
 };
 
 self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
@@ -1275,45 +1152,90 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
     if (activeConversion) {
       activeConversion.cancel().catch(() => undefined);
     }
+    if (activeTaskId) {
+      emitTaskEvent({
+        taskId: activeTaskId,
+        label: 'Overlay Export',
+        stage: 'encode',
+        state: 'cancelled'
+      });
+    }
+    emitStats({ queueSize: 0, runningTasks: 0 });
     return;
   }
 
   if (message.type !== 'start') return;
 
-  const {
-    editorMode = 'standard',
-    base,
-    batchPhotos,
-    overlays,
-    linkedPairs = [],
-    linkedPairLayout,
-    linkedPairStyle,
-    linkedPairExportMode = 'one_per_pair',
-    settings
-  } = message.payload;
+  const { base, overlays, settings, target, workerSessionId } = message.payload;
+  currentWorkerSessionId = workerSessionId || 'primary';
   isCanceled = false;
+  activeTaskId = target.taskId;
+  activeTaskStartedAt = performance.now();
 
   try {
-    await exportOverlayBatch(
-      editorMode,
-      base,
-      batchPhotos,
-      overlays,
-      linkedPairs,
-      linkedPairLayout,
-      linkedPairStyle,
-      linkedPairExportMode,
-      settings
+    emitTaskEvent({
+      taskId: activeTaskId,
+      label: target.outputLabel,
+      stage: 'render',
+      state: 'queued'
+    });
+    emitTaskEvent({
+      taskId: activeTaskId,
+      label: target.outputLabel,
+      stage: 'render',
+      state: 'running'
+    });
+    emitStats({ queueSize: 0, runningTasks: 1 });
+
+    const result = await exportOverlayOutput(base, overlays, settings, target);
+
+    emitTaskEvent({
+      taskId: activeTaskId,
+      label: target.outputLabel,
+      stage: 'encode',
+      state: 'done',
+      durationMs: Math.max(0, performance.now() - activeTaskStartedAt)
+    });
+    emitStats({
+      queueSize: 0,
+      runningTasks: 0,
+      avgTaskMs: Math.max(0, performance.now() - activeTaskStartedAt)
+    });
+    postToMain(
+      {
+        type: 'done',
+        fileName: result.fileName,
+        mimeType: result.mimeType,
+        buffer: result.buffer
+      },
+      [result.buffer]
     );
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Batch overlay export failed.';
+    const errorMessage = error instanceof Error ? error.message : 'Overlay export failed.';
     if (errorMessage === '__OVERLAY_EXPORT_CANCELED__' || isCanceled) {
+      emitStats({ queueSize: 0, runningTasks: 0 });
       postToMain({ type: 'cancelled' });
     } else {
+      if (activeTaskId) {
+        emitTaskEvent({
+          taskId: activeTaskId,
+          label: target.outputLabel,
+          stage: 'encode',
+          state: 'failed',
+          durationMs: Math.max(0, performance.now() - activeTaskStartedAt),
+          meta: {
+            message: errorMessage
+          }
+        });
+      }
+      emitStats({ queueSize: 0, runningTasks: 0 });
       postToMain({ type: 'error', message: errorMessage });
     }
   } finally {
     activeConversion = null;
     isCanceled = false;
+    activeTaskId = null;
+    activeTaskStartedAt = 0;
+    currentWorkerSessionId = 'primary';
   }
 };

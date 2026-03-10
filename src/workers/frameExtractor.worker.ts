@@ -1,4 +1,5 @@
 import { ALL_FORMATS, BlobSource, CanvasSink, Input } from 'mediabunny';
+import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
 
 interface ParsedTimestamp {
   seconds: number;
@@ -19,6 +20,7 @@ interface WorkerStartMessage {
     timestamps: ParsedTimestamp[];
     format: 'jpeg' | 'png';
     jpegQuality: number;
+    jobId?: string;
   };
 }
 
@@ -34,13 +36,19 @@ type WorkerMessage = WorkerStartMessage | WorkerCancelMessage | WorkerResumeMess
 
 type WorkerResponse =
   | { type: 'progress'; completed: number; total: number; label: string }
-  | { type: 'file'; filename: string; mimeType: string; buffer: ArrayBuffer }
+  | { type: 'file'; filename: string; mimeType: string; buffer: ArrayBuffer; width: number; height: number }
   | { type: 'done'; summary: ExtractFramesSummary }
   | { type: 'cancelled' }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | MediaTaskEventMessage
+  | MediaWorkerStatsMessage;
 
 let isCanceled = false;
 let pendingResumeResolver: (() => void) | null = null;
+let statsStartedAt = 0;
+let completedTasks = 0;
+let totalTaskDurationMs = 0;
+let lastStatsAt = 0;
 
 const postToMain = (message: WorkerResponse, transfer: Transferable[] = []) => {
   (self as any).postMessage(message, transfer);
@@ -52,6 +60,47 @@ const throwIfCanceled = () => {
   if (isCanceled) {
     throw new Error('__FRAME_EXTRACTOR_CANCELED__');
   }
+};
+
+const emitTaskEvent = (event: MediaTaskEventMessage['event']) => {
+  postToMain({
+    type: 'task-event',
+    event: {
+      workerId: 'frame-extractor-worker',
+      timestamp: Date.now(),
+      ...event
+    }
+  });
+};
+
+const emitStats = (queueSize: number, runningTasks: number, force = false) => {
+  const now = Date.now();
+  if (!force && now - lastStatsAt < 250) {
+    return;
+  }
+  lastStatsAt = now;
+  const elapsedSeconds = Math.max(0.001, (performance.now() - statsStartedAt) / 1000);
+  postToMain({
+    type: 'stats',
+    stats: {
+      workerId: 'frame-extractor-worker',
+      label: 'Frame Extractor Worker',
+      runtimeKind: 'worker',
+      activeWorkers: 1,
+      queueSize: Math.max(0, queueSize),
+      runningTasks: Math.max(0, runningTasks),
+      avgTaskMs: completedTasks > 0 ? totalTaskDurationMs / completedTasks : 0,
+      fps: completedTasks / elapsedSeconds,
+      bytesInFlight: 0,
+      stageQueueDepths: {
+        decode: Math.max(0, queueSize)
+      },
+      metrics: {
+        completedTasks
+      },
+      updatedAt: now
+    }
+  });
 };
 
 const waitForResume = () =>
@@ -126,6 +175,10 @@ const extractFramesInWorker = async ({
   const total = videos.length * timestamps.length;
   let completed = 0;
   const baseNameCounter = new Map<string, number>();
+  statsStartedAt = performance.now();
+  completedTasks = 0;
+  totalTaskDurationMs = 0;
+  lastStatsAt = 0;
 
   for (const file of videos) {
     throwIfCanceled();
@@ -156,13 +209,32 @@ const extractFramesInWorker = async ({
         throwIfCanceled();
         const hasKnownDuration = Number.isFinite(durationSeconds) && durationSeconds > 0;
         const isOutOfRange = hasKnownDuration && timestamp.seconds > durationSeconds;
+        const taskId = `${baseName}:${timestamp.display}`;
+        const taskLabel = `Decode ${file.name} @ ${timestamp.display}`;
 
         if (isOutOfRange) {
           summary.skippedCount += 1;
           summary.warnings.push(
             `${file.name}: skipped ${timestamp.display} (video duration ${formatTimestampDisplay(durationSeconds)}).`
           );
+          emitTaskEvent({
+            taskId,
+            label: taskLabel,
+            stage: 'decode',
+            state: 'cancelled',
+            meta: {
+              reason: 'out_of_range'
+            }
+          });
         } else {
+          const taskStart = performance.now();
+          emitTaskEvent({
+            taskId,
+            label: taskLabel,
+            stage: 'decode',
+            state: 'running'
+          });
+          emitStats(total - completed - 1, 1);
           try {
             const safeTimestamp = hasKnownDuration
               ? clamp(timestamp.seconds, 0, Math.max(0, durationSeconds - 0.001))
@@ -197,17 +269,43 @@ const extractFramesInWorker = async ({
                 type: 'file',
                 filename: `${baseName}_frame_${formatTimestampForFilename(timestamp.seconds)}.${extension}`,
                 mimeType: blob.type || mimeType,
-                buffer
+                buffer,
+                width: exportCanvas.width,
+                height: exportCanvas.height
               },
               [buffer]
             );
             summary.extractedCount += 1;
+            completedTasks += 1;
+            totalTaskDurationMs += Math.max(0, performance.now() - taskStart);
+            emitTaskEvent({
+              taskId,
+              label: taskLabel,
+              stage: 'decode',
+              state: 'done',
+              durationMs: Math.max(0, performance.now() - taskStart),
+              bytes: exportCanvas.width * exportCanvas.height * 4
+            });
             await waitForResume();
             throwIfCanceled();
           } catch (error) {
             summary.failedCount += 1;
             const message = error instanceof Error ? error.message : 'Unknown extraction error.';
             summary.warnings.push(`${file.name}: failed ${timestamp.display} (${message})`);
+            completedTasks += 1;
+            totalTaskDurationMs += Math.max(0, performance.now() - taskStart);
+            emitTaskEvent({
+              taskId,
+              label: taskLabel,
+              stage: 'decode',
+              state: isCanceled || message === '__FRAME_EXTRACTOR_CANCELED__' ? 'cancelled' : 'failed',
+              durationMs: Math.max(0, performance.now() - taskStart),
+              meta: {
+                message
+              }
+            });
+          } finally {
+            emitStats(total - completed - 1, 0);
           }
         }
 
@@ -218,6 +316,7 @@ const extractFramesInWorker = async ({
           total,
           label: `Extracting ${completed}/${total}: ${file.name}`
         });
+        emitStats(total - completed, 0, completed === total);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown extraction error.';
@@ -231,6 +330,7 @@ const extractFramesInWorker = async ({
           total,
           label: `Extracting ${completed}/${total}: ${file.name}`
         });
+        emitStats(total - completed, 0, completed === total);
       }
     }
   }
@@ -243,6 +343,7 @@ const extractFramesInWorker = async ({
     type: 'done',
     summary
   });
+  emitStats(0, 0, true);
 };
 
 self.onmessage = async (event: MessageEvent<WorkerMessage>) => {

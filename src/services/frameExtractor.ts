@@ -1,3 +1,6 @@
+import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
+import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from './mediaTelemetry';
+
 export interface ParsedTimestamp {
   seconds: number;
   display: string;
@@ -30,6 +33,9 @@ export interface ExtractFramesSummary {
 export interface ExtractedFrameFile {
   filename: string;
   blob: Blob;
+  width: number;
+  height: number;
+  estimatedBytes: number;
 }
 
 export interface ExtractFramesResult {
@@ -52,21 +58,57 @@ interface ExtractFrameDeliveryContext {
 
 interface ExtractFramesStreamOptions extends ExtractFramesOptions {
   onFrame: (file: ExtractedFrameFile, context: ExtractFrameDeliveryContext) => void | Promise<void>;
+  signal?: AbortSignal;
+  diagnosticsJob?: MediaJobController | null;
 }
 
 type FrameExtractorWorkerResponse =
   | { type: 'progress'; completed: number; total: number; label: string }
-  | { type: 'file'; filename: string; mimeType: string; buffer: ArrayBuffer }
+  | { type: 'file'; filename: string; mimeType: string; buffer: ArrayBuffer; width: number; height: number }
   | { type: 'done'; summary: ExtractFramesSummary }
   | { type: 'cancelled' }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | MediaTaskEventMessage
+  | MediaWorkerStatsMessage;
 
 type ExtractFramesInternalOptions = ExtractFramesOptions & {
   onFrame?: (file: ExtractedFrameFile, context: ExtractFrameDeliveryContext) => void | Promise<void>;
   collectFiles?: boolean;
+  signal?: AbortSignal;
+  diagnosticsJob?: MediaJobController | null;
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const createFrameExtractionJob = () =>
+  import.meta.env.DEV ? mediaDiagnosticsStore.startJob('frame_extract', 'Frame Extraction') : null;
+const createCancellationError = () => new Error('Frame extraction canceled.');
+const isCancellationError = (error: unknown) => error instanceof Error && error.message === 'Frame extraction canceled.';
+
+const handleFrameWorkerDiagnostics = (job: MediaJobController | null, message: FrameExtractorWorkerResponse) => {
+  if (!job) return false;
+  if (message.type === 'task-event') {
+    job.handleTaskEvent(message.event);
+    return true;
+  }
+  if (message.type === 'stats') {
+    job.updateWorkerStats(message.stats);
+    return true;
+  }
+  return false;
+};
+
+const buildExtractedFrameFile = (
+  filename: string,
+  blob: Blob,
+  width: number,
+  height: number
+): ExtractedFrameFile => ({
+  filename,
+  blob,
+  width,
+  height,
+  estimatedBytes: Math.max(1, width) * Math.max(1, height) * 4
+});
 
 const pad = (value: number, length = 2) => String(value).padStart(length, '0');
 
@@ -309,7 +351,9 @@ const extractFramesOnMainThread = async ({
   jpegQuality,
   onProgress,
   onFrame,
-  collectFiles = true
+  collectFiles = true,
+  signal,
+  diagnosticsJob
 }: ExtractFramesInternalOptions): Promise<ExtractFramesResult> => {
   const summary: ExtractFramesSummary = {
     extractedCount: 0,
@@ -330,8 +374,39 @@ const extractFramesOnMainThread = async ({
   let completed = 0;
   const baseNameCounter = new Map<string, number>();
   const files: ExtractedFrameFile[] = [];
+  const job = diagnosticsJob;
+  const startedAt = performance.now();
+  let completedTasks = 0;
+  let totalTaskDurationMs = 0;
+
+  const emitMainThreadStats = (runningTasks: number) => {
+    if (!job) return;
+    const elapsedSeconds = Math.max(0.001, (performance.now() - startedAt) / 1000);
+    job.updateWorkerStats({
+      workerId: 'frame-extractor-main',
+      label: 'Frame Extractor (Main Thread)',
+      runtimeKind: 'worker',
+      activeWorkers: 1,
+      queueSize: Math.max(0, total - completed - runningTasks),
+      runningTasks,
+      avgTaskMs: completedTasks > 0 ? totalTaskDurationMs / completedTasks : 0,
+      fps: completedTasks / elapsedSeconds,
+      bytesInFlight: 0,
+      stageQueueDepths: {
+        decode: Math.max(0, total - completed - runningTasks)
+      },
+      metrics: {
+        extracted: summary.extractedCount,
+        skipped: summary.skippedCount,
+        failed: summary.failedCount
+      }
+    });
+  };
 
   for (const file of videos) {
+    if (signal?.aborted) {
+      throw createCancellationError();
+    }
     const rawBaseName = sanitizeFilenameSegment(stripExtension(file.name)) || 'video';
     const duplicateIndex = baseNameCounter.get(rawBaseName) || 0;
     baseNameCounter.set(rawBaseName, duplicateIndex + 1);
@@ -349,6 +424,11 @@ const extractFramesOnMainThread = async ({
       metadata = loaded.metadata;
 
       for (const timestamp of timestamps) {
+        if (signal?.aborted) {
+          throw createCancellationError();
+        }
+        const taskId = `${baseName}:${timestamp.display}`;
+        const taskLabel = `Decode ${file.name} @ ${timestamp.display}`;
         const isOutOfRange = timestamp.seconds > metadata.durationSeconds;
         if (isOutOfRange) {
           summary.skippedCount += 1;
@@ -356,13 +436,24 @@ const extractFramesOnMainThread = async ({
             `${file.name}: skipped ${timestamp.display} (video duration ${formatTimestampDisplay(metadata.durationSeconds)}).`
           );
         } else {
+          const taskStart = performance.now();
+          job?.handleTaskEvent({
+            taskId,
+            label: taskLabel,
+            stage: 'decode',
+            state: 'running',
+            workerId: 'frame-extractor-main'
+          });
+          emitMainThreadStats(1);
           try {
             await seekVideo(loadedVideo, timestamp.seconds);
             const blob = await captureCurrentFrame(loadedVideo, canvas, format, jpegQuality);
-            const extractedFile = {
-              filename: `${baseName}_frame_${formatTimestampForFilename(timestamp.seconds)}.${extension}`,
-              blob
-            };
+            const extractedFile = buildExtractedFrameFile(
+              `${baseName}_frame_${formatTimestampForFilename(timestamp.seconds)}.${extension}`,
+              blob,
+              canvas.width,
+              canvas.height
+            );
             if (collectFiles) {
               files.push(extractedFile);
             }
@@ -373,10 +464,39 @@ const extractFramesOnMainThread = async ({
               });
             }
             summary.extractedCount += 1;
+            completedTasks += 1;
+            totalTaskDurationMs += Math.max(0, performance.now() - taskStart);
+            job?.handleTaskEvent({
+              taskId,
+              label: taskLabel,
+              stage: 'decode',
+              state: 'done',
+              workerId: 'frame-extractor-main',
+              durationMs: Math.max(0, performance.now() - taskStart),
+              bytes: extractedFile.estimatedBytes
+            });
           } catch (error) {
+            if (isCancellationError(error)) {
+              throw error;
+            }
             summary.failedCount += 1;
             const message = error instanceof Error ? error.message : 'Unknown extraction error.';
             summary.warnings.push(`${file.name}: failed ${timestamp.display} (${message})`);
+            completedTasks += 1;
+            totalTaskDurationMs += Math.max(0, performance.now() - taskStart);
+            job?.handleTaskEvent({
+              taskId,
+              label: taskLabel,
+              stage: 'decode',
+              state: 'failed',
+              workerId: 'frame-extractor-main',
+              durationMs: Math.max(0, performance.now() - taskStart),
+              meta: {
+                message
+              }
+            });
+          } finally {
+            emitMainThreadStats(0);
           }
         }
 
@@ -386,6 +506,7 @@ const extractFramesOnMainThread = async ({
           total,
           label: `Extracting ${completed}/${total}: ${file.name}`
         });
+        job?.setProgress(total > 0 ? completed / total : 0, `Extracting ${completed}/${total}: ${file.name}`);
       }
     } finally {
       if (loadedVideo) {
@@ -416,22 +537,45 @@ const extractFramesInWorker = async ({
   jpegQuality,
   onProgress,
   onFrame,
-  collectFiles = true
+  collectFiles = true,
+  signal,
+  diagnosticsJob
 }: ExtractFramesInternalOptions): Promise<ExtractFramesResult> => {
   return await new Promise<ExtractFramesResult>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createCancellationError());
+      return;
+    }
     const worker = new Worker(new URL('../workers/frameExtractor.worker.ts', import.meta.url), {
       type: 'module'
     });
     const files: ExtractedFrameFile[] = [];
     let deliveredCount = 0;
     let isSettled = false;
+    const job = diagnosticsJob;
 
     const cleanup = () => {
       worker.terminate();
+      job?.removeWorkerStats('frame-extractor-worker');
+      if (signal) {
+        signal.removeEventListener('abort', handleAbort);
+      }
     };
+
+    const handleAbort = () => {
+      if (isSettled) return;
+      worker.postMessage({ type: 'cancel' });
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', handleAbort, { once: true });
+    }
 
     worker.onmessage = (event: MessageEvent<FrameExtractorWorkerResponse>) => {
       const message = event.data;
+      if (handleFrameWorkerDiagnostics(job, message)) {
+        return;
+      }
 
       if (message.type === 'progress') {
         onProgress?.({
@@ -439,14 +583,17 @@ const extractFramesInWorker = async ({
           total: message.total,
           label: message.label
         });
+        job?.setProgress(message.total > 0 ? message.completed / message.total : 0, message.label);
         return;
       }
 
       if (message.type === 'file') {
-        const extractedFile: ExtractedFrameFile = {
-          filename: message.filename,
-          blob: new Blob([message.buffer], { type: message.mimeType })
-        };
+        const extractedFile = buildExtractedFrameFile(
+          message.filename,
+          new Blob([message.buffer], { type: message.mimeType }),
+          message.width,
+          message.height
+        );
         if (collectFiles) {
           files.push(extractedFile);
         }
@@ -459,7 +606,7 @@ const extractFramesInWorker = async ({
                 total: videos.length * timestamps.length
               });
             }
-            if (!isSettled) {
+            if (!isSettled && !signal?.aborted) {
               worker.postMessage({ type: 'resume' });
             }
           } catch (error) {
@@ -485,7 +632,7 @@ const extractFramesInWorker = async ({
       if (message.type === 'cancelled') {
         isSettled = true;
         cleanup();
-        reject(new Error('Frame extraction canceled.'));
+        reject(createCancellationError());
         return;
       }
 
@@ -509,22 +656,65 @@ const extractFramesInWorker = async ({
         videos,
         timestamps,
         format,
-        jpegQuality
+        jpegQuality,
+        jobId: job?.jobId
       }
     });
   });
 };
 
 export const extractFrames = async (options: ExtractFramesOptions): Promise<ExtractFramesResult> => {
+  const diagnosticsJob = createFrameExtractionJob();
+
   if (typeof Worker === 'undefined') {
-    return await extractFramesOnMainThread(options);
+    try {
+      const result = await extractFramesOnMainThread({
+        ...options,
+        diagnosticsJob
+      });
+      diagnosticsJob?.complete('Frame extraction complete');
+      return result;
+    } catch (error) {
+      if (isCancellationError(error)) {
+        diagnosticsJob?.cancel('Frame extraction canceled');
+      } else {
+        diagnosticsJob?.fail(error instanceof Error ? error.message : 'Frame extraction failed.', 'Frame extraction failed');
+      }
+      throw error;
+    }
   }
 
   try {
-    return await extractFramesInWorker(options);
+    const result = await extractFramesInWorker({
+      ...options,
+      diagnosticsJob
+    });
+    diagnosticsJob?.complete('Frame extraction complete');
+    return result;
   } catch (error) {
+    if (isCancellationError(error)) {
+      diagnosticsJob?.cancel('Frame extraction canceled');
+      throw error;
+    }
     console.warn('Falling back to main-thread frame extraction.', error);
-    return await extractFramesOnMainThread(options);
+    try {
+      const result = await extractFramesOnMainThread({
+        ...options,
+        diagnosticsJob
+      });
+      diagnosticsJob?.complete('Frame extraction complete');
+      return result;
+    } catch (fallbackError) {
+      if (isCancellationError(fallbackError)) {
+        diagnosticsJob?.cancel('Frame extraction canceled');
+      } else {
+        diagnosticsJob?.fail(
+          fallbackError instanceof Error ? fallbackError.message : 'Frame extraction failed.',
+          'Frame extraction failed'
+        );
+      }
+      throw fallbackError;
+    }
   }
 };
 
@@ -532,11 +722,13 @@ export const extractFramesStream = async ({
   onFrame,
   ...options
 }: ExtractFramesStreamOptions): Promise<ExtractFramesSummary> => {
+  const diagnosticsJob = options.diagnosticsJob ?? null;
   if (typeof Worker === 'undefined') {
     const result = await extractFramesOnMainThread({
       ...options,
       onFrame,
-      collectFiles: false
+      collectFiles: false,
+      diagnosticsJob
     });
     return result.summary;
   }
@@ -545,15 +737,20 @@ export const extractFramesStream = async ({
     const result = await extractFramesInWorker({
       ...options,
       onFrame,
-      collectFiles: false
+      collectFiles: false,
+      diagnosticsJob
     });
     return result.summary;
   } catch (error) {
+    if (isCancellationError(error)) {
+      throw error;
+    }
     console.warn('Falling back to main-thread streamed frame extraction.', error);
     const result = await extractFramesOnMainThread({
       ...options,
       onFrame,
-      collectFiles: false
+      collectFiles: false,
+      diagnosticsJob
     });
     return result.summary;
   }
