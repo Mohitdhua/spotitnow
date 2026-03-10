@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Save, Trash2, Undo, Play, Download, X, Plus, Sparkles, Loader2 } from 'lucide-react';
+import { Save, Trash2, Undo, Play, Download, X, Plus, Sparkles, Loader2, Video } from 'lucide-react';
 import { Region, Puzzle } from '../types';
 import { detectDifferences } from '../services/ai';
 
@@ -11,11 +11,22 @@ interface EditorCanvasProps {
   onSave: (puzzle: Puzzle) => void;
   onPlay?: (puzzle: Puzzle) => void;
   onAddToBatch?: (puzzle: Puzzle) => void;
+  onExportVideo?: (puzzle: Puzzle) => void;
   batchCount?: number;
   isModal?: boolean;
 }
 
-export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPlay, onAddToBatch, batchCount, isModal = false }: EditorCanvasProps) {
+export function EditorCanvas({
+  imageA,
+  imageB,
+  initialRegions = [],
+  onSave,
+  onPlay,
+  onAddToBatch,
+  onExportVideo,
+  batchCount,
+  isModal = false
+}: EditorCanvasProps) {
   const [regions, setRegions] = useState<Region[]>(initialRegions);
   const [isDrawing, setIsDrawing] = useState(false);
   const [isDetecting, setIsDetecting] = useState(false);
@@ -156,6 +167,17 @@ export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPl
     onPlay(puzzle);
   };
 
+  const handleExportVideo = () => {
+    if (!onExportVideo) return;
+    const puzzle: Puzzle = {
+      imageA,
+      imageB,
+      regions,
+      title: `Puzzle ${(batchCount ?? 0) + 1}`
+    };
+    onExportVideo(puzzle);
+  };
+
   const handleAutoDetect = async () => {
     setIsDetecting(true);
     try {
@@ -178,37 +200,40 @@ export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPl
   };
 
   return (
-    <div className="flex flex-col h-full w-full max-w-7xl mx-auto p-6 space-y-6">
-      <div className="flex justify-between items-center bg-white p-4 border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] rounded-xl">
-        <h2 className="text-3xl font-black text-black font-display uppercase tracking-tight">Mark Differences</h2>
-        <div className="flex items-center space-x-3">
-          <button 
-            onClick={handleAutoDetect} 
-            disabled={isDetecting}
-            className="flex items-center space-x-2 px-4 py-2 bg-[#F3E8FF] hover:bg-[#E9D5FF] text-black border-2 border-black rounded-lg font-bold transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
-            title="Auto-detect differences with AI"
-          >
-            {isDetecting ? (
-              <Loader2 size={20} className="animate-spin" strokeWidth={2.5} />
-            ) : (
-              <Sparkles size={20} strokeWidth={2.5} />
-            )}
-            <span className="uppercase">{isDetecting ? 'Detecting...' : 'Auto Detect'}</span>
-          </button>
-          <div className="w-1 h-8 bg-black mx-2" />
-          <button onClick={handleUndo} className="p-2 text-black hover:bg-slate-100 border-2 border-transparent hover:border-black rounded-lg transition-all" title="Undo">
-            <Undo size={24} strokeWidth={2.5} />
-          </button>
-          <button onClick={handleClear} className="p-2 text-[#FF6B6B] hover:bg-[#FFF5F5] border-2 border-transparent hover:border-[#FF6B6B] rounded-lg transition-all" title="Clear All">
-            <Trash2 size={24} strokeWidth={2.5} />
-          </button>
-          <div className="w-1 h-8 bg-black mx-2" />
-          
+    <div className="flex flex-col h-full w-full max-w-7xl mx-auto p-3 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="bg-white p-4 border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] rounded-xl space-y-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <h2 className="text-2xl sm:text-3xl font-black text-black font-display uppercase tracking-tight">Mark Differences</h2>
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <button 
+              onClick={handleAutoDetect} 
+              disabled={isDetecting}
+              className="flex items-center gap-2 px-4 py-2 bg-[#F3E8FF] hover:bg-[#E9D5FF] text-black border-2 border-black rounded-lg font-bold transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
+              title="Auto-detect differences with AI"
+            >
+              {isDetecting ? (
+                <Loader2 size={20} className="animate-spin" strokeWidth={2.5} />
+              ) : (
+                <Sparkles size={20} strokeWidth={2.5} />
+              )}
+              <span className="uppercase">{isDetecting ? 'Detecting...' : 'Auto Detect'}</span>
+            </button>
+            <div className="hidden sm:block w-1 h-8 bg-black mx-1" />
+            <button onClick={handleUndo} className="p-2 text-black hover:bg-slate-100 border-2 border-transparent hover:border-black rounded-lg transition-all" title="Undo">
+              <Undo size={24} strokeWidth={2.5} />
+            </button>
+            <button onClick={handleClear} className="p-2 text-[#FF6B6B] hover:bg-[#FFF5F5] border-2 border-transparent hover:border-[#FF6B6B] rounded-lg transition-all" title="Clear All">
+              <Trash2 size={24} strokeWidth={2.5} />
+            </button>
+          </div>
+        </div>
+
+        <div className={`grid gap-2 ${isModal ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-4'}`}>
           {isModal ? (
             <button 
               onClick={handleExport} 
               disabled={regions.length === 0}
-              className={`flex items-center space-x-2 px-6 py-2 rounded-lg font-black uppercase tracking-wide transition-all border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-[#4ECDC4] hover:bg-[#3DBDB4] text-black'}`}
+              className={`flex items-center justify-center gap-2 px-6 py-3 rounded-lg font-black uppercase tracking-wide transition-all border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-[#4ECDC4] hover:bg-[#3DBDB4] text-black'}`}
             >
               <Save size={20} strokeWidth={3} />
               <span>Save Changes</span>
@@ -218,7 +243,7 @@ export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPl
               <button 
                 onClick={handleAddToBatch}
                 disabled={regions.length === 0}
-                className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-bold uppercase transition-all border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-[#A7F3D0] hover:bg-[#6EE7B7] text-black'}`}
+                className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-bold uppercase transition-all border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-[#A7F3D0] hover:bg-[#6EE7B7] text-black'}`}
               >
                 <Plus size={20} strokeWidth={2.5} />
                 <span>Add ({batchCount})</span>
@@ -227,15 +252,29 @@ export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPl
               <button 
                 onClick={handleExport} 
                 disabled={regions.length === 0}
-                className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-bold uppercase transition-all border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-white hover:bg-slate-50 text-black'}`}
+                className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-bold uppercase transition-all border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-white hover:bg-slate-50 text-black'}`}
               >
                 <Download size={20} strokeWidth={2.5} />
                 <span>JSON</span>
               </button>
+              {onExportVideo && (
+                <button
+                  onClick={handleExportVideo}
+                  disabled={regions.length === 0}
+                  className={`flex items-center justify-center gap-1.5 px-3 py-3 rounded-lg text-xs font-black uppercase tracking-wide transition-all border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] ${
+                    regions.length === 0
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none'
+                      : 'bg-[#E0E7FF] hover:bg-[#C7D2FE] text-black'
+                  }`}
+                >
+                  <Video size={16} strokeWidth={2.5} />
+                  <span>Export Video</span>
+                </button>
+              )}
               <button 
                 onClick={handlePlay} 
                 disabled={regions.length === 0}
-                className={`flex items-center space-x-2 px-6 py-2 rounded-lg font-black uppercase tracking-wide transition-all border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-[#FFD93D] hover:bg-[#FCD34D] text-black'}`}
+                className={`flex items-center justify-center gap-2 px-6 py-3 rounded-lg font-black uppercase tracking-wide transition-all border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${regions.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-slate-400 shadow-none' : 'bg-[#FFD93D] hover:bg-[#FCD34D] text-black'}`}
               >
                 <Play size={20} strokeWidth={3} />
                 <span>Play</span>
@@ -245,17 +284,15 @@ export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPl
         </div>
       </div>
 
-      <div className="flex flex-col lg:flex-row gap-8 flex-1 min-h-0 justify-center items-start overflow-auto p-4">
-        {/* Original Image (Reference) */}
-        <div className="relative rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] border-4 border-black max-w-[45%] bg-white">
+      <div className="flex flex-col lg:flex-row gap-5 sm:gap-8 flex-1 min-h-0 justify-center items-stretch overflow-auto p-1 sm:p-4">
+        <div className="relative w-full rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] border-4 border-black bg-white lg:max-w-[45%]">
           <div className="absolute top-0 left-0 bg-black text-white text-sm px-3 py-1 font-bold uppercase z-10 border-b-2 border-r-2 border-black rounded-br-lg">
             Original
           </div>
-          <img src={imageA} alt="Original" className="block max-h-[65vh] w-auto h-auto" />
+          <img src={imageA} alt="Original" className="block w-full max-h-[52vh] sm:max-h-[65vh] object-contain" />
         </div>
 
-        {/* Modified Image (Editor) */}
-        <div className="relative rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] border-4 border-black max-w-[45%] group cursor-crosshair bg-white">
+        <div className="relative w-full rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] border-4 border-black group cursor-crosshair bg-white lg:max-w-[45%]">
           <div className="absolute top-0 left-0 bg-[#FF6B6B] text-black text-sm px-3 py-1 font-bold uppercase z-10 border-b-2 border-r-2 border-black rounded-br-lg animate-pulse">
             Draw Here
           </div>
@@ -264,7 +301,7 @@ export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPl
             ref={imageRef}
             src={imageB} 
             alt="Modified" 
-            className="block max-h-[65vh] w-auto h-auto pointer-events-none select-none"
+            className="block w-full max-h-[52vh] sm:max-h-[65vh] object-contain pointer-events-none select-none"
             onLoad={() => {
               const img = imageRef.current;
               const canvas = canvasRef.current;
@@ -286,7 +323,7 @@ export function EditorCanvas({ imageA, imageB, initialRegions = [], onSave, onPl
         </div>
       </div>
       
-      <div className="text-center text-black font-bold text-sm uppercase tracking-widest bg-[#FFFDF5] p-2 border-2 border-black inline-block mx-auto shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] -rotate-1">
+      <div className="text-center text-black font-bold text-xs sm:text-sm uppercase tracking-widest bg-[#FFFDF5] p-2 border-2 border-black inline-block mx-auto shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] -rotate-1 max-w-full">
         Click and drag on the right image to mark differences
       </div>
     </div>

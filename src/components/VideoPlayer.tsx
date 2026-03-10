@@ -1,15 +1,25 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowLeft, Pause, Play, SkipForward, RotateCcw, CheckCircle } from 'lucide-react';
+import { ArrowLeft, Pause, Play, SkipForward, RotateCcw, CheckCircle, Send } from 'lucide-react';
 import { Puzzle, VideoSettings } from '../types';
+import { BASE_STAGE_SIZE, CLASSIC_HUD_SPEC, TRANSITION_TUNING } from '../constants/videoLayoutSpec';
+import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
+import { resolveVideoLayoutSettings } from '../constants/videoLayoutCustom';
+import { VIDEO_PACKAGE_PRESETS, resolvePackageImageArrangement } from '../constants/videoPackages';
+import { resolveVisualThemeStyle } from '../constants/videoThemes';
+import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
+import { clampLogoZoom } from '../utils/logoProcessing';
 
 interface VideoPlayerProps {
   puzzles: Puzzle[];
   settings: VideoSettings;
   onExit: () => void;
+  onSendToEditor?: () => void;
+  embedded?: boolean;
+  hidePlaybackControls?: boolean;
 }
 
-type Phase = 'showing' | 'revealing' | 'transitioning' | 'finished';
+type Phase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro' | 'finished';
 
 export interface VisualTheme {
   rootBg: string;
@@ -38,6 +48,30 @@ export interface VisualTheme {
 }
 
 export const VISUAL_THEMES: Record<VideoSettings['visualStyle'], VisualTheme> = {
+  random: {
+    rootBg: '#FFFDF5',
+    headerBg: '#FFD93D',
+    headerText: '#000000',
+    headerSubText: '#1F2937',
+    gameBg: '#4ECDC4',
+    imagePanelBg: '#E6F7F3',
+    patternColor: '#000000',
+    playHoverBg: '#4ECDC4',
+    skipHoverBg: '#FFD93D',
+    timerBg: '#000000',
+    timerText: '#FFFFFF',
+    timerDot: '#4ECDC4',
+    timerBorder: '#000000',
+    timerShapeClass: 'rounded-full',
+    timerTextClass: 'font-mono font-bold',
+    progressTrackBg: '#FFFFFF',
+    progressTrackBorder: '#000000',
+    progressTrackClass: 'rounded-full',
+    progressFill: 'linear-gradient(90deg, #FF6B6B 0%, #FF8E53 100%)',
+    progressFillClass: '',
+    completionBg: '#FFD93D',
+    completionIcon: '#4ECDC4'
+  },
   classic: {
     rootBg: '#FFFDF5',
     headerBg: '#FFD93D',
@@ -451,25 +485,44 @@ export const VISUAL_THEMES: Record<VideoSettings['visualStyle'], VisualTheme> = 
     progressFillClass: '',
     completionBg: '#E7E5E4',
     completionIcon: '#292524'
+  },
+  storybook: {
+    rootBg: '#1A2830',
+    headerBg: '#D8B149',
+    headerText: '#2E2414',
+    headerSubText: '#5A4320',
+    gameBg: '#204759',
+    imagePanelBg: '#E9E2CF',
+    patternColor: '#000000',
+    playHoverBg: '#C9A540',
+    skipHoverBg: '#B08C32',
+    timerBg: '#4A3C24',
+    timerText: '#F7E8C2',
+    timerDot: '#FCD34D',
+    timerBorder: '#2E2414',
+    timerShapeClass: 'rounded-2xl',
+    timerTextClass: 'font-mono font-black',
+    progressTrackBg: '#8B6D33',
+    progressTrackBorder: '#2E2414',
+    progressTrackClass: 'rounded-full',
+    progressFill: 'linear-gradient(90deg, #D9C08B 0%, #8B6D33 65%, #5A4320 100%)',
+    progressFillClass: '',
+    completionBg: '#D8B149',
+    completionIcon: '#2E2414'
   }
-};
-
-const BASE_STAGE_SIZE: Record<VideoSettings['aspectRatio'], { width: number; height: number }> = {
-  '16:9': { width: 1600, height: 900 },
-  '9:16': { width: 900, height: 1600 },
-  '1:1': { width: 1200, height: 1200 },
-  '4:3': { width: 1440, height: 1080 }
 };
 
 type MeterOrientation = 'horizontal' | 'vertical';
 
 interface HudLayoutConfig {
   headerHeight: number;
+  logoPosition?: React.CSSProperties;
   titlePosition: React.CSSProperties;
   titleAlignItems: 'flex-start' | 'center' | 'flex-end';
   titleGap: number;
   titleFontSize: number;
   subtitleFontSize: number;
+  subtitleGap?: number;
   subtitleLetterSpacingEm: number;
   titleFontClass: string;
   subtitleFontClass: string;
@@ -488,6 +541,47 @@ interface HudLayoutConfig {
   progressRadius: number;
   progressOrientation: MeterOrientation;
 }
+
+const anchorToCss = (anchor: HudAnchorSpec): React.CSSProperties => {
+  const style: React.CSSProperties = {};
+  const transforms: string[] = [];
+  if (anchor.centerX) {
+    style.left = '50%';
+    transforms.push('translateX(-50%)');
+  } else if (anchor.left !== undefined) {
+    style.left = anchor.left;
+  } else if (anchor.right !== undefined) {
+    style.right = anchor.right;
+  }
+
+  if (anchor.centerY) {
+    style.top = '50%';
+    transforms.push('translateY(-50%)');
+  } else if (anchor.top !== undefined) {
+    style.top = anchor.top;
+  } else if (anchor.bottom !== undefined) {
+    style.bottom = anchor.bottom;
+  }
+
+  if (anchor.right !== undefined && !anchor.centerX && style.right === undefined) {
+    style.right = anchor.right;
+  }
+  if (anchor.bottom !== undefined && !anchor.centerY && style.bottom === undefined) {
+    style.bottom = anchor.bottom;
+  }
+  if (transforms.length > 0) {
+    style.transform = transforms.join(' ');
+  }
+  return style;
+};
+
+const fillTemplate = (template: string, values: Record<string, string | number>) =>
+  template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => String(values[key] ?? ''));
+
+const getInitialPhase = (hasPuzzles: boolean, settings: VideoSettings): Phase => {
+  if (!hasPuzzles) return 'finished';
+  return settings.sceneSettings.introEnabled ? 'intro' : 'showing';
+};
 
 const HUD_PRESETS = {
   rightStack: {
@@ -693,7 +787,21 @@ const HUD_PRESETS = {
 };
 
 const HUD_LAYOUTS: Record<VideoSettings['visualStyle'], HudLayoutConfig> = {
-  classic: HUD_PRESETS.rightStack,
+  random: HUD_PRESETS.rightStack,
+  classic: {
+    ...HUD_PRESETS.rightStack,
+    headerHeight: CLASSIC_HUD_SPEC.headerHeight,
+    titlePosition: { top: CLASSIC_HUD_SPEC.title.top, left: CLASSIC_HUD_SPEC.title.left },
+    titleFontSize: CLASSIC_HUD_SPEC.title.fontSize,
+    subtitleFontSize: CLASSIC_HUD_SPEC.title.subtitleSize,
+    timerPosition: { top: CLASSIC_HUD_SPEC.timer.top, right: CLASSIC_HUD_SPEC.timer.right },
+    timerPadX: CLASSIC_HUD_SPEC.timer.padX,
+    timerPadY: CLASSIC_HUD_SPEC.timer.padY,
+    timerDotSize: CLASSIC_HUD_SPEC.timer.dotSize,
+    timerGap: CLASSIC_HUD_SPEC.timer.gap,
+    timerFontSize: CLASSIC_HUD_SPEC.timer.fontSize,
+    timerMinWidth: CLASSIC_HUD_SPEC.timer.minWidth
+  },
   pop: HUD_PRESETS.rightStack,
   neon: { ...HUD_PRESETS.topInline, titleFontClass: 'font-mono', subtitleFontClass: 'font-mono', titleFontSize: 18, timerFontSize: 22 },
   sunset: { ...HUD_PRESETS.centerStack, titleFontClass: 'font-display', timerFontSize: 24 },
@@ -709,13 +817,41 @@ const HUD_LAYOUTS: Record<VideoSettings['visualStyle'], HudLayoutConfig> = {
   aurora: { ...HUD_PRESETS.topInline, titleFontClass: 'font-display', subtitleFontClass: 'font-mono', progressWidth: 118, timerMinWidth: 110 },
   slate: { ...HUD_PRESETS.rightStack, titleFontClass: 'font-mono', subtitleFontClass: 'font-mono', titleFontSize: 18, timerFontSize: 20, progressWidth: 140, progressHeight: 8 },
   arcade: { ...HUD_PRESETS.verticalLeft, titleFontClass: 'font-mono', subtitleFontClass: 'font-mono', titleFontSize: 20, timerFontSize: 23 },
-  ivory: { ...HUD_PRESETS.bottomRail, titleFontClass: 'font-sans', subtitleFontClass: 'font-sans', titleFontSize: 18, subtitleFontSize: 8, timerFontSize: 20, progressWidth: 220, progressHeight: 7 }
+  ivory: { ...HUD_PRESETS.bottomRail, titleFontClass: 'font-sans', subtitleFontClass: 'font-sans', titleFontSize: 18, subtitleFontSize: 8, timerFontSize: 20, progressWidth: 220, progressHeight: 7 },
+  storybook: {
+    ...HUD_PRESETS.topInline,
+    titleFontClass: 'font-serif',
+    subtitleFontClass: 'font-serif',
+    titleFontSize: 22,
+    subtitleFontSize: 10,
+    subtitleLetterSpacingEm: 0.08,
+    timerFontSize: 20,
+    timerMinWidth: 95,
+    progressWidth: 300,
+    progressHeight: 20,
+    progressRadius: 10
+  }
 };
 
-export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onExit }) => {
+export const VideoPlayer: React.FC<VideoPlayerProps> = ({
+  puzzles,
+  settings,
+  onExit,
+  onSendToEditor,
+  embedded = false,
+  hidePlaybackControls = false
+}) => {
+  const initialHasPuzzles = puzzles.length > 0;
+  const initialPhase = getInitialPhase(initialHasPuzzles, settings);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [phase, setPhase] = useState<Phase>('showing');
-  const [timeLeft, setTimeLeft] = useState(settings.showDuration);
+  const [phase, setPhase] = useState<Phase>(initialPhase);
+  const [timeLeft, setTimeLeft] = useState(
+    initialPhase === 'intro'
+      ? settings.sceneSettings.introDuration
+      : initialPhase === 'finished'
+      ? 0
+      : settings.showDuration
+  );
   const [isPlaying, setIsPlaying] = useState(true);
   const [isBlinkOverlayVisible, setIsBlinkOverlayVisible] = useState(false);
   const [imageViewportSize, setImageViewportSize] = useState({ width: 0, height: 0 });
@@ -724,10 +860,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
     width: typeof window !== 'undefined' ? window.innerWidth : 1600,
     height: typeof window !== 'undefined' ? window.innerHeight : 900
   }));
-  
-  const currentPuzzle = puzzles[currentIndex];
+
+  const hasPuzzles = initialHasPuzzles;
+  const safeCurrentIndex = hasPuzzles
+    ? Math.min(Math.max(0, currentIndex), puzzles.length - 1)
+    : 0;
+  const currentPuzzle = hasPuzzles
+    ? puzzles[safeCurrentIndex]
+    : { imageA: '', imageB: '', regions: [] };
+  const processedLogoSrc = useProcessedLogoSrc(settings.logo, {
+    enabled: settings.logoChromaKeyEnabled,
+    color: settings.logoChromaKeyColor,
+    tolerance: settings.logoChromaKeyTolerance
+  });
+  const logoZoom = clampLogoZoom(settings.logoZoom);
+  const renderedLogoSrc = processedLogoSrc ?? settings.logo;
   const containerRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const interactiveViewportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hasPuzzles) return;
+    if (currentIndex >= 0 && currentIndex < puzzles.length) return;
+    setCurrentIndex(safeCurrentIndex);
+  }, [hasPuzzles, currentIndex, puzzles.length, safeCurrentIndex]);
 
   // Timer Logic
   useEffect(() => {
@@ -747,44 +903,133 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
   }, [isPlaying, phase, currentIndex]);
 
   const handlePhaseComplete = () => {
-    if (phase === 'showing') {
+    if (!hasPuzzles) {
+      setPhase('finished');
+      setTimeLeft(0);
+      return;
+    }
+
+    if (phase === 'intro') {
+      setPhase('showing');
+      setTimeLeft(settings.showDuration);
+    } else if (phase === 'showing') {
       setPhase('revealing');
       setTimeLeft(revealPhaseDuration);
     } else if (phase === 'revealing') {
-      if (currentIndex < puzzles.length - 1) {
+      if (safeCurrentIndex < puzzles.length - 1) {
         setPhase('transitioning');
         setTimeLeft(settings.transitionDuration);
+      } else if (settings.sceneSettings.outroEnabled) {
+        setPhase('outro');
+        setTimeLeft(settings.sceneSettings.outroDuration);
       } else {
         setPhase('finished');
+        setTimeLeft(0);
       }
     } else if (phase === 'transitioning') {
-      setCurrentIndex((prev) => prev + 1);
+      setCurrentIndex((prev) => Math.min(prev + 1, puzzles.length - 1));
       setPhase('showing');
       setTimeLeft(settings.showDuration);
+    } else if (phase === 'outro') {
+      setPhase('finished');
+      setTimeLeft(0);
     }
   };
 
   const handleSkip = () => {
-    if (phase === 'showing') {
+    if (phase === 'intro') {
+      setPhase('showing');
+      setTimeLeft(settings.showDuration);
+    } else if (phase === 'showing') {
       setPhase('revealing');
       setTimeLeft(revealPhaseDuration);
     } else if (phase === 'revealing') {
       handlePhaseComplete();
+    } else if (phase === 'outro') {
+      setPhase('finished');
+      setTimeLeft(0);
     }
   };
 
   const handleReplay = () => {
+    const replayPhase = getInitialPhase(hasPuzzles, settings);
     setCurrentIndex(0);
-    setPhase('showing');
-    setTimeLeft(settings.showDuration);
+    setPhase(replayPhase);
+    setTimeLeft(replayPhase === 'intro' ? settings.sceneSettings.introDuration : settings.showDuration);
     setIsPlaying(true);
   };
 
-  const isVerticalLayout = settings.aspectRatio === '9:16' || settings.aspectRatio === '1:1';
-  const styleSupportedAspectRatio = settings.aspectRatio === '16:9' || settings.aspectRatio === '9:16';
-  const visualStyle = styleSupportedAspectRatio ? settings.visualStyle : 'classic';
-  const visualTheme = VISUAL_THEMES[visualStyle];
-  const hudLayout = HUD_LAYOUTS[visualStyle];
+  useEffect(() => {
+    if (!embedded || phase !== 'finished' || !hasPuzzles) {
+      return;
+    }
+
+    const replayTimer = window.setTimeout(() => {
+      handleReplay();
+    }, 650);
+
+    return () => window.clearTimeout(replayTimer);
+  }, [embedded, phase, hasPuzzles, settings, handleReplay]);
+
+  const packagePreset =
+    VIDEO_PACKAGE_PRESETS[settings.videoPackagePreset] ??
+    VIDEO_PACKAGE_PRESETS.gameshow;
+  const isVerticalLayout = resolvePackageImageArrangement(packagePreset, settings.aspectRatio);
+  const effectiveVisualStyle = resolveVisualThemeStyle(settings.visualStyle, safeCurrentIndex);
+  const customLayoutEnabled = settings.useCustomLayout === true;
+  const isClassicStyle =
+    packagePreset.surfaceStyle === 'gameshow' && !customLayoutEnabled;
+  const isStorybookStyle =
+    packagePreset.surfaceStyle === 'storybook' && settings.aspectRatio === '16:9' && !customLayoutEnabled;
+  const isWidePuzzleDisplay = isStorybookStyle;
+  const visualTheme = VISUAL_THEMES[effectiveVisualStyle];
+  const resolvedLayout = useMemo(
+    () => resolveVideoLayoutSettings(settings.videoPackagePreset, settings.aspectRatio, settings),
+    [settings.videoPackagePreset, settings.aspectRatio, settings]
+  );
+  const hudLayout = useMemo<HudLayoutConfig>(() => {
+    const chrome = packagePreset.chrome;
+    const shared = resolvedLayout.hud;
+    const titleAlignItems =
+      shared.title.align === 'left'
+        ? 'flex-start'
+        : shared.title.align === 'center'
+        ? 'center'
+        : 'flex-end';
+
+    return {
+      headerHeight: shared.headerHeight,
+      logoPosition: {
+        top: resolvedLayout.logo.top,
+        left: resolvedLayout.logo.left
+      },
+      titlePosition: anchorToCss(shared.title),
+      titleAlignItems,
+      titleGap: chrome.titleGap,
+      titleFontSize: shared.title.fontSize,
+      subtitleFontSize: shared.title.subtitleSize,
+      subtitleGap: shared.title.subtitleGap,
+      subtitleLetterSpacingEm: chrome.subtitleLetterSpacingEm,
+      titleFontClass: chrome.titleFontClass,
+      subtitleFontClass: chrome.subtitleFontClass,
+      logoSize: resolvedLayout.logo.size,
+      timerPosition: anchorToCss(shared.timer),
+      timerPadX: shared.timer.padX,
+      timerPadY: shared.timer.padY,
+      timerDotSize: shared.timer.dotSize,
+      timerGap: shared.timer.gap,
+      timerFontSize: shared.timer.fontSize,
+      timerMinWidth: shared.timer.minWidth,
+      timerJustify: chrome.timerJustify,
+      progressPosition: anchorToCss(shared.progress),
+      progressWidth: shared.progress.width,
+      progressHeight: shared.progress.height,
+      progressRadius: shared.progress.radius,
+      progressOrientation: shared.progress.orientation
+    };
+  }, [packagePreset, resolvedLayout]);
+  const frameLayout = resolvedLayout.frame;
+  const isBlinkingEnabled = settings.enableBlinking !== false;
   const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
   const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
   const revealRegionCount = currentPuzzle.regions.length;
@@ -799,10 +1044,57 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
       ? Math.min(revealRegionCount, Math.floor(revealElapsed / revealStepSeconds) + 1)
       : 0;
   const isBlinkOverlayActive =
+    isBlinkingEnabled &&
     phase === 'revealing' &&
     revealRegionCount > 0 &&
     revealElapsed >= revealBlinkStartTime;
-
+  const currentPuzzleNumber = hasPuzzles ? safeCurrentIndex + 1 : 0;
+  const nextPuzzleNumber = Math.min(puzzles.length, safeCurrentIndex + 2);
+  const templateValues = {
+    current: currentPuzzleNumber,
+    next: nextPuzzleNumber,
+    total: puzzles.length,
+    puzzleCount: puzzles.length,
+    remaining: Math.max(0, puzzles.length - currentPuzzleNumber),
+    preset: ''
+  };
+  const introEyebrow = fillTemplate(settings.textTemplates.introEyebrow, templateValues);
+  const introTitle = fillTemplate(settings.textTemplates.introTitle, templateValues);
+  const introSubtitle = fillTemplate(settings.textTemplates.introSubtitle, templateValues);
+  const playModeTitle = fillTemplate(settings.textTemplates.playTitle, templateValues);
+  const playModeSubtitle = fillTemplate(settings.textTemplates.playSubtitle, templateValues);
+  const revealModeTitle = fillTemplate(settings.textTemplates.revealTitle, templateValues);
+  const transitionEyebrow = fillTemplate(settings.textTemplates.transitionEyebrow, templateValues);
+  const transitionTitle = fillTemplate(settings.textTemplates.transitionTitle, templateValues);
+  const transitionSubtitle = fillTemplate(settings.textTemplates.transitionSubtitle, templateValues);
+  const completionEyebrow = fillTemplate(settings.textTemplates.completionEyebrow, templateValues);
+  const completionTitle = fillTemplate(settings.textTemplates.completionTitle, templateValues);
+  const completionSubtitle = fillTemplate(settings.textTemplates.completionSubtitle, templateValues);
+  const puzzleBadgeLabel = fillTemplate(settings.textTemplates.puzzleBadgeLabel, templateValues);
+  const headerTitle =
+    phase === 'intro'
+      ? introTitle
+      : phase === 'revealing'
+      ? revealModeTitle
+      : phase === 'transitioning'
+      ? transitionTitle
+      : phase === 'outro'
+      ? completionTitle
+      : playModeTitle;
+  const headerSubtitle =
+    phase === 'intro'
+      ? introSubtitle
+      : phase === 'transitioning'
+      ? transitionSubtitle
+      : phase === 'outro'
+      ? completionSubtitle
+      : playModeSubtitle;
+  const shouldRenderHeaderText = phase !== 'intro' && phase !== 'outro';
+  const shouldShowHeaderTimer = phase !== 'revealing';
+  const shouldShowHeaderProgress = phase === 'showing';
+  const shouldRenderCustomLogo = Boolean(settings.logo) && customLayoutEnabled;
+  const shouldRenderInlineLogo =
+    Boolean(settings.logo) && !customLayoutEnabled && !isClassicStyle && !isStorybookStyle && shouldRenderHeaderText;
   useEffect(() => {
     if (!isBlinkOverlayActive) {
       setIsBlinkOverlayVisible(false);
@@ -821,39 +1113,127 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
   }, [isBlinkOverlayActive, isPlaying, blinkCycleDuration, currentIndex]);
 
   const phaseDuration =
-    phase === 'showing'
+    phase === 'intro'
+      ? settings.sceneSettings.introDuration
+      : phase === 'showing'
       ? settings.showDuration
       : phase === 'revealing'
       ? revealPhaseDuration
       : phase === 'transitioning'
       ? settings.transitionDuration
+      : phase === 'outro'
+      ? settings.sceneSettings.outroDuration
       : 0;
 
   const progressPercent =
     phaseDuration <= 0
       ? 0
       : Math.min(100, Math.max(0, ((phaseDuration - timeLeft) / phaseDuration) * 100));
+  const countdownPercent =
+    phaseDuration <= 0
+      ? 0
+      : Math.max(0, Math.min(100, (timeLeft / Math.max(0.1, phaseDuration)) * 100));
+  const transitionDuration = Math.max(0.001, settings.transitionDuration);
+  const transitionProgress =
+    phase === 'transitioning'
+      ? Math.min(1, Math.max(0, (transitionDuration - timeLeft) / transitionDuration))
+      : 0;
+  const transitionSmooth =
+    phase === 'transitioning' ? transitionProgress * transitionProgress * (3 - 2 * transitionProgress) : 0;
+  const transitionCardOpacity =
+    phase === 'transitioning'
+      ? Math.min(
+          1,
+          Math.max(
+            0,
+            TRANSITION_TUNING.cardOpacityBase +
+              transitionSmooth * (TRANSITION_TUNING.cardOpacityPulse - 0.3) -
+              transitionProgress * TRANSITION_TUNING.cardOpacityDecay
+          )
+        )
+      : 0;
+  const transitionCardTranslateY = Math.round(
+    (1 - transitionSmooth) * (TRANSITION_TUNING.cardTranslateY + 8)
+  );
+  const transitionCardScale =
+    TRANSITION_TUNING.cardScaleBase + transitionSmooth * (TRANSITION_TUNING.cardScalePulse + 0.04);
+  const transitionCardGlowOpacity = 0.18 + transitionSmooth * 0.34;
+  const puzzleTransitionDuration =
+    settings.transitionStyle === 'none' ? 0 : Math.max(0, settings.transitionDuration);
+  const puzzleMotionInitial =
+    settings.transitionStyle === 'slide'
+      ? { x: '100%', opacity: 0 }
+      : settings.transitionStyle === 'fade'
+      ? { opacity: 0 }
+      : { x: 0, opacity: 1 };
+  const puzzleMotionExit =
+    settings.transitionStyle === 'slide'
+      ? { x: '-100%', opacity: 0 }
+      : settings.transitionStyle === 'fade'
+      ? { opacity: 0 }
+      : { x: 0, opacity: 1 };
 
   const progressFillStyle =
     hudLayout.progressOrientation === 'horizontal'
       ? {
-          width: `${progressPercent}%`,
+          width: `${countdownPercent}%`,
           height: '100%',
-          background: visualTheme.progressFill,
-          boxShadow: visualTheme.progressFillGlow
+          background: isClassicStyle
+            ? CLASSIC_HUD_SPEC.progress.fillGradient
+            : visualTheme.progressFill,
+          boxShadow: isClassicStyle
+            ? CLASSIC_HUD_SPEC.progress.fillGlowCss
+            : visualTheme.progressFillGlow
         }
       : {
           width: '100%',
-          height: `${progressPercent}%`,
+          height: `${countdownPercent}%`,
           background: visualTheme.progressFill,
           boxShadow: visualTheme.progressFillGlow
         };
+  const progressTrackPosition = isClassicStyle
+    ? ({
+        left: '50%',
+        transform: 'translateX(-50%)',
+        bottom: CLASSIC_HUD_SPEC.progress.bottom
+      } as React.CSSProperties)
+    : hudLayout.progressPosition;
+  const progressTrackWidth = isClassicStyle
+    ? `${Math.round(BASE_STAGE_SIZE[settings.aspectRatio].width * CLASSIC_HUD_SPEC.progress.widthRatio)}px`
+    : `${hudLayout.progressWidth}px`;
+  const progressTrackHeight = isClassicStyle
+    ? `${CLASSIC_HUD_SPEC.progress.height}px`
+    : `${hudLayout.progressHeight}px`;
+  const progressTrackRadius = isClassicStyle ? '999px' : `${hudLayout.progressRadius}px`;
+  const progressTrackBorderWidth = isClassicStyle
+    ? `${CLASSIC_HUD_SPEC.progress.borderWidth}px`
+    : '2px';
+  const progressTrackShadow = isClassicStyle
+    ? 'inset 0 1px 0 rgba(255,255,255,0.24), 0 2px 4px rgba(0,0,0,0.32)'
+    : '2px 2px 0px 0px rgba(0,0,0,1)';
+  const progressTrackBackground = isClassicStyle
+    ? CLASSIC_HUD_SPEC.progress.trackBackground
+    : visualTheme.progressTrackBg;
+  const classicCenterTitleFontSize = isVerticalLayout
+    ? CLASSIC_HUD_SPEC.centerTitle.fontSizeNarrow
+    : CLASSIC_HUD_SPEC.centerTitle.fontSize;
+  const classicBadgeValueFontSize = isVerticalLayout
+    ? CLASSIC_HUD_SPEC.puzzleBadge.valueSizeNarrow
+    : CLASSIC_HUD_SPEC.puzzleBadge.valueSize;
 
   const stageMetrics = useMemo(() => {
     const baseSize = BASE_STAGE_SIZE[settings.aspectRatio];
-    const horizontalPadding = 24;
-    const topReserved = 92;
-    const bottomReserved = phase === 'finished' ? 24 : 122;
+    const horizontalPadding = embedded ? 8 : 24;
+    const topReserved = embedded ? 8 : 92;
+    const bottomReserved = embedded
+      ? phase === 'finished'
+        ? 8
+        : hidePlaybackControls
+        ? 8
+        : 74
+      : phase === 'finished'
+      ? 24
+      : 122;
 
     const availableWidth = Math.max(320, viewportSize.width - horizontalPadding * 2);
     const availableHeight = Math.max(240, viewportSize.height - topReserved - bottomReserved);
@@ -869,23 +1249,36 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
       scaledWidth: baseSize.width * scale,
       scaledHeight: baseSize.height * scale
     };
-  }, [settings.aspectRatio, viewportSize, phase]);
+  }, [settings.aspectRatio, viewportSize, phase, embedded, hidePlaybackControls]);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (embedded) {
+      const target = viewportRef.current;
+      if (!target) return;
+      const syncSize = () => {
+        setViewportSize({
+          width: Math.max(1, target.clientWidth),
+          height: Math.max(1, target.clientHeight)
+        });
+      };
+      syncSize();
+      if (typeof ResizeObserver === 'undefined') return;
+      const observer = new ResizeObserver(() => syncSize());
+      observer.observe(target);
+      return () => observer.disconnect();
+    }
 
+    if (typeof window === 'undefined') return;
     const handleResize = () => {
       setViewportSize({
         width: window.innerWidth,
         height: window.innerHeight
       });
     };
-
     handleResize();
     window.addEventListener('resize', handleResize);
-
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  }, [embedded]);
 
   useEffect(() => {
     setImageBNaturalSize({ width: 0, height: 0 });
@@ -949,7 +1342,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
   }, [currentPuzzle.imageB]);
 
   const formatTime = (seconds: number) => {
-    return seconds.toFixed(1);
+    return String(Math.max(0, Math.ceil(seconds - 0.001)));
   };
 
   const hexToRgba = (hex: string, alpha: number) => {
@@ -976,11 +1369,45 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
       : 'highlight_soft';
   const circleStroke = Math.max(2, settings.circleThickness);
   const outlineStroke = Math.max(0, settings.outlineThickness);
+  const renderBlinkOverlay = () => {
+    if (!isBlinkOverlayActive || !isBlinkOverlayVisible) return null;
+
+    return (
+      <img
+        src={currentPuzzle.imageA}
+        alt="Blink compare"
+        className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
+      />
+    );
+  };
 
   const renderRevealOverlays = () => (
     <AnimatePresence>
       {phase === 'revealing' &&
-        currentPuzzle.regions.slice(0, revealedRegionCount).map((region) => {
+        revealedRegionCount > 0 &&
+        (settings.revealBehavior === 'spotlight' ||
+          settings.revealBehavior === 'cinematic_sequential') && (
+          <motion.div
+            key="reveal-scene-dimmer"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-10"
+            style={{
+              backgroundColor:
+                settings.revealBehavior === 'cinematic_sequential'
+                  ? 'rgba(3,7,18,0.5)'
+                  : 'rgba(3,7,18,0.32)'
+            }}
+          />
+        )}
+      {phase === 'revealing' &&
+        currentPuzzle.regions.slice(0, revealedRegionCount).map((region, index) => {
+          const regionKey = region.id || `${region.x}-${region.y}-${region.width}-${region.height}`;
+          const isActiveReveal = index === revealedRegionCount - 1;
+          const usesPersistentSpotlight =
+            settings.revealBehavior === 'spotlight' ||
+            settings.revealBehavior === 'cinematic_sequential';
           const isRatioBased =
             region.x <= 1 && region.y <= 1 && region.width <= 1 && region.height <= 1;
 
@@ -1032,13 +1459,40 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
             settings.revealStyle === 'circle' &&
             (effectiveRevealVariant === 'circle_ellipse' || effectiveRevealVariant === 'circle_ellipse_dotted');
           const useSquareCircleFrame = settings.revealStyle === 'circle' && !isEllipseVariant;
+          const frameBorderRadius =
+            settings.revealStyle === 'circle'
+              ? '9999px'
+              : effectiveRevealVariant === 'box_dashed'
+              ? '0.75rem'
+              : '0.5rem';
+          const behaviorScale =
+            isActiveReveal && settings.revealBehavior === 'zoom_to_diff'
+              ? 1.08
+              : isActiveReveal && settings.revealBehavior === 'freeze_ring'
+              ? 1.03
+              : 1;
+          const markerGlow =
+            usesPersistentSpotlight
+              ? `drop-shadow(0 0 ${isActiveReveal ? 16 : 10}px ${hexToRgba(
+                  settings.revealColor,
+                  isActiveReveal ? 0.5 : 0.26
+                )})`
+              : isActiveReveal && settings.revealBehavior !== 'marker_only'
+              ? `drop-shadow(0 0 12px ${hexToRgba(settings.revealColor, 0.38)})`
+              : undefined;
 
           return (
             <motion.div
-              key={region.id}
-              initial={{ opacity: 0, scale: 1.5 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.28 }}
+              key={regionKey}
+              initial={{
+                opacity: 0,
+                scale: settings.revealBehavior === 'freeze_ring' ? 0.78 : 1.5
+              }}
+              animate={{ opacity: 1, scale: behaviorScale }}
+              transition={{
+                duration: settings.revealBehavior === 'cinematic_sequential' ? 0.42 : 0.28,
+                ease: [0.22, 1, 0.36, 1]
+              }}
               className="absolute z-20"
               style={{
                 left: `${(useSquareCircleFrame ? circleLeft : boxLeft) * 100}%`,
@@ -1046,13 +1500,104 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
                 width: `${(useSquareCircleFrame ? circleSize : expandedWidth) * 100}%`,
                 height: `${(useSquareCircleFrame ? circleSize : expandedHeight) * 100}%`,
                 minWidth: '24px',
-                minHeight: '24px'
+                minHeight: '24px',
+                filter: markerGlow
               }}
             >
+              {usesPersistentSpotlight && (
+                <div
+                  className="absolute inset-[8%]"
+                  style={{
+                    borderRadius: frameBorderRadius,
+                    background: isActiveReveal
+                      ? `radial-gradient(circle, ${hexToRgba(settings.revealColor, 0.3)} 0%, rgba(255,255,255,0.2) 52%, transparent 88%)`
+                      : `radial-gradient(circle, rgba(255,255,255,0.16) 0%, ${hexToRgba(
+                          settings.revealColor,
+                          0.12
+                        )} 56%, transparent 88%)`,
+                    boxShadow: `0 0 ${isActiveReveal ? 18 : 10}px ${hexToRgba(
+                      settings.revealColor,
+                      isActiveReveal ? 0.3 : 0.18
+                    )}`
+                  }}
+                />
+              )}
+
+              {isActiveReveal &&
+                (settings.revealBehavior === 'pulse' ||
+                  settings.revealBehavior === 'zoom_to_diff' ||
+                  settings.revealBehavior === 'freeze_ring' ||
+                  settings.revealBehavior === 'cinematic_sequential') && (
+                  <motion.div
+                    className="absolute inset-0"
+                    animate={{ scale: [1, 1.18, 1.3], opacity: [0.7, 0.25, 0] }}
+                    transition={{
+                      duration: settings.revealBehavior === 'freeze_ring' ? 0.7 : 1.1,
+                      repeat: Number.POSITIVE_INFINITY,
+                      ease: 'easeOut'
+                    }}
+                    style={{
+                      borderRadius: frameBorderRadius,
+                      border:
+                        settings.revealBehavior === 'freeze_ring'
+                          ? `${Math.max(3, circleStroke + 1)}px solid ${settings.revealColor}`
+                          : `3px solid ${settings.revealColor}`,
+                      background:
+                        settings.revealBehavior === 'zoom_to_diff'
+                          ? `radial-gradient(circle, ${hexToRgba(settings.revealColor, 0.22)} 0%, transparent 72%)`
+                          : 'transparent'
+                    }}
+                  />
+                )}
+
+              {isActiveReveal && settings.revealBehavior === 'zoom_to_diff' && (
+                <div
+                  className="absolute inset-[14%]"
+                  style={{
+                    borderRadius: frameBorderRadius,
+                    background: `linear-gradient(135deg, ${hexToRgba(settings.revealColor, 0.2)} 0%, rgba(255,255,255,0.08) 100%)`,
+                    border: `1px solid ${hexToRgba(settings.revealColor, 0.45)}`,
+                    backdropFilter: 'blur(3px)'
+                  }}
+                />
+              )}
+
               {settings.revealStyle === 'box' && effectiveRevealVariant === 'box_glow' && (
                 <div
                   className="w-full h-full rounded-md border-4"
                   style={{
+                    borderColor: settings.revealColor,
+                    boxShadow: outlineStroke > 0 ? `0 0 0 ${outlineStroke}px ${settings.outlineColor}` : undefined
+                  }}
+                />
+              )}
+
+              {settings.revealStyle === 'box' && effectiveRevealVariant === 'box_classic' && (
+                <div
+                  className="relative w-full h-full rounded-md"
+                  style={{
+                    borderWidth: `${Math.max(3, circleStroke)}px`,
+                    borderStyle: 'solid',
+                    borderColor: settings.revealColor,
+                    boxShadow: outlineStroke > 0 ? `0 0 0 ${outlineStroke}px ${settings.outlineColor}` : undefined
+                  }}
+                >
+                  <div
+                    className="absolute inset-[14%] rounded-[0.35rem] border"
+                    style={{
+                      borderWidth: `${Math.max(1, circleStroke * 0.45)}px`,
+                      borderColor: hexToRgba(settings.revealColor, 0.82)
+                    }}
+                  />
+                </div>
+              )}
+
+              {settings.revealStyle === 'box' && effectiveRevealVariant === 'box_minimal' && (
+                <div
+                  className="w-full h-full rounded-sm"
+                  style={{
+                    borderWidth: `${Math.max(2, circleStroke * 0.72)}px`,
+                    borderStyle: 'solid',
                     borderColor: settings.revealColor,
                     boxShadow: outlineStroke > 0 ? `0 0 0 ${outlineStroke}px ${settings.outlineColor}` : undefined
                   }}
@@ -1096,6 +1641,66 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
                     }}
                   />
                 </div>
+              )}
+
+              {settings.revealStyle === 'circle' && effectiveRevealVariant === 'circle_classic' && (
+                <div
+                  className="relative w-full h-full rounded-full"
+                  style={{
+                    borderWidth: `${circleStroke}px`,
+                    borderStyle: 'solid',
+                    borderColor: settings.revealColor,
+                    boxShadow: outlineStroke > 0 ? `0 0 0 ${outlineStroke}px ${settings.outlineColor}` : undefined
+                  }}
+                >
+                  <div
+                    className="absolute inset-[18%] rounded-full border"
+                    style={{
+                      borderWidth: `${Math.max(1, circleStroke * 0.45)}px`,
+                      borderColor: hexToRgba(settings.revealColor, 0.82)
+                    }}
+                  />
+                </div>
+              )}
+
+              {settings.revealStyle === 'circle' && effectiveRevealVariant === 'circle_crosshair' && (
+                <svg viewBox="0 0 100 100" className="w-full h-full">
+                  {outlineStroke > 0 && (
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r={Math.max(6, 50 - (circleStroke / 2 + outlineStroke))}
+                      fill="none"
+                      stroke={settings.outlineColor}
+                      strokeWidth={circleStroke + outlineStroke * 2}
+                    />
+                  )}
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r={Math.max(6, 50 - (circleStroke / 2 + outlineStroke))}
+                    fill="none"
+                    stroke={settings.revealColor}
+                    strokeWidth={circleStroke}
+                  />
+                  {[
+                    ['50', '7', '50', '24'],
+                    ['50', '76', '50', '93'],
+                    ['7', '50', '24', '50'],
+                    ['76', '50', '93', '50']
+                  ].map(([x1, y1, x2, y2], markerIndex) => (
+                    <line
+                      key={`${x1}-${y1}-${markerIndex}`}
+                      x1={x1}
+                      y1={y1}
+                      x2={x2}
+                      y2={y2}
+                      stroke={settings.revealColor}
+                      strokeWidth={Math.max(2, circleStroke * 0.72)}
+                      strokeLinecap="round"
+                    />
+                  ))}
+                </svg>
               )}
 
               {settings.revealStyle === 'circle' && effectiveRevealVariant === 'circle_ring' && (
@@ -1209,14 +1814,51 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
               )}
 
               {settings.revealStyle === 'highlight' && (
+                <>
+                  {effectiveRevealVariant === 'highlight_classic' ? (
+                    <div
+                      className="relative w-full h-full rounded-md"
+                      style={{
+                        borderWidth: '2px',
+                        borderStyle: 'solid',
+                        borderColor: hexToRgba(settings.revealColor, 0.72),
+                        background: `linear-gradient(135deg, rgba(255,255,255,0.12) 0%, ${hexToRgba(settings.revealColor, 0.18)} 100%)`,
+                        boxShadow: outlineStroke > 0 ? `0 0 0 ${outlineStroke}px ${settings.outlineColor}` : undefined
+                      }}
+                    >
+                      <div
+                        className="absolute inset-[10%] rounded-sm border"
+                        style={{
+                          borderWidth: '1px',
+                          borderColor: hexToRgba(settings.revealColor, 0.34)
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      className="w-full h-full rounded-md border-2"
+                      style={{
+                        borderColor: hexToRgba(settings.revealColor, 0.8),
+                        background: `linear-gradient(135deg, ${hexToRgba(settings.revealColor, 0.3)} 0%, ${hexToRgba(settings.revealColor, 0.55)} 100%)`,
+                        boxShadow: `${outlineStroke > 0 ? `0 0 0 ${outlineStroke}px ${settings.outlineColor}, ` : ''}0 0 10px ${hexToRgba(settings.revealColor, 0.4)}`
+                      }}
+                    />
+                  )}
+                </>
+              )}
+
+              {isActiveReveal && settings.revealBehavior === 'cinematic_sequential' && (
                 <div
-                  className="w-full h-full rounded-md border-2"
+                  className="absolute -top-3 -right-3 w-8 h-8 rounded-full border-2 flex items-center justify-center text-[11px] font-black"
                   style={{
-                    borderColor: hexToRgba(settings.revealColor, 0.8),
-                    background: `linear-gradient(135deg, ${hexToRgba(settings.revealColor, 0.3)} 0%, ${hexToRgba(settings.revealColor, 0.55)} 100%)`,
-                    boxShadow: `${outlineStroke > 0 ? `0 0 0 ${outlineStroke}px ${settings.outlineColor}, ` : ''}0 0 10px ${hexToRgba(settings.revealColor, 0.4)}`
+                    backgroundColor: '#FFFFFF',
+                    color: '#111827',
+                    borderColor: settings.revealColor,
+                    boxShadow: `0 0 0 2px ${hexToRgba(settings.revealColor, 0.18)}`
                   }}
-                />
+                >
+                  {index + 1}
+                </div>
               )}
             </motion.div>
           );
@@ -1224,38 +1866,280 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
     </AnimatePresence>
   );
 
+  const rootClassName = embedded
+    ? 'relative w-full h-full overflow-hidden'
+    : 'flex flex-col items-center justify-center min-h-[100dvh] overflow-hidden relative';
+  const playbackControlsVisible = !hidePlaybackControls && phase !== 'finished';
+  const controlsContainerClass = embedded
+    ? 'absolute bottom-2 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-2'
+    : 'absolute bottom-4 sm:bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-4 sm:space-x-6';
+  const controlButtonClass = embedded
+    ? 'p-2 bg-white border-4 border-black rounded-full transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group hover:bg-[var(--hover-bg)]'
+    : 'p-3 sm:p-4 bg-white border-4 border-black rounded-full transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group hover:bg-[var(--hover-bg)]';
+  const controlIconSize = embedded ? 20 : 28;
+  const renderHeaderLogo = () => {
+    if (!shouldRenderCustomLogo || !renderedLogoSrc) return null;
+    return (
+      <div
+        className="absolute flex items-center justify-center shrink-0"
+        style={{
+          ...(hudLayout.logoPosition ?? {}),
+          width: `${hudLayout.logoSize}px`,
+          height: `${hudLayout.logoSize}px`
+        }}
+      >
+        <img
+          src={renderedLogoSrc}
+          alt="Logo"
+          className="w-full h-full object-contain"
+          style={{
+            transform: `scale(${logoZoom})`,
+            transformOrigin: 'center',
+            filter: 'drop-shadow(0 2px 3px rgba(0,0,0,0.35))'
+          }}
+        />
+      </div>
+    );
+  };
+  const renderSceneCard = (kind: 'intro' | 'transition' | 'outro') => {
+    const variant =
+      kind === 'intro'
+        ? packagePreset.introCardVariant
+        : kind === 'outro'
+        ? packagePreset.outroCardVariant
+        : packagePreset.transitionCardVariant;
+    const eyebrow = kind === 'intro' ? introEyebrow : kind === 'outro' ? completionEyebrow : transitionEyebrow;
+    const title = kind === 'intro' ? introTitle : kind === 'outro' ? completionTitle : transitionTitle;
+    const subtitle =
+      kind === 'intro'
+        ? introSubtitle
+        : kind === 'outro'
+        ? completionSubtitle
+        : transitionSubtitle;
+    const Icon = kind === 'intro' ? Play : kind === 'outro' ? CheckCircle : SkipForward;
+    const overlayStyle =
+      variant === 'storybook'
+        ? {
+            background: `linear-gradient(180deg, rgba(52,35,14,${kind === 'transition' ? (0.24 + transitionSmooth * 0.44).toFixed(3) : '0.48'}) 0%, rgba(19,11,4,0.74) 100%)`,
+            backdropFilter: `blur(${kind === 'transition' ? (1.4 + transitionSmooth * 2.2).toFixed(2) : '4.2'}px)`
+          }
+        : variant === 'scoreboard'
+        ? {
+            background: `radial-gradient(circle at top, rgba(34,211,238,${kind === 'transition' ? (0.16 + transitionSmooth * 0.16).toFixed(3) : '0.14'}) 0%, rgba(8,15,28,0.82) 58%, rgba(2,6,16,0.92) 100%)`,
+            backdropFilter: `blur(${kind === 'transition' ? (1.2 + transitionSmooth * 2).toFixed(2) : '4'}px)`
+          }
+        : {
+            background: `linear-gradient(180deg, rgba(255,255,255,${kind === 'transition' ? (0.18 + transitionSmooth * 0.16).toFixed(3) : '0.22'}) 0%, rgba(17,24,39,0.18) 100%)`,
+            backdropFilter: `blur(${kind === 'transition' ? (1 + transitionSmooth * 1.6).toFixed(2) : '3'}px)`
+          };
+    const cardStyle =
+      variant === 'storybook'
+        ? {
+            borderColor: '#4D3E26',
+            background: 'linear-gradient(180deg, rgba(248,232,194,0.97) 0%, rgba(216,177,73,0.94) 100%)',
+            color: '#2E2414',
+            boxShadow: `0 0 0 1px rgba(255,236,188,0.45), 0 24px 72px rgba(57,39,14,0.42), 0 0 36px rgba(229,191,115,${
+              kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.22'
+            })`
+          }
+        : variant === 'scoreboard'
+        ? {
+            borderColor: visualTheme.headerBg,
+            background: 'linear-gradient(180deg, rgba(13,20,37,0.96) 0%, rgba(3,7,17,0.98) 100%)',
+            color: '#F8FAFC',
+            boxShadow: `0 0 0 1px rgba(189,233,255,0.28), 0 26px 80px rgba(0,0,0,0.48), 0 0 42px rgba(90,223,255,${
+              kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.18'
+            })`
+          }
+        : {
+            borderColor: '#111827',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.97) 0%, rgba(242,232,213,0.95) 100%)',
+            color: '#111827',
+            boxShadow: '0 24px 72px rgba(15,23,42,0.18), 0 0 0 1px rgba(17,24,39,0.08)'
+          };
+    const badgeStyle =
+      variant === 'scoreboard'
+        ? {
+            backgroundColor: hexToRgba(visualTheme.headerBg, 0.16),
+            color: visualTheme.headerBg,
+            borderColor: hexToRgba(visualTheme.headerBg, 0.7)
+          }
+        : variant === 'storybook'
+        ? {
+            backgroundColor: 'rgba(255,248,230,0.84)',
+            color: '#5A4320',
+            borderColor: '#8B6D33'
+          }
+        : {
+            backgroundColor: 'rgba(255,255,255,0.78)',
+            color: '#475569',
+            borderColor: '#CBD5E1'
+          };
+
+    return (
+      <div className="absolute inset-0 z-40 pointer-events-none overflow-hidden">
+        <div className="absolute inset-0" style={overlayStyle} />
+        <motion.div
+          initial={kind === 'transition' ? false : { opacity: 0, y: 24, scale: 0.96 }}
+          animate={
+            kind === 'transition'
+              ? undefined
+              : {
+                  opacity: 1,
+                  y: 0,
+                  scale: 1
+                }
+          }
+          transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+          className="absolute left-1/2 top-1/2 overflow-hidden rounded-[28px] border-[3px] px-8 py-7 text-center"
+          style={{
+            transform:
+              kind === 'transition'
+                ? `translate(-50%, calc(-50% + ${transitionCardTranslateY}px)) scale(${transitionCardScale.toFixed(
+                    3
+                  )})`
+                : 'translate(-50%, -50%)',
+            opacity: kind === 'transition' ? transitionCardOpacity : 1,
+            minWidth: isVerticalLayout ? '300px' : '520px',
+            maxWidth: embedded ? '88%' : '72%',
+            ...cardStyle
+          }}
+        >
+          <div className="absolute inset-x-0 top-0 h-2 opacity-90" style={{ backgroundColor: variant === 'standard' ? '#D97706' : visualTheme.headerBg }} />
+          <div className="relative flex flex-col items-center">
+            <div
+              className="mb-4 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-[11px] font-black uppercase tracking-[0.28em]"
+              style={badgeStyle}
+            >
+              <Icon size={14} strokeWidth={2.5} />
+              <span>{eyebrow}</span>
+            </div>
+            <p
+              className={`text-4xl ${isVerticalLayout ? 'sm:text-5xl' : 'sm:text-6xl'} font-black uppercase leading-none`}
+              style={{ letterSpacing: variant === 'storybook' ? '0.04em' : '0.06em' }}
+            >
+              {title}
+            </p>
+            <p
+              className="mt-3 text-sm sm:text-base font-bold uppercase tracking-[0.18em] opacity-80"
+              style={{ color: variant === 'scoreboard' ? '#CBD5E1' : undefined }}
+            >
+              {subtitle}
+            </p>
+            <div className="mt-6 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-[11px] font-black uppercase tracking-[0.18em] opacity-80">
+              <span>{settings.aspectRatio}</span>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+    );
+  };
+  const completionCardStyle =
+    packagePreset.outroCardVariant === 'storybook'
+      ? {
+          backgroundColor: '#F3E6C4',
+          borderColor: '#4D3E26',
+          textColor: '#2E2414',
+          shadow: '16px 16px 0px 0px rgba(77,62,38,0.92)'
+        }
+      : packagePreset.outroCardVariant === 'scoreboard'
+      ? {
+          backgroundColor: '#09111F',
+          borderColor: visualTheme.headerBg,
+          textColor: '#F8FAFC',
+          shadow: '16px 16px 0px 0px rgba(34,211,238,0.24)'
+        }
+      : {
+          backgroundColor: '#FFFFFF',
+          borderColor: '#111827',
+          textColor: '#111827',
+          shadow: '16px 16px 0px 0px rgba(15,23,42,0.18)'
+        };
+
+  if (!hasPuzzles) {
+    return (
+      <div
+        ref={viewportRef}
+        className={rootClassName}
+        style={{ backgroundColor: visualTheme.rootBg }}
+      >
+        {!embedded && (
+          <div className="absolute top-6 left-6 z-50">
+            <button
+              onClick={onExit}
+              className="p-3 bg-white border-4 border-black rounded-xl hover:bg-black hover:text-white transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+            >
+              <ArrowLeft size={24} strokeWidth={3} />
+            </button>
+          </div>
+        )}
+
+        <div className="w-full max-w-lg mx-4 p-8 rounded-2xl border-4 border-black bg-white text-center shadow-[10px_10px_0px_0px_rgba(0,0,0,1)]">
+          <h2 className="text-3xl font-black uppercase text-black">No Puzzles</h2>
+          <p className="mt-3 text-sm font-bold text-black/70">Nothing to play in video mode.</p>
+          {!embedded && (
+            <button
+              onClick={onExit}
+              className="mt-6 px-6 py-3 bg-black text-white text-sm font-black uppercase tracking-wide rounded-xl border-4 border-black hover:bg-slate-900 transition-colors"
+            >
+              Back
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
-      className="flex flex-col items-center justify-center min-h-[100dvh] overflow-hidden relative"
+      ref={viewportRef}
+      className={rootClassName}
       style={{ backgroundColor: visualTheme.rootBg }}
     >
       
       {/* External Back Button - Top Left */}
-      <div className="absolute top-6 left-6 z-50">
-        <button 
-          onClick={onExit}
-          className="p-3 bg-white border-4 border-black rounded-xl hover:bg-black hover:text-white transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
-        >
-          <ArrowLeft size={24} strokeWidth={3} />
-        </button>
-      </div>
+      {!embedded && (
+        <div className="absolute top-6 left-6 z-50">
+          <button 
+            onClick={onExit}
+            className="p-3 bg-white border-4 border-black rounded-xl hover:bg-black hover:text-white transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+          >
+            <ArrowLeft size={24} strokeWidth={3} />
+          </button>
+        </div>
+      )}
+      {!embedded && onSendToEditor && (
+        <div className="absolute top-6 right-6 z-50">
+          <button
+            onClick={onSendToEditor}
+            className="inline-flex items-center gap-2 px-4 py-3 bg-white border-4 border-black rounded-xl hover:bg-black hover:text-white transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] text-xs font-black uppercase tracking-wide"
+          >
+            <Send size={16} strokeWidth={3} />
+            <span>Send To Editor</span>
+          </button>
+        </div>
+      )}
 
       {/* External Playback Controls - Bottom Center */}
-      {phase !== 'finished' && (
-        <div className="absolute bottom-4 sm:bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-4 sm:space-x-6">
+      {playbackControlsVisible && (
+        <div className={controlsContainerClass}>
           <button 
             onClick={() => setIsPlaying(!isPlaying)} 
-            className="p-3 sm:p-4 bg-white border-4 border-black rounded-full transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group hover:bg-[var(--hover-bg)]"
+            className={controlButtonClass}
             style={{ '--hover-bg': visualTheme.playHoverBg } as React.CSSProperties}
           >
-            {isPlaying ? <Pause size={28} strokeWidth={3} className="group-hover:scale-110 transition-transform"/> : <Play size={28} strokeWidth={3} className="ml-1 group-hover:scale-110 transition-transform"/>}
+            {isPlaying ? (
+              <Pause size={controlIconSize} strokeWidth={3} className="group-hover:scale-110 transition-transform" />
+            ) : (
+              <Play size={controlIconSize} strokeWidth={3} className="ml-1 group-hover:scale-110 transition-transform" />
+            )}
           </button>
           <button 
             onClick={handleSkip} 
-            className="p-3 sm:p-4 bg-white border-4 border-black rounded-full transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group hover:bg-[var(--hover-bg)]"
+            className={controlButtonClass}
             style={{ '--hover-bg': visualTheme.skipHoverBg } as React.CSSProperties}
           >
-            <SkipForward size={28} strokeWidth={3} className="group-hover:scale-110 transition-transform"/>
+            <SkipForward size={controlIconSize} strokeWidth={3} className="group-hover:scale-110 transition-transform"/>
           </button>
         </div>
       )}
@@ -1270,213 +2154,503 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ puzzles, settings, onE
       >
         <div
           ref={containerRef}
-          className="absolute top-0 left-0 bg-white border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] rounded-2xl overflow-hidden flex flex-col"
+          className="absolute top-0 left-0 bg-white border-4 border-black rounded-none overflow-hidden flex flex-col"
           style={{
             width: `${stageMetrics.baseWidth}px`,
             height: `${stageMetrics.baseHeight}px`,
             transform: `scale(${stageMetrics.scale})`,
-            transformOrigin: 'top left'
+            transformOrigin: 'top left',
+            backgroundColor: isStorybookStyle ? '#E5D19A' : visualTheme.gameBg,
+            borderColor: isStorybookStyle ? '#3F301A' : '#000000',
+            boxShadow: 'none'
           }}
         >
         
         {/* HUD Header */}
-        <div
-          className="relative border-b-4 border-black shrink-0 z-20"
-          style={{ backgroundColor: visualTheme.headerBg, height: `${hudLayout.headerHeight}px` }}
-        >
+        {isStorybookStyle ? (
           <div
-            className="absolute flex items-center"
-            style={{ ...hudLayout.titlePosition, gap: `${hudLayout.titleGap}px` }}
+            className="relative shrink-0 z-20 border-b-[3px]"
+            style={{
+              height: `${hudLayout.headerHeight}px`,
+              borderColor: '#3F301A',
+              background:
+                'linear-gradient(180deg, #E4C96C 0%, #D8B149 38%, #C79A31 100%)',
+              boxShadow: 'inset 0 -2px 0 rgba(69, 53, 23, 0.55), inset 0 2px 0 rgba(255, 244, 203, 0.6)'
+            }}
           >
-            {settings.logo && (
-              <div
-                className="bg-white border-2 border-black rounded-lg overflow-hidden flex items-center justify-center shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] shrink-0"
-                style={{ width: `${hudLayout.logoSize}px`, height: `${hudLayout.logoSize}px` }}
-              >
-                <img src={settings.logo} alt="Logo" className="w-full h-full object-contain" />
+            {shouldRenderHeaderText && (
+              <div className="absolute left-4 top-1/2 -translate-y-1/2">
+                <h2
+                  className="leading-none lowercase"
+                  style={{
+                    color: '#2E2414',
+                    fontSize: '52px',
+                    fontWeight: 800,
+                    fontFamily: 'Georgia, "Times New Roman", serif',
+                    letterSpacing: '-0.02em',
+                    textShadow: '0 1px 0 rgba(255, 240, 190, 0.55)'
+                  }}
+                >
+                  {headerTitle.toLowerCase()}
+                </h2>
               </div>
             )}
 
-            <div className="flex flex-col" style={{ alignItems: hudLayout.titleAlignItems }}>
-              <h2
-                className={`font-black uppercase leading-none tracking-tight ${hudLayout.titleFontClass}`}
-                style={{ color: visualTheme.headerText, fontSize: `${hudLayout.titleFontSize}px` }}
-              >
-                {phase === 'showing' ? 'Find Differences' : phase === 'revealing' ? (isBlinkOverlayActive ? 'Blink Compare' : 'Revealing...') : 'Next Puzzle'}
-              </h2>
-              <span
-                className={`font-bold uppercase opacity-80 leading-none ${hudLayout.subtitleFontClass}`}
-                style={{
-                  color: visualTheme.headerSubText,
-                  fontSize: `${hudLayout.subtitleFontSize}px`,
-                  letterSpacing: `${hudLayout.subtitleLetterSpacingEm}em`
-                }}
-              >
-                Puzzle {currentIndex + 1} / {puzzles.length}
-              </span>
-            </div>
-          </div>
+            {renderHeaderLogo()}
 
-          <div className="absolute" style={hudLayout.timerPosition}>
-            <div
-              className={`flex items-center border-2 ${visualTheme.timerShapeClass}`}
-              style={{
-                gap: `${hudLayout.timerGap}px`,
-                padding: `${hudLayout.timerPadY}px ${hudLayout.timerPadX}px`,
-                minWidth: `${hudLayout.timerMinWidth}px`,
-                justifyContent: hudLayout.timerJustify,
-                backgroundColor: visualTheme.timerBg,
-                borderColor: visualTheme.timerBorder
-              }}
-            >
+            {shouldShowHeaderProgress && (
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[33%]">
+                <div
+                  className="relative h-[26px] rounded-[14px] border-[3px]"
+                  style={{
+                    borderColor: '#3F301A',
+                    background: 'linear-gradient(180deg, #9A7B3E 0%, #82622C 100%)',
+                    boxShadow: 'inset 0 1px 0 rgba(255, 235, 176, 0.5)'
+                  }}
+                >
+                  <motion.div
+                    className="absolute top-[3px] bottom-[3px] left-[3px] rounded-[10px]"
+                    style={{
+                      width: `${Math.max(0, Math.min(100, progressPercent))}%`,
+                      background: 'linear-gradient(90deg, #E6D4A6 0%, #C3A35D 60%, #8D6A2A 100%)'
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {shouldShowHeaderTimer && (
+              <>
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-3">
+                  <span
+                    className="font-black"
+                    style={{
+                      color: '#2E2414',
+                      fontSize: '34px',
+                      fontFamily: 'Georgia, "Times New Roman", serif'
+                    }}
+                  >
+                    {safeCurrentIndex + 1}/{puzzles.length}
+                  </span>
+                  <div
+                    className="px-3 py-1 rounded-[14px] border-[3px]"
+                    style={{
+                      borderColor: '#3F301A',
+                      background: 'linear-gradient(180deg, #6E5530 0%, #4A3C24 100%)',
+                      color: '#F7E8C2',
+                      fontSize: '30px',
+                      fontWeight: 900,
+                      fontFamily: 'Georgia, "Times New Roman", serif',
+                      lineHeight: 1
+                    }}
+                  >
+                    {formatTime(timeLeft)}s
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        ) : (
+          <div
+            className="relative border-b-4 border-black shrink-0 z-20"
+            style={{ backgroundColor: visualTheme.headerBg, height: `${hudLayout.headerHeight}px` }}
+          >
+            {renderHeaderLogo()}
+
+            {isClassicStyle ? (
+              <>
+                <div
+                  className="absolute flex items-center border-2"
+                  style={{
+                    left: `${CLASSIC_HUD_SPEC.puzzleBadge.left}px`,
+                    top: `${CLASSIC_HUD_SPEC.puzzleBadge.top}px`,
+                    minWidth: `${CLASSIC_HUD_SPEC.puzzleBadge.minWidth}px`,
+                    height: `${CLASSIC_HUD_SPEC.puzzleBadge.height}px`,
+                    padding: `${CLASSIC_HUD_SPEC.puzzleBadge.padY}px ${CLASSIC_HUD_SPEC.puzzleBadge.padX}px`,
+                    borderRadius: `${CLASSIC_HUD_SPEC.puzzleBadge.radius}px`,
+                    borderColor: CLASSIC_HUD_SPEC.puzzleBadge.border,
+                    background: CLASSIC_HUD_SPEC.puzzleBadge.background,
+                    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.55), 0 2px 0 rgba(0,0,0,0.35)',
+                    gap: `${CLASSIC_HUD_SPEC.puzzleBadge.gap}px`
+                  }}
+                >
+                  <span
+                    className="font-black uppercase leading-none"
+                    style={{
+                      color: '#111827',
+                      fontSize: `${CLASSIC_HUD_SPEC.puzzleBadge.labelSize}px`,
+                      letterSpacing: '0.22em'
+                    }}
+                  >
+                    {puzzleBadgeLabel}
+                  </span>
+                  <span
+                    className="font-black leading-none"
+                    style={{
+                      color: '#020617',
+                      fontFamily: '"Arial Black", "Segoe UI", sans-serif',
+                      fontSize: `${classicBadgeValueFontSize}px`,
+                      textShadow: '0 1px 0 rgba(255,255,255,0.35)'
+                    }}
+                  >
+                    {safeCurrentIndex + 1}/{puzzles.length}
+                  </span>
+                </div>
+
+                {shouldRenderHeaderText && (
+                  <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+                    <h2
+                      className="font-black uppercase leading-none"
+                      style={{
+                        fontFamily: '"Arial Black", "Segoe UI", sans-serif',
+                        fontSize: `${classicCenterTitleFontSize}px`,
+                        letterSpacing: `${CLASSIC_HUD_SPEC.centerTitle.letterSpacingEm}em`,
+                        background: CLASSIC_HUD_SPEC.centerTitle.fillGradient,
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        WebkitTextStroke: `1px ${CLASSIC_HUD_SPEC.centerTitle.strokeColor}`,
+                        filter: CLASSIC_HUD_SPEC.centerTitle.glowCss,
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {headerTitle}
+                    </h2>
+                  </div>
+                )}
+              </>
+            ) : shouldRenderHeaderText || shouldRenderInlineLogo ? (
               <div
-                className={`rounded-full ${timeLeft <= 2 ? 'animate-pulse' : ''}`}
-                style={{
-                  width: `${hudLayout.timerDotSize}px`,
-                  height: `${hudLayout.timerDotSize}px`,
-                  backgroundColor: timeLeft <= 2 ? '#FF6B6B' : visualTheme.timerDot
-                }}
-              />
-              <span
-                className={`${visualTheme.timerTextClass} leading-none`}
-                style={{
-                  color: timeLeft <= 2 ? '#FF6B6B' : visualTheme.timerText,
-                  fontSize: `${hudLayout.timerFontSize}px`
-                }}
+                className="absolute flex items-center"
+                style={{ ...hudLayout.titlePosition, gap: `${hudLayout.titleGap}px` }}
               >
-                {formatTime(timeLeft)}s
-              </span>
-            </div>
-          </div>
+                {shouldRenderInlineLogo && renderedLogoSrc && (
+                  <div
+                    className="flex items-center justify-center shrink-0"
+                    style={{ width: `${hudLayout.logoSize}px`, height: `${hudLayout.logoSize}px` }}
+                  >
+                    <img
+                      src={renderedLogoSrc}
+                      alt="Logo"
+                      className="w-full h-full object-contain"
+                      style={{
+                        transform: `scale(${logoZoom})`,
+                        transformOrigin: 'center',
+                        filter: 'drop-shadow(0 2px 3px rgba(0,0,0,0.35))'
+                      }}
+                    />
+                  </div>
+                )}
 
-          <div className="absolute" style={hudLayout.progressPosition}>
-            <div
-              className={`overflow-hidden border-2 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${visualTheme.progressTrackClass} ${
-                hudLayout.progressOrientation === 'vertical' ? 'flex items-end' : ''
-              }`}
-              style={{
-                width: `${hudLayout.progressWidth}px`,
-                height: `${hudLayout.progressHeight}px`,
-                borderRadius: `${hudLayout.progressRadius}px`,
-                backgroundColor: visualTheme.progressTrackBg,
-                borderColor: visualTheme.progressTrackBorder
-              }}
-            >
-              <motion.div className={visualTheme.progressFillClass} style={progressFillStyle} />
-            </div>
+                {shouldRenderHeaderText && (
+                  <div className="flex flex-col" style={{ alignItems: hudLayout.titleAlignItems }}>
+                    <h2
+                      className={`font-black uppercase leading-none tracking-tight ${hudLayout.titleFontClass}`}
+                      style={{ color: visualTheme.headerText, fontSize: `${hudLayout.titleFontSize}px` }}
+                    >
+                      {headerTitle}
+                    </h2>
+                    <span
+                      className={`font-bold uppercase opacity-80 leading-none ${hudLayout.subtitleFontClass}`}
+                      style={{
+                        color: visualTheme.headerSubText,
+                        fontSize: `${hudLayout.subtitleFontSize}px`,
+                        letterSpacing: `${hudLayout.subtitleLetterSpacingEm}em`,
+                        marginTop: `${hudLayout.subtitleGap ?? 0}px`
+                      }}
+                    >
+                      {headerSubtitle}
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {shouldShowHeaderTimer && (
+              <div className="absolute" style={hudLayout.timerPosition}>
+                <div
+                  className={`flex items-center border-2 ${packagePreset.chrome.timerShapeClass}`}
+                  style={{
+                    gap: `${hudLayout.timerGap}px`,
+                    padding: `${hudLayout.timerPadY}px ${hudLayout.timerPadX}px`,
+                    minWidth: `${hudLayout.timerMinWidth}px`,
+                    justifyContent: hudLayout.timerJustify,
+                    backgroundColor: visualTheme.timerBg,
+                    borderColor: visualTheme.timerBorder
+                  }}
+                >
+                  <div
+                    className={`rounded-full ${timeLeft <= 2 ? 'animate-pulse' : ''}`}
+                    style={{
+                      width: `${hudLayout.timerDotSize}px`,
+                      height: `${hudLayout.timerDotSize}px`,
+                      backgroundColor: timeLeft <= 2 ? '#FF6B6B' : visualTheme.timerDot
+                    }}
+                  />
+                  <span
+                    className={`${packagePreset.chrome.timerTextClass} leading-none`}
+                    style={{
+                      color: timeLeft <= 2 ? '#FF6B6B' : visualTheme.timerText,
+                      fontSize: `${hudLayout.timerFontSize}px`
+                    }}
+                  >
+                    {formatTime(timeLeft)}s
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {shouldShowHeaderProgress && (
+              <>
+                <div className="absolute" style={progressTrackPosition}>
+                  <div
+                    className={`overflow-hidden ${packagePreset.chrome.progressTrackClass} ${
+                      hudLayout.progressOrientation === 'vertical' ? 'flex items-end' : ''
+                    }`}
+                    style={{
+                      width: progressTrackWidth,
+                      height: progressTrackHeight,
+                      borderRadius: progressTrackRadius,
+                      background: progressTrackBackground,
+                      borderColor: visualTheme.progressTrackBorder,
+                      borderStyle: 'solid',
+                      borderWidth: progressTrackBorderWidth,
+                      boxShadow: progressTrackShadow
+                    }}
+                  >
+                    <motion.div className={packagePreset.chrome.progressFillClass} style={progressFillStyle} />
+                  </div>
+                </div>
+              </>
+            )}
           </div>
-        </div>
+        )}
 
         {/* Game Area */}
         <div
-          className="flex-1 relative overflow-hidden flex items-center justify-center p-2"
-          style={{ backgroundColor: visualTheme.gameBg }}
+          className="flex-1 relative overflow-hidden flex items-center justify-center"
+          style={{
+            backgroundColor: isStorybookStyle ? '#1F475B' : visualTheme.gameBg,
+            padding: `${frameLayout.contentPadding}px`
+          }}
         >
           {/* Background Pattern */}
-          <div className="absolute inset-0 opacity-10" 
-               style={{ backgroundImage: `radial-gradient(circle, ${visualTheme.patternColor} 2px, transparent 2px)`, backgroundSize: '24px 24px' }} 
-          />
+          {isStorybookStyle ? (
+            <div
+              className="absolute inset-0 opacity-35"
+              style={{
+                background:
+                  'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(0,0,0,0.16) 100%)'
+              }}
+            />
+          ) : (
+            <div
+              className="absolute inset-0 opacity-10"
+              style={{ backgroundImage: `radial-gradient(circle, ${visualTheme.patternColor} 2px, transparent 2px)`, backgroundSize: '24px 24px' }}
+            />
+          )}
 
           <AnimatePresence mode="wait">
-            {phase !== 'finished' && (
+            {phase !== 'finished' && phase !== 'intro' && phase !== 'outro' && (
               <motion.div
-                key={currentPuzzle.imageA + currentIndex}
-                initial={settings.transitionStyle === 'slide' ? { x: '100%' } : { opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                exit={settings.transitionStyle === 'slide' ? { x: '-100%' } : { opacity: 0 }}
-                transition={{ duration: settings.transitionDuration }}
-                className={`relative w-full h-full flex gap-2 items-center justify-center ${isVerticalLayout ? 'flex-col' : 'flex-row'}`}
+                key={currentPuzzle.imageA + safeCurrentIndex}
+                initial={puzzleMotionInitial}
+                animate={{
+                  x: 0,
+                  y: 0,
+                  opacity: 1,
+                  scale: phase === 'transitioning' ? 0.992 : 1,
+                  rotate: 0
+                }}
+                exit={puzzleMotionExit}
+                transition={{ duration: puzzleTransitionDuration, ease: [0.22, 1, 0.36, 1] }}
+                className="relative w-full h-full"
               >
-                {/* Original Image */}
-                <div
-                  className="relative flex-1 border-4 border-black rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] group w-full h-full"
-                  style={{ backgroundColor: visualTheme.imagePanelBg }}
-                >
-                  <img
-                    src={currentPuzzle.imageA}
-                    alt="Original"
-                    className="w-full h-full object-cover pointer-events-none select-none"
-                  />
-                </div>
+                {isWidePuzzleDisplay ? (
+                  <div className="relative w-full h-full p-3">
+                    <div className="relative w-full h-full rounded-2xl border-4 border-[#4D3E26] bg-[#D2C091] shadow-[6px_6px_0px_0px_rgba(38,30,18,0.85)] p-3">
+                      <div className="absolute inset-y-3 left-1/2 -translate-x-1/2 w-[3px] bg-[#5A4A2B]/50 pointer-events-none" />
+                      <div className="relative grid h-full grid-cols-[minmax(0,1fr)_28px_minmax(0,1fr)] gap-2">
+                        <div
+                          className="relative border-[4px] border-[#CEC3A5] rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(38,30,18,0.55)] h-full"
+                          style={{ backgroundColor: visualTheme.imagePanelBg }}
+                        >
+                          <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#F3E6C4] text-[#3B2E1A] text-[10px] font-black uppercase tracking-wide">
+                            Original
+                          </div>
+                          <img
+                            src={currentPuzzle.imageA}
+                            alt="Original"
+                            className="w-full h-full object-cover pointer-events-none select-none"
+                          />
+                        </div>
 
-                {/* Interactive Image (Video Mode) */}
-                <div
-                  className="relative flex-1 border-4 border-black rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] group w-full h-full"
-                  style={{ backgroundColor: visualTheme.imagePanelBg }}
-                >
-                  <div ref={interactiveViewportRef} className="relative w-full h-full">
-                    <img
-                      src={currentPuzzle.imageB}
-                      alt="Find Differences"
-                      className="w-full h-full object-cover select-none pointer-events-none"
-                      onLoad={(event) => {
-                        const image = event.currentTarget;
-                        setImageBNaturalSize({
-                          width: image.naturalWidth,
-                          height: image.naturalHeight
-                        });
-                      }}
-                    />
-                    {isBlinkOverlayActive && isBlinkOverlayVisible && (
-                      <img
-                        src={currentPuzzle.imageA}
-                        alt="Blink compare"
-                        className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
-                      />
-                    )}
-                    <div
-                      className="absolute pointer-events-none"
-                      style={{
-                        left: `${imageBCoverFrame.x}px`,
-                        top: `${imageBCoverFrame.y}px`,
-                        width: `${imageBCoverFrame.width}px`,
-                        height: `${imageBCoverFrame.height}px`
-                      }}
-                    >
-                      {renderRevealOverlays()}
+                        <div className="flex items-center justify-center">
+                          <div className="rotate-90 px-2 py-1 rounded-md border-2 border-[#4D3E26] bg-[#D8B149] text-[9px] font-black uppercase tracking-[0.18em] text-[#3B2E1A] whitespace-nowrap shadow-[1px_1px_0px_0px_rgba(77,62,38,0.8)]">
+                            Compare
+                          </div>
+                        </div>
+
+                        <div
+                          className="relative border-[4px] border-[#CEC3A5] rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(38,30,18,0.55)] h-full"
+                          style={{ backgroundColor: visualTheme.imagePanelBg }}
+                        >
+                          <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#D37872] text-[#23180D] text-[10px] font-black uppercase tracking-wide">
+                            Modified
+                          </div>
+                          <div ref={interactiveViewportRef} className="relative w-full h-full">
+                            <img
+                              src={currentPuzzle.imageB}
+                              alt="Find Differences"
+                              className="w-full h-full object-cover select-none pointer-events-none"
+                              onLoad={(event) => {
+                                const image = event.currentTarget;
+                                setImageBNaturalSize({
+                                  width: image.naturalWidth,
+                                  height: image.naturalHeight
+                                });
+                              }}
+                            />
+                            {renderBlinkOverlay()}
+                            <div
+                              className="absolute pointer-events-none"
+                              style={{
+                                left: `${imageBCoverFrame.x}px`,
+                                top: `${imageBCoverFrame.y}px`,
+                                width: `${imageBCoverFrame.width}px`,
+                                height: `${imageBCoverFrame.height}px`
+                              }}
+                            >
+                              {renderRevealOverlays()}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                </div>
+                ) : (
+                  <div
+                    className={`relative w-full h-full flex gap-2 items-center justify-center ${
+                      isVerticalLayout ? 'flex-col' : 'flex-row'
+                    }`}
+                    style={{ padding: `${frameLayout.gamePadding}px`, gap: `${frameLayout.panelGap}px` }}
+                  >
+                    <div
+                      className="relative flex-1 overflow-hidden w-full h-full"
+                      style={{
+                        borderRadius: `${frameLayout.panelRadius}px`
+                      }}
+                    >
+                      <img
+                        src={currentPuzzle.imageA}
+                        alt="Original"
+                        className="w-full h-full object-cover pointer-events-none select-none"
+                      />
+                    </div>
+
+                    <div
+                      className="relative flex-1 overflow-hidden w-full h-full"
+                      style={{
+                        borderRadius: `${frameLayout.panelRadius}px`
+                      }}
+                    >
+                      <div ref={interactiveViewportRef} className="relative w-full h-full">
+                        <img
+                          src={currentPuzzle.imageB}
+                          alt="Find Differences"
+                          className="w-full h-full object-cover select-none pointer-events-none"
+                          onLoad={(event) => {
+                            const image = event.currentTarget;
+                            setImageBNaturalSize({
+                              width: image.naturalWidth,
+                              height: image.naturalHeight
+                            });
+                          }}
+                        />
+                        {renderBlinkOverlay()}
+                        <div
+                          className="absolute pointer-events-none"
+                          style={{
+                            left: `${imageBCoverFrame.x}px`,
+                            top: `${imageBCoverFrame.y}px`,
+                            width: `${imageBCoverFrame.width}px`,
+                            height: `${imageBCoverFrame.height}px`
+                          }}
+                        >
+                          {renderRevealOverlays()}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
+
+          {phase === 'intro' && renderSceneCard('intro')}
+          {phase === 'transitioning' && renderSceneCard('transition')}
+          {phase === 'outro' && renderSceneCard('outro')}
 
         </div>
         </div>
       </div>
 
       {/* Playback Complete Overlay */}
-      {phase === 'finished' && (
+      {phase === 'finished' && !embedded && (
         <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-[60] backdrop-blur-sm p-3 sm:p-6">
           <motion.div 
             initial={{ scale: 0.8, rotate: -2 }}
             animate={{ scale: 1, rotate: 0 }}
-            className="p-6 sm:p-8 lg:p-12 rounded-3xl border-4 sm:border-8 border-black shadow-[10px_10px_0px_0px_rgba(255,255,255,1)] sm:shadow-[16px_16px_0px_0px_rgba(255,255,255,1)] text-center max-w-lg w-full max-h-full overflow-y-auto relative"
-            style={{ backgroundColor: visualTheme.completionBg }}
+            className="p-6 sm:p-8 lg:p-12 rounded-3xl border-4 sm:border-8 text-center max-w-lg w-full max-h-full overflow-y-auto relative"
+            style={{
+              backgroundColor: completionCardStyle.backgroundColor,
+              borderColor: completionCardStyle.borderColor,
+              boxShadow: completionCardStyle.shadow
+            }}
           >
             <div className="absolute top-0 left-0 w-full h-4 bg-white/20 -skew-y-2 transform origin-top-left" />
             
-            <div className="inline-block mb-4 sm:mb-6 bg-white p-4 sm:p-6 rounded-full border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+            <div
+              className="inline-block mb-4 sm:mb-6 bg-white p-4 sm:p-6 rounded-full border-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+              style={{ borderColor: completionCardStyle.borderColor }}
+            >
               <CheckCircle size={56} className="fill-current stroke-black stroke-2" style={{ color: visualTheme.completionIcon }} />
             </div>
             
-            <h2 className="text-3xl sm:text-5xl font-black font-display uppercase mb-2 text-black leading-none tracking-tight">
-              Playback Complete!
+            <h2
+              className="text-3xl sm:text-5xl font-black font-display uppercase mb-2 leading-none tracking-tight"
+              style={{ color: completionCardStyle.textColor }}
+            >
+              {completionTitle}
             </h2>
-            <p className="text-base sm:text-xl font-bold text-black/80 mb-6 sm:mb-8 font-mono">
-              All puzzles shown.
+            <p
+              className="text-base sm:text-xl font-bold mb-6 sm:mb-8 font-mono"
+              style={{ color: hexToRgba(completionCardStyle.textColor, 0.78) }}
+            >
+              {completionSubtitle}
             </p>
             
             <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
               <button 
                 onClick={onExit}
-                className="flex-1 py-3 sm:py-4 bg-white text-black text-base sm:text-lg font-black uppercase tracking-wider rounded-xl hover:bg-slate-50 transition-colors border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+                className="flex-1 py-3 sm:py-4 bg-white text-base sm:text-lg font-black uppercase tracking-wider rounded-xl hover:bg-slate-50 transition-colors border-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+                style={{ color: completionCardStyle.textColor, borderColor: completionCardStyle.borderColor }}
               >
                 Exit
               </button>
               <button 
                 onClick={handleReplay}
-                className="flex-1 py-3 sm:py-4 bg-black text-white text-base sm:text-lg font-black uppercase tracking-wider rounded-xl hover:bg-slate-900 transition-colors border-4 border-black shadow-[4px_4px_0px_0px_rgba(255,255,255,1)] flex items-center justify-center space-x-2"
+                className="flex-1 py-3 sm:py-4 text-base sm:text-lg font-black uppercase tracking-wider rounded-xl transition-colors border-4 flex items-center justify-center space-x-2"
+                style={{
+                  backgroundColor:
+                    packagePreset.outroCardVariant === 'scoreboard' ? visualTheme.headerBg : '#111111',
+                  color:
+                    packagePreset.outroCardVariant === 'scoreboard' ? '#111827' : '#FFFFFF',
+                  borderColor: completionCardStyle.borderColor,
+                  boxShadow:
+                    packagePreset.outroCardVariant === 'scoreboard'
+                      ? '4px 4px 0px 0px rgba(255,255,255,0.22)'
+                      : '4px 4px 0px 0px rgba(255,255,255,1)'
+                }}
               >
                 <RotateCcw size={18} />
                 <span>Replay</span>

@@ -3,6 +3,8 @@ import { OverlayTransform, VideoSettings } from '../types';
 type OverlayExportSettings = Pick<VideoSettings, 'exportResolution' | 'exportBitrateMbps' | 'exportCodec'>;
 
 export type OverlayBaseSourceMode = 'video' | 'photo' | 'color';
+export type OverlayEditorMode = 'standard' | 'linked_pairs';
+export type OverlayLinkedPairExportMode = 'single_video' | 'one_per_pair';
 
 export interface OverlayCrop {
   x: number;
@@ -44,6 +46,26 @@ export interface OverlayBatchPhotoInput extends OverlayMediaClipInput {
   kind: 'image';
 }
 
+export interface OverlayLinkedPairLayout {
+  x: number;
+  y: number;
+  size: number;
+  gap: number;
+}
+
+export interface OverlayLinkedPairStyle {
+  outlineColor: string;
+  outlineWidth: number;
+  cornerRadius: number;
+}
+
+export interface OverlayLinkedPairInput {
+  id: string;
+  name: string;
+  puzzleFile: File;
+  diffFile: File;
+}
+
 export interface OverlayBaseInput {
   mode: OverlayBaseSourceMode;
   color: string;
@@ -54,9 +76,14 @@ export interface OverlayBaseInput {
 }
 
 interface OverlayBatchExportOptions {
+  editorMode?: OverlayEditorMode;
   base: OverlayBaseInput;
   batchPhotos: OverlayBatchPhotoInput[];
   overlays: OverlayMediaClipInput[];
+  linkedPairs?: OverlayLinkedPairInput[];
+  linkedPairLayout?: OverlayLinkedPairLayout;
+  linkedPairStyle?: OverlayLinkedPairStyle;
+  linkedPairExportMode?: OverlayLinkedPairExportMode;
   settings: OverlayExportSettings;
   onProgress?: (progress: number, status?: string) => void;
 }
@@ -87,9 +114,14 @@ export const cancelOverlayBatchExport = () => {
 };
 
 export const exportOverlayBatchWithWebCodecs = async ({
+  editorMode = 'standard',
   base,
   batchPhotos,
   overlays,
+  linkedPairs = [],
+  linkedPairLayout,
+  linkedPairStyle,
+  linkedPairExportMode = 'one_per_pair',
   settings,
   onProgress
 }: OverlayBatchExportOptions): Promise<void> => {
@@ -97,7 +129,12 @@ export const exportOverlayBatchWithWebCodecs = async ({
     throw new Error('Another overlay export is already running.');
   }
 
-  if (!batchPhotos.length) throw new Error('Upload at least one batch image.');
+  if (editorMode === 'linked_pairs' && linkedPairs.length === 0) {
+    throw new Error('Add at least one linked puzzle pair before exporting.');
+  }
+  if (editorMode !== 'linked_pairs' && !batchPhotos.length && base.mode !== 'video') {
+    throw new Error('Upload at least one batch image when base mode is photo or color.');
+  }
   if (base.mode === 'video' && !base.videoFile) throw new Error('Upload a base video file.');
   if (base.mode === 'photo' && !base.photoFile) throw new Error('Upload a base photo file.');
 
@@ -154,9 +191,14 @@ export const exportOverlayBatchWithWebCodecs = async ({
     worker.postMessage({
       type: 'start',
       payload: {
+        editorMode,
         base,
         batchPhotos,
         overlays,
+        linkedPairs,
+        linkedPairLayout,
+        linkedPairStyle,
+        linkedPairExportMode,
         settings
       }
     });

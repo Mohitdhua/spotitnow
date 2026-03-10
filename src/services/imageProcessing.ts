@@ -1,12 +1,232 @@
 import { Region } from '../types';
 
+import {
+  canvasToDataUrl,
+  createRuntimeCanvas,
+  getRuntimeCanvasContext
+} from './canvasRuntime';
+
+export interface DetectedImageAlignment {
+  dx: number;
+  dy: number;
+  applied: boolean;
+  baselineScore: number;
+  bestScore: number;
+  overlapRatio: number;
+}
+
 export interface ProcessedPuzzleData {
   regions: Region[];
   imageA: string; // Base64, potentially resized
   imageB: string; // Base64, potentially resized
+  alignment: DetectedImageAlignment;
 }
 
-export async function detectDifferencesClientSide(imageASrc: string, imageBSrc: string): Promise<ProcessedPuzzleData> {
+export interface ProcessedPuzzleCanvasData {
+  regions: Region[];
+  imageA: HTMLCanvasElement;
+  imageB: HTMLCanvasElement;
+  alignment: DetectedImageAlignment;
+}
+
+export interface DifferenceDetectionOptions {
+  diffThreshold?: number;
+  dilationPasses?: number;
+  minAreaRatio?: number;
+  mergeDistancePx?: number;
+  blurRadius?: number;
+  borderIgnoreRatio?: number;
+  maxRegionAreaRatio?: number;
+  maxRegions?: number;
+  regionPaddingPx?: number;
+  enableAlignment?: boolean;
+  maxAlignmentShiftRatio?: number;
+  minAlignmentOverlapRatio?: number;
+}
+
+interface AlignmentResult {
+  dx: number;
+  dy: number;
+  baselineScore: number;
+  bestScore: number;
+  overlapRatio: number;
+}
+
+const DEFAULT_DILATION_PASSES = 2;
+const DEFAULT_MERGE_DISTANCE_PX = 5;
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const createCanvas = (width: number, height: number) => {
+  return createRuntimeCanvas(width, height) as unknown as HTMLCanvasElement;
+};
+
+const drawSourceToCanvas = (source: CanvasImageSource, width: number, height: number) => {
+  const canvas = createCanvas(width, height);
+  const ctx = getRuntimeCanvasContext(canvas, { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, width, height);
+  return canvas;
+};
+
+const cropCanvas = (source: HTMLCanvasElement, x: number, y: number, width: number, height: number) => {
+  const canvas = createCanvas(width, height);
+  const ctx = getRuntimeCanvasContext(canvas, { willReadFrequently: true });
+  ctx.drawImage(source, x, y, width, height, 0, 0, width, height);
+  return canvas;
+};
+
+const releaseCanvas = (canvas: HTMLCanvasElement | null | undefined) => {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  canvas.width = 1;
+  canvas.height = 1;
+};
+
+const releaseCanvases = (...canvases: Array<HTMLCanvasElement | null | undefined>) => {
+  const seen = new Set<HTMLCanvasElement>();
+  canvases.forEach((canvas) => {
+    if (!canvas || seen.has(canvas)) {
+      return;
+    }
+    seen.add(canvas);
+    releaseCanvas(canvas);
+  });
+};
+
+const alignSourceCanvases = (
+  canvasA: HTMLCanvasElement,
+  canvasB: HTMLCanvasElement,
+  dx: number,
+  dy: number
+) => {
+  const overlapWidth = canvasA.width - Math.abs(dx);
+  const overlapHeight = canvasA.height - Math.abs(dy);
+  if (overlapWidth < 2 || overlapHeight < 2) {
+    return {
+      canvasA,
+      canvasB,
+      applied: false
+    };
+  }
+
+  const startAX = Math.max(0, dx);
+  const startAY = Math.max(0, dy);
+  const startBX = Math.max(0, -dx);
+  const startBY = Math.max(0, -dy);
+
+  return {
+    canvasA: cropCanvas(canvasA, startAX, startAY, overlapWidth, overlapHeight),
+    canvasB: cropCanvas(canvasB, startBX, startBY, overlapWidth, overlapHeight),
+    applied: true
+  };
+};
+
+const rgbaToGrayscale = (rgba: Uint8ClampedArray): Uint8Array => {
+  const gray = new Uint8Array(rgba.length / 4);
+  for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
+    gray[i] = Math.round(rgba[p] * 0.299 + rgba[p + 1] * 0.587 + rgba[p + 2] * 0.114);
+  }
+  return gray;
+};
+
+const estimateAlignment = (
+  grayA: Uint8Array,
+  grayB: Uint8Array,
+  width: number,
+  height: number,
+  maxShift: number,
+  minOverlapRatio: number
+): AlignmentResult => {
+  const evaluateShift = (dx: number, dy: number, stride: number): { score: number; overlapRatio: number } => {
+    const xStart = Math.max(0, dx);
+    const xEnd = Math.min(width, width + dx);
+    const yStart = Math.max(0, dy);
+    const yEnd = Math.min(height, height + dy);
+    const overlapWidth = xEnd - xStart;
+    const overlapHeight = yEnd - yStart;
+    if (overlapWidth <= 1 || overlapHeight <= 1) {
+      return { score: Number.POSITIVE_INFINITY, overlapRatio: 0 };
+    }
+
+    const overlapRatio = (overlapWidth * overlapHeight) / (width * height);
+    if (overlapRatio < minOverlapRatio) {
+      return { score: Number.POSITIVE_INFINITY, overlapRatio };
+    }
+
+    let sum = 0;
+    let count = 0;
+    for (let y = yStart; y < yEnd; y += stride) {
+      const rowA = y * width;
+      const rowB = (y - dy) * width;
+      for (let x = xStart; x < xEnd; x += stride) {
+        const aIndex = rowA + x;
+        const bIndex = rowB + (x - dx);
+        sum += Math.abs(grayA[aIndex] - grayB[bIndex]);
+        count += 1;
+      }
+    }
+
+    if (!count) {
+      return { score: Number.POSITIVE_INFINITY, overlapRatio };
+    }
+
+    const meanDiff = sum / count;
+    const shiftPenalty = (Math.abs(dx) + Math.abs(dy)) * 0.2;
+    return { score: meanDiff + shiftPenalty, overlapRatio };
+  };
+
+  const baseline = evaluateShift(0, 0, 2);
+  let bestDx = 0;
+  let bestDy = 0;
+  let bestScore = baseline.score;
+  let bestOverlap = baseline.overlapRatio;
+
+  for (let dy = -maxShift; dy <= maxShift; dy += 2) {
+    for (let dx = -maxShift; dx <= maxShift; dx += 2) {
+      const result = evaluateShift(dx, dy, 2);
+      if (result.score < bestScore) {
+        bestScore = result.score;
+        bestDx = dx;
+        bestDy = dy;
+        bestOverlap = result.overlapRatio;
+      }
+    }
+  }
+
+  // Fine search around the best coarse offset.
+  for (let dy = bestDy - 2; dy <= bestDy + 2; dy += 1) {
+    for (let dx = bestDx - 2; dx <= bestDx + 2; dx += 1) {
+      if (dx < -maxShift || dx > maxShift || dy < -maxShift || dy > maxShift) continue;
+      const result = evaluateShift(dx, dy, 1);
+      if (result.score < bestScore) {
+        bestScore = result.score;
+        bestDx = dx;
+        bestDy = dy;
+        bestOverlap = result.overlapRatio;
+      }
+    }
+  }
+
+  const improvement = baseline.score - bestScore;
+  const applyShift = improvement > 1.5 && bestOverlap >= minOverlapRatio;
+
+  return {
+    dx: applyShift ? bestDx : 0,
+    dy: applyShift ? bestDy : 0,
+    baselineScore: baseline.score,
+    bestScore,
+    overlapRatio: bestOverlap
+  };
+};
+
+export async function detectDifferencesClientSide(
+  imageASrc: string,
+  imageBSrc: string,
+  options: DifferenceDetectionOptions = {}
+): Promise<ProcessedPuzzleData> {
   return new Promise((resolve, reject) => {
     const imgA = new Image();
     const imgB = new Image();
@@ -15,7 +235,7 @@ export async function detectDifferencesClientSide(imageASrc: string, imageBSrc: 
     const onLoad = () => {
       loadedCount++;
       if (loadedCount === 2) {
-        processImages(imgA, imgB, imageASrc, imageBSrc).then(resolve).catch(reject);
+        processImages(imgA, imgB, imageASrc, imageBSrc, options).then(resolve).catch(reject);
       }
     };
 
@@ -29,120 +249,222 @@ export async function detectDifferencesClientSide(imageASrc: string, imageBSrc: 
   });
 }
 
-async function processImages(imgA: HTMLImageElement, imgB: HTMLImageElement, srcA: string, srcB: string): Promise<ProcessedPuzzleData> {
-  // 1. Normalize dimensions to match Image A
-  const width = imgA.width;
-  const height = imgA.height;
+export async function detectDifferencesClientSideCanvases(
+  imageA: HTMLCanvasElement,
+  imageB: HTMLCanvasElement,
+  options: DifferenceDetectionOptions = {}
+): Promise<ProcessedPuzzleCanvasData> {
+  const width = Math.max(1, imageA.width);
+  const height = Math.max(1, imageA.height);
+  const normalizedImageB =
+    imageB.width === width && imageB.height === height
+      ? imageB
+      : drawSourceToCanvas(imageB, width, height);
 
-  // Create canvas for Image B (resize to match A if needed)
-  let finalImageB = srcB;
-  
-  if (imgB.width !== width || imgB.height !== height) {
-    const canvasB = document.createElement('canvas');
-    canvasB.width = width;
-    canvasB.height = height;
-    const ctxB = canvasB.getContext('2d', { willReadFrequently: true });
-    if (!ctxB) throw new Error('Could not get canvas context');
-    ctxB.drawImage(imgB, 0, 0, width, height); // This handles the resizing/stretching
-    finalImageB = canvasB.toDataURL('image/png');
-  }
-
-  // 2. Compute Difference & Threshold
-  // Processing at full resolution might be slow for huge images, 
-  // but for accuracy in the game we want the full images.
-  // For detection logic, we can downscale if needed, but let's try full res first 
-  // or downscale just for the diff map calculation.
-  
-  const procScale = Math.min(1, 800 / width); // Process at max 800px width
-  const procW = Math.floor(width * procScale);
-  const procH = Math.floor(height * procScale);
-
-  // Draw to small canvases for diff computation
-  const smallCanvasA = document.createElement('canvas');
-  smallCanvasA.width = procW;
-  smallCanvasA.height = procH;
-  const smallCtxA = smallCanvasA.getContext('2d', { willReadFrequently: true })!;
-  // Apply blur to reduce high-frequency noise/artifacts
-  smallCtxA.filter = 'blur(2px)';
-  smallCtxA.drawImage(imgA, 0, 0, procW, procH);
-  const smallDataA = smallCtxA.getImageData(0, 0, procW, procH).data;
-
-  const smallCanvasB = document.createElement('canvas');
-  smallCanvasB.width = procW;
-  smallCanvasB.height = procH;
-  const smallCtxB = smallCanvasB.getContext('2d', { willReadFrequently: true })!;
-  // Apply blur to reduce high-frequency noise/artifacts
-  smallCtxB.filter = 'blur(2px)';
-  smallCtxB.drawImage(imgB, 0, 0, procW, procH); // Resized B drawn to small canvas
-  const smallDataB = smallCtxB.getImageData(0, 0, procW, procH).data;
-
-  const binaryMap = new Uint8Array(procW * procH);
-  // Threshold for RGB sum difference. 
-  // 45 is roughly 15 per channel on average, which is a decent tolerance for compression noise
-  // while still catching visible color shifts.
-  const diffThreshold = 60; 
-
-  for (let i = 0; i < smallDataA.length; i += 4) {
-    const r1 = smallDataA[i];
-    const g1 = smallDataA[i + 1];
-    const b1 = smallDataA[i + 2];
-
-    const r2 = smallDataB[i];
-    const g2 = smallDataB[i + 1];
-    const b2 = smallDataB[i + 2];
-
-    // Manhattan distance for speed and effectiveness
-    const diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
-    
-    if (diff > diffThreshold) {
-      binaryMap[i / 4] = 1;
+  try {
+    const processed = processCanvasImages(imageA, normalizedImageB, options);
+    if (normalizedImageB !== imageB && processed.imageB !== normalizedImageB) {
+      releaseCanvas(normalizedImageB);
     }
-  }
-
-  // 3. Morphological Operations
-  // Increased passes to merge nearby pixels more aggressively
-  const dilatedMap = dilate(binaryMap, procW, procH, 6); 
-
-  // 4. Find Regions
-  let rects = findContours(dilatedMap, procW, procH);
-
-  // 5. Merge nearby regions to reduce fragmentation
-  // Merge regions within ~20px of each other (scaled)
-  const mergeDistance = Math.max(10, Math.floor(20 * procScale));
-  rects = mergeNearbyRects(rects, mergeDistance);
-
-  // 6. Filter and Convert
-  const finalRegions: Region[] = [];
-  const minArea = (procW * procH) * 0.001; // 0.1% area threshold (increased from 0.05% to reduce noise)
-
-  rects.forEach(rect => {
-    const area = rect.width * rect.height;
-    if (area > minArea) {
-      // Add padding
-      const padding = 5;
-      const x = Math.max(0, rect.x - padding);
-      const y = Math.max(0, rect.y - padding);
-      const w = Math.min(procW - x, rect.width + padding * 2);
-      const h = Math.min(procH - y, rect.height + padding * 2);
-
-      finalRegions.push({
-        id: Math.random().toString(36).substring(2),
-        x: x / procW,
-        y: y / procH,
-        width: w / procW,
-        height: h / procH
-      });
+    return processed;
+  } catch (error) {
+    if (normalizedImageB !== imageB) {
+      releaseCanvas(normalizedImageB);
     }
-  });
-
-  return {
-    regions: finalRegions,
-    imageA: srcA,
-    imageB: finalImageB
-  };
+    throw error;
+  }
 }
 
-function mergeNearbyRects(rects: Rect[], distance: number): Rect[] {
+async function processImages(
+  imgA: HTMLImageElement,
+  imgB: HTMLImageElement,
+  srcA: string,
+  srcB: string,
+  options: DifferenceDetectionOptions
+): Promise<ProcessedPuzzleData> {
+  const width = Math.max(1, imgA.naturalWidth || imgA.width);
+  const height = Math.max(1, imgA.naturalHeight || imgA.height);
+  const sourceCanvasA = drawSourceToCanvas(imgA, width, height);
+  const sourceCanvasB = drawSourceToCanvas(imgB, width, height);
+  const processed = processCanvasImages(sourceCanvasA, sourceCanvasB, options);
+
+  try {
+    return {
+      regions: processed.regions,
+      imageA: processed.imageA === sourceCanvasA ? srcA : await canvasToDataUrl(processed.imageA, 'image/png'),
+      imageB:
+        processed.imageB === sourceCanvasB && imgB.width === width && imgB.height === height
+          ? srcB
+          : await canvasToDataUrl(processed.imageB, 'image/png'),
+      alignment: processed.alignment
+    };
+  } finally {
+    releaseCanvases(sourceCanvasA, sourceCanvasB, processed.imageA, processed.imageB);
+  }
+}
+
+function processCanvasImages(
+  sourceCanvasA: HTMLCanvasElement,
+  sourceCanvasB: HTMLCanvasElement,
+  options: DifferenceDetectionOptions
+): ProcessedPuzzleCanvasData {
+  const width = Math.max(1, sourceCanvasA.width);
+  const height = Math.max(1, sourceCanvasA.height);
+  let workingCanvasA = sourceCanvasA;
+  let workingCanvasB = sourceCanvasB;
+  const alignmentScale = Math.min(1, 800 / width);
+  const alignmentWidth = Math.max(1, Math.floor(width * alignmentScale));
+  const alignmentHeight = Math.max(1, Math.floor(height * alignmentScale));
+  const blurRadius = options.blurRadius ?? 2;
+  const alignmentCanvasA = createCanvas(alignmentWidth, alignmentHeight);
+  const alignmentCanvasB = createCanvas(alignmentWidth, alignmentHeight);
+  let smallCanvasA: HTMLCanvasElement | null = null;
+  let smallCanvasB: HTMLCanvasElement | null = null;
+
+  try {
+    const alignmentCtxA = getRuntimeCanvasContext(alignmentCanvasA, { willReadFrequently: true });
+    const alignmentCtxB = getRuntimeCanvasContext(alignmentCanvasB, { willReadFrequently: true });
+
+    alignmentCtxA.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
+    alignmentCtxA.drawImage(sourceCanvasA, 0, 0, alignmentWidth, alignmentHeight);
+    alignmentCtxB.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
+    alignmentCtxB.drawImage(sourceCanvasB, 0, 0, alignmentWidth, alignmentHeight);
+
+    const grayA = rgbaToGrayscale(alignmentCtxA.getImageData(0, 0, alignmentWidth, alignmentHeight).data);
+    const grayB = rgbaToGrayscale(alignmentCtxB.getImageData(0, 0, alignmentWidth, alignmentHeight).data);
+
+    const maxAlignmentShiftRatio = Math.max(0, Math.min(0.3, options.maxAlignmentShiftRatio ?? 0.1));
+    const maxShift = Math.max(0, Math.floor(Math.min(alignmentWidth, alignmentHeight) * maxAlignmentShiftRatio));
+    const minAlignmentOverlapRatio = Math.max(0.4, Math.min(0.95, options.minAlignmentOverlapRatio ?? 0.6));
+    const alignment =
+      options.enableAlignment === false || maxShift < 1
+        ? ({ dx: 0, dy: 0, baselineScore: 0, bestScore: 0, overlapRatio: 1 } as AlignmentResult)
+        : estimateAlignment(grayA, grayB, alignmentWidth, alignmentHeight, maxShift, minAlignmentOverlapRatio);
+
+    const sourceDx = Math.round(alignment.dx * (width / alignmentWidth));
+    const sourceDy = Math.round(alignment.dy * (height / alignmentHeight));
+    const alignmentInfo: DetectedImageAlignment = {
+      dx: sourceDx,
+      dy: sourceDy,
+      applied: sourceDx !== 0 || sourceDy !== 0,
+      baselineScore: alignment.baselineScore,
+      bestScore: alignment.bestScore,
+      overlapRatio: alignment.overlapRatio
+    };
+
+    if (alignmentInfo.applied) {
+      const aligned = alignSourceCanvases(sourceCanvasA, sourceCanvasB, sourceDx, sourceDy);
+      if (aligned.applied) {
+        workingCanvasA = aligned.canvasA;
+        workingCanvasB = aligned.canvasB;
+      } else {
+        alignmentInfo.applied = false;
+        alignmentInfo.dx = 0;
+        alignmentInfo.dy = 0;
+      }
+    }
+
+    const workingWidth = workingCanvasA.width;
+    const workingHeight = workingCanvasA.height;
+    const procScale = Math.min(1, 800 / workingWidth);
+    const procW = Math.max(1, Math.floor(workingWidth * procScale));
+    const procH = Math.max(1, Math.floor(workingHeight * procScale));
+
+    smallCanvasA = createCanvas(procW, procH);
+    smallCanvasB = createCanvas(procW, procH);
+    const smallCtxA = getRuntimeCanvasContext(smallCanvasA, { willReadFrequently: true });
+    const smallCtxB = getRuntimeCanvasContext(smallCanvasB, { willReadFrequently: true });
+
+    smallCtxA.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
+    smallCtxA.drawImage(workingCanvasA, 0, 0, procW, procH);
+    const smallDataA = smallCtxA.getImageData(0, 0, procW, procH).data;
+
+    smallCtxB.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
+    smallCtxB.drawImage(workingCanvasB, 0, 0, procW, procH);
+    const smallDataB = smallCtxB.getImageData(0, 0, procW, procH).data;
+
+    const binaryMap = new Uint8Array(procW * procH);
+    const diffThreshold = options.diffThreshold ?? 60;
+    const borderIgnoreRatio = Math.max(0, Math.min(0.45, options.borderIgnoreRatio ?? 0));
+    const ignoreX = Math.floor(procW * borderIgnoreRatio);
+    const ignoreY = Math.floor(procH * borderIgnoreRatio);
+
+    for (let y = 0; y < procH; y += 1) {
+      if (ignoreY > 0 && (y < ignoreY || y >= procH - ignoreY)) {
+        continue;
+      }
+      for (let x = 0; x < procW; x += 1) {
+        if (ignoreX > 0 && (x < ignoreX || x >= procW - ignoreX)) {
+          continue;
+        }
+        const pixelIndex = y * procW + x;
+        const dataIndex = pixelIndex * 4;
+        const r1 = smallDataA[dataIndex];
+        const g1 = smallDataA[dataIndex + 1];
+        const b1 = smallDataA[dataIndex + 2];
+        const r2 = smallDataB[dataIndex];
+        const g2 = smallDataB[dataIndex + 1];
+        const b2 = smallDataB[dataIndex + 2];
+
+        const diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+        if (diff > diffThreshold) {
+          binaryMap[pixelIndex] = 1;
+        }
+      }
+    }
+
+    const dilationPasses = Math.max(0, Math.floor(options.dilationPasses ?? DEFAULT_DILATION_PASSES));
+    const dilatedMap = dilate(binaryMap, procW, procH, dilationPasses);
+    let rects = findContours(dilatedMap, procW, procH);
+    const mergeDistancePx = Math.max(0, options.mergeDistancePx ?? DEFAULT_MERGE_DISTANCE_PX);
+    rects = mergeNearbyRects(rects, mergeDistancePx, procScale);
+
+    const finalRegions: Region[] = [];
+    const minArea = (procW * procH) * (options.minAreaRatio ?? 0.001);
+    const maxArea = (procW * procH) * (options.maxRegionAreaRatio ?? 1);
+    const padding = Math.max(1, Math.round(options.regionPaddingPx ?? 5));
+    const candidates: Array<{ region: Region; area: number }> = [];
+
+    rects.forEach(rect => {
+      const area = rect.width * rect.height;
+      if (area > minArea && area <= maxArea) {
+        const x = Math.max(0, rect.x - padding);
+        const y = Math.max(0, rect.y - padding);
+        const w = Math.min(procW - x, rect.width + padding * 2);
+        const h = Math.min(procH - y, rect.height + padding * 2);
+        if (w > 0 && h > 0) {
+          candidates.push({
+            area,
+            region: {
+              id: Math.random().toString(36).substring(2),
+              x: x / procW,
+              y: y / procH,
+              width: w / procW,
+              height: h / procH
+            }
+          });
+        }
+      }
+    });
+
+    const maxRegions = Math.max(1, options.maxRegions ?? 24);
+    candidates
+      .sort((a, b) => b.area - a.area)
+      .slice(0, maxRegions)
+      .forEach((entry) => finalRegions.push(entry.region));
+
+    return {
+      regions: finalRegions,
+      imageA: workingCanvasA,
+      imageB: workingCanvasB,
+      alignment: alignmentInfo
+    };
+  } finally {
+    releaseCanvases(alignmentCanvasA, alignmentCanvasB, smallCanvasA, smallCanvasB);
+  }
+}
+
+function mergeNearbyRects(rects: Rect[], maxGapSourcePx: number, procScale: number): Rect[] {
   let merged = [...rects];
   let changed = true;
   
@@ -161,16 +483,8 @@ function mergeNearbyRects(rects: Rect[], distance: number): Rect[] {
         if (used[j]) continue;
         
         const other = merged[j];
-        
-        // Check if close enough by expanding current rect by distance
-        const expanded = {
-            x: current.x - distance,
-            y: current.y - distance,
-            width: current.width + distance * 2,
-            height: current.height + distance * 2
-        };
-        
-        if (rectsIntersect(expanded, other)) {
+
+        if (getRectGapInSourcePixels(current, other, procScale) <= maxGapSourcePx) {
             // Merge
             const minX = Math.min(current.x, other.x);
             const minY = Math.min(current.y, other.y);
@@ -193,11 +507,11 @@ function mergeNearbyRects(rects: Rect[], distance: number): Rect[] {
   return merged;
 }
 
-function rectsIntersect(r1: Rect, r2: Rect) {
-  return !(r2.x > r1.x + r1.width || 
-           r2.x + r2.width < r1.x || 
-           r2.y > r1.y + r1.height || 
-           r2.y + r2.height < r1.y);
+function getRectGapInSourcePixels(r1: Rect, r2: Rect, procScale: number) {
+  const gapX = Math.max(0, r2.x - (r1.x + r1.width), r1.x - (r2.x + r2.width));
+  const gapY = Math.max(0, r2.y - (r1.y + r1.height), r1.y - (r2.y + r2.height));
+  const processedGap = Math.hypot(gapX, gapY);
+  return procScale > 0 ? processedGap / procScale : processedGap;
 }
 
 function dilate(data: Uint8Array, width: number, height: number, passes: number): Uint8Array {

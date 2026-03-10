@@ -2,6 +2,7 @@
 import {
   ArrowLeft,
   Clock3,
+  Columns2,
   Download,
   ImagePlus,
   Layers,
@@ -16,13 +17,18 @@ import {
   Upload,
   Video
 } from 'lucide-react';
-import { OverlayTransform, VideoSettings } from '../types';
+import { OverlayTransform, Puzzle, VideoModeTransferFrame, VideoSettings } from '../types';
 import type {
   OverlayBackgroundFill,
   OverlayBaseInput,
   OverlayBatchPhotoInput,
   OverlayChromaKey,
   OverlayCrop,
+  OverlayEditorMode,
+  OverlayLinkedPairExportMode,
+  OverlayLinkedPairInput,
+  OverlayLinkedPairLayout,
+  OverlayLinkedPairStyle,
   OverlayMediaClipInput,
   OverlayTimeline
 } from '../services/overlayVideoExport';
@@ -73,6 +79,23 @@ interface BatchPhotoDraft extends DraftMediaBase {
 
 type OverlayDraft = DraftMediaBase;
 
+interface LinkedPairDraft extends OverlayLinkedPairInput {
+  puzzleUrl: string;
+  diffUrl: string;
+  sortKey: string;
+}
+
+interface LinkedPairDragState {
+  pointerId: number;
+  mode: 'move' | 'resize';
+  startClientX: number;
+  startClientY: number;
+  startLayout: OverlayLinkedPairLayout;
+  previewWidth: number;
+  previewHeight: number;
+  previewMinDimension: number;
+}
+
 interface ActiveClipRef {
   source: 'batch' | 'overlay';
   id: string;
@@ -85,13 +108,22 @@ interface PreviewChromaMediaProps {
 }
 
 interface OverlayVideoEditorExportPayload {
+  editorMode: OverlayEditorMode;
   base: OverlayBaseInput;
   batchPhotos: OverlayBatchPhotoInput[];
   overlays: OverlayMediaClipInput[];
+  linkedPairs?: OverlayLinkedPairInput[];
+  linkedPairLayout?: OverlayLinkedPairLayout;
+  linkedPairStyle?: OverlayLinkedPairStyle;
+  linkedPairExportMode?: OverlayLinkedPairExportMode;
 }
 
 interface OverlayVideoEditorProps {
   settings: OverlayExportSettings;
+  puzzles?: Puzzle[];
+  incomingVideoFrames?: VideoModeTransferFrame[];
+  incomingVideoFramesSessionId?: number;
+  defaultPuzzleClipDurationSeconds?: number;
   onSettingsChange: (patch: Partial<OverlayExportSettings>) => void;
   onExport: (payload: OverlayVideoEditorExportPayload) => void | Promise<void>;
   onBack: () => void;
@@ -265,6 +297,103 @@ const getCroppedStyle = (crop: OverlayCrop): React.CSSProperties => {
   };
 };
 
+const sanitizeFileBaseName = (value: string) =>
+  value
+    .replace(/\.[^/.]+$/, '')
+    .replace(/[^a-zA-Z0-9-_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'puzzle';
+
+const getImageExtensionFromMimeType = (mimeType: string) => {
+  if (mimeType.includes('png')) return 'png';
+  if (mimeType.includes('webp')) return 'webp';
+  if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
+  if (mimeType.includes('gif')) return 'gif';
+  return 'png';
+};
+
+const createFileFromImageSource = async (source: string, fileBaseName: string) => {
+  const response = await fetch(source);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch image source for "${fileBaseName}".`);
+  }
+  const blob = await response.blob();
+  const mimeType = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/png';
+  const ext = getImageExtensionFromMimeType(mimeType);
+  const safeBaseName = sanitizeFileBaseName(fileBaseName);
+  return new File([blob], `${safeBaseName}.${ext}`, { type: mimeType });
+};
+
+const loadImageElement = (url: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Failed to load puzzle image.'));
+    image.src = url;
+  });
+
+const drawImageContain = (
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) => {
+  const imageWidth = Math.max(1, image.naturalWidth);
+  const imageHeight = Math.max(1, image.naturalHeight);
+  const scale = Math.min(width / imageWidth, height / imageHeight);
+  const drawWidth = imageWidth * scale;
+  const drawHeight = imageHeight * scale;
+  const drawX = x + (width - drawWidth) / 2;
+  const drawY = y + (height - drawHeight) / 2;
+  ctx.drawImage(image, drawX, drawY, drawWidth, drawHeight);
+};
+
+const createPuzzleCompositeFile = async (puzzle: Puzzle, index: number, frameAspectRatio: number): Promise<File> => {
+  const [original, modified] = await Promise.all([loadImageElement(puzzle.imageA), loadImageElement(puzzle.imageB)]);
+  const safeAspectRatio = clamp(frameAspectRatio, 0.3, 4);
+  const height = safeAspectRatio >= 1 ? 1080 : 1920;
+  const width = Math.max(2, Math.round(height * safeAspectRatio));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Unable to initialize puzzle compositor canvas.');
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+
+  const padding = Math.round(width * 0.015);
+  const gap = Math.round(width * 0.012);
+  const panelWidth = Math.max(1, (width - padding * 2 - gap) / 2);
+  const panelHeight = Math.max(1, height - padding * 2);
+  const leftPanelX = padding;
+  const rightPanelX = padding + panelWidth + gap;
+  const panelY = padding;
+
+  ctx.fillStyle = '#f1f5f9';
+  ctx.fillRect(leftPanelX, panelY, panelWidth, panelHeight);
+  ctx.fillRect(rightPanelX, panelY, panelWidth, panelHeight);
+  drawImageContain(ctx, original, leftPanelX, panelY, panelWidth, panelHeight);
+  drawImageContain(ctx, modified, rightPanelX, panelY, panelWidth, panelHeight);
+
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = Math.max(2, Math.round(width * 0.002));
+  ctx.strokeRect(leftPanelX, panelY, panelWidth, panelHeight);
+  ctx.strokeRect(rightPanelX, panelY, panelWidth, panelHeight);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((nextBlob) => {
+      if (nextBlob) resolve(nextBlob);
+      else reject(new Error('Failed to render puzzle frame.'));
+    }, 'image/png');
+  });
+
+  const baseName = sanitizeFileBaseName((puzzle.title || '').trim() || `puzzle_${index + 1}`);
+  return new File([blob], `${baseName}.png`, { type: 'image/png' });
+};
+
 const parseHexColor = (value: string): { r: number; g: number; b: number } => {
   const normalized = value.trim().toLowerCase();
   if (/^#[0-9a-f]{3}$/.test(normalized)) {
@@ -324,6 +453,131 @@ const rgbToHex = (r: number, g: number, b: number) =>
   `#${[r, g, b]
     .map((value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, '0'))
     .join('')}`;
+
+const parsePuzzlePairFilename = (filename: string) => {
+  const name = filename.substring(0, filename.lastIndexOf('.')) || filename;
+  if (name.toLowerCase().endsWith('diff')) {
+    return { base: name.substring(0, name.length - 4), type: 'diff' as const };
+  }
+  return { base: name, type: 'base' as const };
+};
+
+const createDefaultLinkedPairLayout = (): OverlayLinkedPairLayout => ({
+  x: 0.14,
+  y: 0.18,
+  size: 0.34,
+  gap: 0.04
+});
+
+const createDefaultLinkedPairStyle = (): OverlayLinkedPairStyle => ({
+  outlineColor: '#000000',
+  outlineWidth: 6,
+  cornerRadius: 18
+});
+
+const getLinkedPairFrameMetrics = (frameAspectRatio: number) => {
+  const safeAspect = clamp(frameAspectRatio, 0.3, 4);
+  return safeAspect >= 1
+    ? { width: safeAspect, height: 1, minDimension: 1, stackDirection: 'horizontal' as const }
+    : { width: 1, height: 1 / safeAspect, minDimension: 1, stackDirection: 'vertical' as const };
+};
+
+const normalizeLinkedPairLayout = (
+  layout: OverlayLinkedPairLayout | undefined,
+  frameAspectRatio: number
+): OverlayLinkedPairLayout => {
+  const metrics = getLinkedPairFrameMetrics(frameAspectRatio);
+  const isVertical = metrics.stackDirection === 'vertical';
+  const maxSizeByWidth = isVertical ? metrics.width : metrics.width / 2;
+  const maxSizeByHeight = isVertical ? metrics.height / 2 : metrics.height;
+  const size = clamp(
+    Number.isFinite(layout?.size) ? layout?.size ?? 0.34 : 0.34,
+    0.08,
+    Math.max(0.08, Math.min(1, maxSizeByWidth, maxSizeByHeight))
+  );
+  const gap = clamp(
+    Number.isFinite(layout?.gap) ? layout?.gap ?? 0.04 : 0.04,
+    0,
+    Math.max(0, 1 - (size * 2) / Math.max(0.0001, isVertical ? metrics.height : metrics.width))
+  );
+  const x = clamp(
+    Number.isFinite(layout?.x) ? layout?.x ?? 0.14 : 0.14,
+    0,
+    isVertical
+      ? Math.max(0, 1 - size / Math.max(0.0001, metrics.width))
+      : Math.max(0, 1 - (size * 2) / Math.max(0.0001, metrics.width) - gap)
+  );
+  const y = clamp(
+    Number.isFinite(layout?.y) ? layout?.y ?? 0.18 : 0.18,
+    0,
+    isVertical
+      ? Math.max(0, 1 - (size * 2) / Math.max(0.0001, metrics.height) - gap)
+      : Math.max(0, 1 - size / Math.max(0.0001, metrics.height))
+  );
+
+  return { x, y, size, gap };
+};
+
+const getLinkedPairBounds = (layout: OverlayLinkedPairLayout, frameAspectRatio: number) => {
+  const safeLayout = normalizeLinkedPairLayout(layout, frameAspectRatio);
+  const metrics = getLinkedPairFrameMetrics(frameAspectRatio);
+  const sizePx = safeLayout.size * metrics.minDimension;
+  const isVertical = metrics.stackDirection === 'vertical';
+
+  if (isVertical) {
+    const gapPx = safeLayout.gap * metrics.height;
+    const totalHeightPx = sizePx * 2 + gapPx;
+    const panelHeightPct = (sizePx / Math.max(0.0001, totalHeightPx)) * 100;
+    const diffTopPct = ((sizePx + gapPx) / Math.max(0.0001, totalHeightPx)) * 100;
+
+    return {
+      puzzle: {
+        left: '0%',
+        top: '0%',
+        width: '100%',
+        height: `${panelHeightPct}%`
+      },
+      diff: {
+        left: '0%',
+        top: `${diffTopPct}%`,
+        width: '100%',
+        height: `${panelHeightPct}%`
+      },
+      container: {
+        left: `${safeLayout.x * 100}%`,
+        top: `${safeLayout.y * 100}%`,
+        width: `${(sizePx / metrics.width) * 100}%`,
+        height: `${(totalHeightPx / metrics.height) * 100}%`
+      }
+    };
+  }
+
+  const gapPx = safeLayout.gap * metrics.width;
+  const totalWidthPx = sizePx * 2 + gapPx;
+  const panelWidthPct = (sizePx / Math.max(0.0001, totalWidthPx)) * 100;
+  const diffLeftPct = ((sizePx + gapPx) / Math.max(0.0001, totalWidthPx)) * 100;
+
+  return {
+    puzzle: {
+      left: '0%',
+      top: '0%',
+      width: `${panelWidthPct}%`,
+      height: '100%'
+    },
+    diff: {
+      left: `${diffLeftPct}%`,
+      top: '0%',
+      width: `${panelWidthPct}%`,
+      height: '100%'
+    },
+    container: {
+      left: `${safeLayout.x * 100}%`,
+      top: `${safeLayout.y * 100}%`,
+      width: `${(totalWidthPx / metrics.width) * 100}%`,
+      height: `${(sizePx / metrics.height) * 100}%`
+    }
+  };
+};
 
 const PreviewChromaMedia: React.FC<PreviewChromaMediaProps> = ({ item, previewTime, registerVideoRef }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -406,6 +660,10 @@ const PreviewChromaMedia: React.FC<PreviewChromaMediaProps> = ({ item, previewTi
 
 export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   settings,
+  puzzles = [],
+  incomingVideoFrames = [],
+  incomingVideoFramesSessionId = 0,
+  defaultPuzzleClipDurationSeconds = 8,
   onSettingsChange,
   onExport,
   onBack,
@@ -425,16 +683,26 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   const [frameAspectPreset, setFrameAspectPreset] = useState<AspectRatioPreset>('auto');
   const [staticDurationSeconds, setStaticDurationSeconds] = useState(8);
 
+  const [editorMode, setEditorMode] = useState<OverlayEditorMode>('standard');
   const [batchPhotos, setBatchPhotos] = useState<BatchPhotoDraft[]>([]);
+  const [linkedPairs, setLinkedPairs] = useState<LinkedPairDraft[]>([]);
+  const [activeLinkedPairId, setActiveLinkedPairId] = useState<string | null>(null);
+  const [linkedPairLayout, setLinkedPairLayout] = useState<OverlayLinkedPairLayout>(createDefaultLinkedPairLayout);
+  const [linkedPairStyle, setLinkedPairStyle] = useState<OverlayLinkedPairStyle>(createDefaultLinkedPairStyle);
+  const [linkedPairExportMode, setLinkedPairExportMode] = useState<OverlayLinkedPairExportMode>('one_per_pair');
   const [overlays, setOverlays] = useState<OverlayDraft[]>([]);
   const [activeClip, setActiveClip] = useState<ActiveClipRef | null>(null);
   const [applyTransformToAllPhotos, setApplyTransformToAllPhotos] = useState(true);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const [linkedPairDragState, setLinkedPairDragState] = useState<LinkedPairDragState | null>(null);
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null);
 
   const [previewTime, setPreviewTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [isPreviewColorPickerActive, setIsPreviewColorPickerActive] = useState(false);
+  const [isImportingPuzzles, setIsImportingPuzzles] = useState(false);
+  const [isImportingVideoFrames, setIsImportingVideoFrames] = useState(false);
+  const [videoFrameImportSummary, setVideoFrameImportSummary] = useState<string>('');
 
   const previewRef = useRef<HTMLDivElement>(null);
   const baseVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -445,7 +713,9 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   const baseVideoUrlRef = useRef<string | null>(null);
   const basePhotoUrlRef = useRef<string | null>(null);
   const batchPhotosRef = useRef<BatchPhotoDraft[]>([]);
+  const linkedPairsRef = useRef<LinkedPairDraft[]>([]);
   const overlaysRef = useRef<OverlayDraft[]>([]);
+  const lastVideoFramesSessionIdRef = useRef<number>(-1);
 
   useEffect(() => {
     baseVideoUrlRef.current = baseVideoUrl;
@@ -457,6 +727,9 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     batchPhotosRef.current = batchPhotos;
   }, [batchPhotos]);
   useEffect(() => {
+    linkedPairsRef.current = linkedPairs;
+  }, [linkedPairs]);
+  useEffect(() => {
     overlaysRef.current = overlays;
   }, [overlays]);
 
@@ -465,6 +738,10 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       if (baseVideoUrlRef.current) URL.revokeObjectURL(baseVideoUrlRef.current);
       if (basePhotoUrlRef.current) URL.revokeObjectURL(basePhotoUrlRef.current);
       batchPhotosRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+      linkedPairsRef.current.forEach((item) => {
+        URL.revokeObjectURL(item.puzzleUrl);
+        URL.revokeObjectURL(item.diffUrl);
+      });
       overlaysRef.current.forEach((item) => URL.revokeObjectURL(item.url));
     };
   }, []);
@@ -495,18 +772,44 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
         transform: normalizeTransformForMedia(item.transform, item.aspectRatio, previewAspectRatio)
       }));
     });
+    setLinkedPairLayout((currentLayout) => normalizeLinkedPairLayout(currentLayout, previewAspectRatio));
   }, [previewAspectRatio]);
+
+  useEffect(() => {
+    if (editorMode === 'linked_pairs' && activeClip?.source === 'batch') {
+      setActiveClip(null);
+    }
+  }, [activeClip, editorMode]);
 
   const baseDuration = useMemo(() => {
     if (baseMode === 'video') return Math.max(0.5, baseVideoDuration || 0.5);
     return Math.max(0.5, staticDurationSeconds);
   }, [baseMode, baseVideoDuration, staticDurationSeconds]);
 
+  const linkedPairSegmentDuration = useMemo(() => Math.max(0.5, baseDuration), [baseDuration]);
+
+  const linkedPairSegments = useMemo(
+    () =>
+      linkedPairs.map((pair, index) => ({
+        pair,
+        start: index * linkedPairSegmentDuration,
+        end: (index + 1) * linkedPairSegmentDuration
+      })),
+    [linkedPairSegmentDuration, linkedPairs]
+  );
+
   const timelineDuration = useMemo(() => {
-    const maxBatchEnd = batchPhotos.reduce((acc, photo) => Math.max(acc, normalizeTimeline(photo.timeline).end), 0);
+    const maxBatchEnd =
+      editorMode === 'standard'
+        ? batchPhotos.reduce((acc, photo) => Math.max(acc, normalizeTimeline(photo.timeline).end), 0)
+        : 0;
     const maxOverlayEnd = overlays.reduce((acc, overlay) => Math.max(acc, normalizeTimeline(overlay.timeline).end), 0);
-    return Math.max(1, baseDuration, maxBatchEnd, maxOverlayEnd);
-  }, [baseDuration, batchPhotos, overlays]);
+    const maxLinkedPairEnd =
+      editorMode === 'linked_pairs' && linkedPairExportMode === 'single_video'
+        ? linkedPairSegments.reduce((acc, segment) => Math.max(acc, segment.end), 0)
+        : baseDuration;
+    return Math.max(1, baseDuration, maxBatchEnd, maxOverlayEnd, maxLinkedPairEnd);
+  }, [baseDuration, batchPhotos, editorMode, linkedPairExportMode, linkedPairSegments, overlays]);
 
   useEffect(() => {
     setPreviewTime((current) => clamp(current, 0, timelineDuration));
@@ -514,7 +817,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
   useEffect(() => {
     if (!activeClip) {
-      if (batchPhotos.length > 0) {
+      if (editorMode === 'standard' && batchPhotos.length > 0) {
         setActiveClip({ source: 'batch', id: batchPhotos[0].id });
       } else if (overlays.length > 0) {
         setActiveClip({ source: 'overlay', id: overlays[0].id });
@@ -524,11 +827,11 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
     const exists =
       activeClip.source === 'batch'
-        ? batchPhotos.some((item) => item.id === activeClip.id)
+        ? editorMode === 'standard' && batchPhotos.some((item) => item.id === activeClip.id)
         : overlays.some((item) => item.id === activeClip.id);
 
     if (!exists) {
-      if (batchPhotos.length > 0) {
+      if (editorMode === 'standard' && batchPhotos.length > 0) {
         setActiveClip({ source: 'batch', id: batchPhotos[0].id });
       } else if (overlays.length > 0) {
         setActiveClip({ source: 'overlay', id: overlays[0].id });
@@ -536,11 +839,14 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
         setActiveClip(null);
       }
     }
-  }, [activeClip, batchPhotos, overlays]);
+  }, [activeClip, batchPhotos, editorMode, overlays]);
 
   const activeBatchPhoto = useMemo(
-    () => (activeClip?.source === 'batch' ? batchPhotos.find((item) => item.id === activeClip.id) ?? null : null),
-    [activeClip, batchPhotos]
+    () =>
+      editorMode === 'standard' && activeClip?.source === 'batch'
+        ? batchPhotos.find((item) => item.id === activeClip.id) ?? null
+        : null,
+    [activeClip, batchPhotos, editorMode]
   );
   const activeOverlay = useMemo(
     () => (activeClip?.source === 'overlay' ? overlays.find((item) => item.id === activeClip.id) ?? null : null),
@@ -548,14 +854,44 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   );
   const activeMedia = activeBatchPhoto ?? activeOverlay;
 
+  const selectedLinkedPair = useMemo(
+    () => linkedPairs.find((item) => item.id === activeLinkedPairId) ?? linkedPairs[0] ?? null,
+    [activeLinkedPairId, linkedPairs]
+  );
+
+  useEffect(() => {
+    if (!linkedPairs.length) {
+      setActiveLinkedPairId(null);
+      return;
+    }
+    if (!activeLinkedPairId || !linkedPairs.some((item) => item.id === activeLinkedPairId)) {
+      setActiveLinkedPairId(linkedPairs[0].id);
+    }
+  }, [activeLinkedPairId, linkedPairs]);
+
   useEffect(() => {
     if (!activeMedia) setIsPreviewColorPickerActive(false);
   }, [activeMedia]);
 
   const previewPrimaryPhoto = useMemo(() => {
+    if (editorMode !== 'standard') return null;
     if (activeBatchPhoto) return activeBatchPhoto;
     return batchPhotos[0] ?? null;
-  }, [activeBatchPhoto, batchPhotos]);
+  }, [activeBatchPhoto, batchPhotos, editorMode]);
+
+  const previewLinkedPair = useMemo(() => {
+    if (editorMode !== 'linked_pairs' || linkedPairs.length === 0) return null;
+    if (linkedPairExportMode === 'single_video') {
+      const matchingSegment =
+        linkedPairSegments.find(
+          (segment, index) =>
+            previewTime >= segment.start &&
+            (previewTime < segment.end || index === linkedPairSegments.length - 1)
+        ) ?? null;
+      return matchingSegment?.pair ?? selectedLinkedPair;
+    }
+    return selectedLinkedPair;
+  }, [editorMode, linkedPairExportMode, linkedPairSegments, linkedPairs.length, previewTime, selectedLinkedPair]);
 
   const previewEntries = useMemo(() => {
     const entries: Array<{ source: 'batch' | 'overlay'; item: DraftMediaBase }> = [];
@@ -571,11 +907,22 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     });
   }, [previewPrimaryPhoto, overlays, previewTime]);
 
+  const normalizedLinkedPairLayout = useMemo(
+    () => normalizeLinkedPairLayout(linkedPairLayout, previewAspectRatio),
+    [linkedPairLayout, previewAspectRatio]
+  );
+
   const selectedPhotoPositionLabel = activeMedia
     ? `x:${(activeMedia.transform.x * 100).toFixed(1)}% y:${(activeMedia.transform.y * 100).toFixed(1)}% size:${(
         activeMedia.transform.width * 100
       ).toFixed(1)}%`
-    : 'No media selected';
+    : editorMode === 'linked_pairs' && previewLinkedPair
+      ? `pair x:${(normalizedLinkedPairLayout.x * 100).toFixed(1)}% y:${(normalizedLinkedPairLayout.y * 100).toFixed(
+          1
+        )}% size:${(normalizedLinkedPairLayout.size * 100).toFixed(1)}% gap:${(
+          normalizedLinkedPairLayout.gap * 100
+        ).toFixed(1)}%`
+      : 'No media selected';
 
   useEffect(() => {
     if (!isPreviewPlaying) return;
@@ -686,6 +1033,18 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     setOverlays((currentOverlays) =>
       currentOverlays.map((item) => (item.id === activeClip.id ? updater(item) : item))
     );
+  };
+
+  const updateLinkedPairLayout = (nextLayout: OverlayLinkedPairLayout) => {
+    setLinkedPairLayout(normalizeLinkedPairLayout(nextLayout, previewAspectRatio));
+  };
+
+  const updateLinkedPairStyle = (nextStyle: OverlayLinkedPairStyle) => {
+    setLinkedPairStyle({
+      outlineColor: nextStyle.outlineColor,
+      outlineWidth: clamp(nextStyle.outlineWidth, 0, 36),
+      cornerRadius: clamp(nextStyle.cornerRadius, 0, 72)
+    });
   };
 
   const updateClipTimeline = (source: 'batch' | 'overlay', id: string, timeline: OverlayTimeline) => {
@@ -868,6 +1227,54 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   }, [dragState, activeMedia, previewAspectRatio]);
 
   useEffect(() => {
+    if (!linkedPairDragState) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerId !== linkedPairDragState.pointerId) return;
+      event.preventDefault();
+
+      const deltaX = (event.clientX - linkedPairDragState.startClientX) / linkedPairDragState.previewWidth;
+      const deltaY = (event.clientY - linkedPairDragState.startClientY) / linkedPairDragState.previewHeight;
+
+      if (linkedPairDragState.mode === 'move') {
+        updateLinkedPairLayout({
+          ...linkedPairDragState.startLayout,
+          x: linkedPairDragState.startLayout.x + deltaX,
+          y: linkedPairDragState.startLayout.y + deltaY
+        });
+        return;
+      }
+
+      const dominantDelta =
+        Math.abs(event.clientX - linkedPairDragState.startClientX) >=
+        Math.abs(event.clientY - linkedPairDragState.startClientY)
+          ? event.clientX - linkedPairDragState.startClientX
+          : event.clientY - linkedPairDragState.startClientY;
+      const deltaSize = dominantDelta / Math.max(1, linkedPairDragState.previewMinDimension);
+
+      updateLinkedPairLayout({
+        ...linkedPairDragState.startLayout,
+        size: linkedPairDragState.startLayout.size + deltaSize
+      });
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.pointerId !== linkedPairDragState.pointerId) return;
+      setLinkedPairDragState(null);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+    };
+  }, [linkedPairDragState, previewAspectRatio]);
+
+  useEffect(() => {
     if (!timelineDragState) return;
 
     const handlePointerMove = (event: PointerEvent) => {
@@ -921,11 +1328,9 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     };
   }, [timelineDragState, timelineDuration]);
 
-  const handleBaseVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const applyBaseVideoFile = async (file: File) => {
     const nextUrl = URL.createObjectURL(file);
-    if (baseVideoUrl) URL.revokeObjectURL(baseVideoUrl);
+    if (baseVideoUrlRef.current) URL.revokeObjectURL(baseVideoUrlRef.current);
     setBaseVideoFile(file);
     setBaseVideoUrl(nextUrl);
     setBaseMode('video');
@@ -935,6 +1340,12 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       setBaseVideoDuration(metadata.duration);
       setPreviewTime((current) => clamp(current, 0, metadata.duration));
     }
+  };
+
+  const handleBaseVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    await applyBaseVideoFile(file);
   };
 
   const handleBasePhotoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -954,8 +1365,176 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     end: Math.max(0.5, durationHint)
   });
 
+  const createBatchPhotoDraftFromFile = async (
+    file: File,
+    hash: string,
+    indexSeed: number,
+    timeline: OverlayTimeline
+  ): Promise<BatchPhotoDraft> => {
+    const url = URL.createObjectURL(file);
+    const aspectRatio = await readImageAspectRatio(url);
+    const templateTransform = activeBatchPhoto?.transform;
+    const baseTransform =
+      applyTransformToAllPhotos && templateTransform
+        ? templateTransform
+        : getDefaultTransform(aspectRatio, previewAspectRatio);
+
+    return {
+      id: `${Date.now()}-batch-${indexSeed}-${file.name}`,
+      name: file.name,
+      kind: 'image',
+      file,
+      url,
+      hash,
+      aspectRatio,
+      durationSeconds: 0,
+      transform: normalizeTransformForMedia(baseTransform, aspectRatio, previewAspectRatio),
+      crop: defaultCrop(),
+      background: defaultBackground(),
+      chromaKey: defaultChroma(),
+      timeline: normalizeTimeline(timeline)
+    };
+  };
+
+  const importIncomingVideoFramesToBatch = async (frames: VideoModeTransferFrame[]) => {
+    if (!frames.length) return;
+
+    setIsImportingVideoFrames(true);
+    setVideoFrameImportSummary('');
+
+    const importedPhotos: BatchPhotoDraft[] = [];
+    const failedFrames: string[] = [];
+    let maxImportedEnd = staticDurationSeconds;
+
+    try {
+      for (let index = 0; index < frames.length; index += 1) {
+        const frame = frames[index];
+        const fallbackName = (frame.name || '').trim() || `raw_frame_${index + 1}`;
+
+        try {
+          const file = await createFileFromImageSource(frame.image, fallbackName);
+          const hash = await computeFileHash(file);
+          const startSeconds = Math.max(0, frame.timeMs / 1000);
+          const durationSeconds = Math.max(0.1, frame.durationMs / 1000);
+          const timeline = normalizeTimeline({
+            start: startSeconds,
+            end: startSeconds + durationSeconds
+          });
+          maxImportedEnd = Math.max(maxImportedEnd, timeline.end);
+
+          const draft = await createBatchPhotoDraftFromFile(
+            file,
+            `${hash}::${frame.clipId}::${frame.frame}::${index}`,
+            index,
+            timeline
+          );
+
+          const scale = Number.isFinite(frame.scale) && frame.scale > 0 ? frame.scale : 1;
+          const width = clamp((frame.position?.width || 1) * scale, 0.05, 1);
+          const x = clamp(frame.position?.x ?? 0, 0, Math.max(0, 1 - width));
+          const y = clamp(frame.position?.y ?? 0, 0, 0.98);
+
+          draft.transform = normalizeTransformForMedia(
+            {
+              x,
+              y,
+              width,
+              height: frame.position?.height || 1
+            },
+            draft.aspectRatio,
+            previewAspectRatio
+          );
+          draft.name = file.name;
+          importedPhotos.push(draft);
+        } catch {
+          failedFrames.push(fallbackName);
+        }
+      }
+
+      if (importedPhotos.length > 0) {
+        setBatchPhotos((current) => [...current, ...importedPhotos]);
+        setActiveClip((current) => current ?? { source: 'batch', id: importedPhotos[0].id });
+        setBaseMode((current) => (current === 'video' && !baseVideoFile ? 'color' : current));
+        setStaticDurationSeconds((current) => Math.max(current, maxImportedEnd));
+      }
+
+      const messages: string[] = [];
+      if (importedPhotos.length > 0) messages.push(`Imported ${importedPhotos.length} raw frame clip(s) from Video mode.`);
+      if (failedFrames.length > 0) messages.push(`${failedFrames.length} frame(s) failed to import.`);
+      if (messages.length > 0) setVideoFrameImportSummary(messages.join(' '));
+    } finally {
+      setIsImportingVideoFrames(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!incomingVideoFrames.length) return;
+    if (lastVideoFramesSessionIdRef.current === incomingVideoFramesSessionId) return;
+    lastVideoFramesSessionIdRef.current = incomingVideoFramesSessionId;
+    void importIncomingVideoFramesToBatch(incomingVideoFrames);
+  }, [incomingVideoFrames, incomingVideoFramesSessionId, previewAspectRatio, baseVideoFile, staticDurationSeconds]);
+
+  const handleImportPuzzlesToBatch = async () => {
+    if (isImportingPuzzles) return;
+    if (!puzzles.length) {
+      alert('No puzzles available to import.');
+      return;
+    }
+
+    setIsImportingPuzzles(true);
+    try {
+      const knownHashes = new Set(batchPhotosRef.current.map((photo) => photo.hash));
+      const importedPhotos: BatchPhotoDraft[] = [];
+      const failedTitles: string[] = [];
+      const duplicateTitles: string[] = [];
+      let timelineCursor = batchPhotosRef.current.reduce(
+        (acc, photo) => Math.max(acc, normalizeTimeline(photo.timeline).end),
+        0
+      );
+      const clipDuration = Math.max(0.5, defaultPuzzleClipDurationSeconds || baseDuration);
+
+      for (let index = 0; index < puzzles.length; index += 1) {
+        const puzzle = puzzles[index];
+        const fallbackTitle = (puzzle.title || '').trim() || `Puzzle ${index + 1}`;
+        try {
+          const file = await createPuzzleCompositeFile(puzzle, index, previewAspectRatio);
+          const hash = await computeFileHash(file);
+          if (knownHashes.has(hash)) {
+            duplicateTitles.push(fallbackTitle);
+            continue;
+          }
+          knownHashes.add(hash);
+
+          const timeline: OverlayTimeline = {
+            start: timelineCursor,
+            end: timelineCursor + clipDuration
+          };
+          timelineCursor = timeline.end;
+          importedPhotos.push(await createBatchPhotoDraftFromFile(file, hash, index, timeline));
+        } catch {
+          failedTitles.push(fallbackTitle);
+        }
+      }
+
+      if (importedPhotos.length > 0) {
+        setBatchPhotos((current) => [...current, ...importedPhotos]);
+        setActiveClip((current) => current ?? { source: 'batch', id: importedPhotos[0].id });
+      }
+
+      const messages: string[] = [];
+      if (importedPhotos.length > 0) messages.push(`Imported ${importedPhotos.length} puzzle clip(s).`);
+      if (duplicateTitles.length > 0) messages.push(`${duplicateTitles.length} duplicate puzzle(s) skipped.`);
+      if (failedTitles.length > 0) messages.push(`${failedTitles.length} puzzle(s) failed to import.`);
+      if (messages.length > 0) alert(messages.join('\n'));
+    } finally {
+      setIsImportingPuzzles(false);
+    }
+  };
+
   const handleBatchPhotoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith('image/'));
+    const fileList = event.currentTarget.files;
+    const selectedFiles = fileList ? (Array.from(fileList as FileList) as File[]) : [];
+    const files = selectedFiles.filter((file) => file.type.startsWith('image/'));
     if (!files.length) return;
 
     const knownHashes = new Set(batchPhotos.map((photo) => photo.hash));
@@ -970,30 +1549,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
         continue;
       }
       knownHashes.add(hash);
-
-      const url = URL.createObjectURL(file);
-      const aspectRatio = await readImageAspectRatio(url);
-      const templateTransform = activeBatchPhoto?.transform;
-      const baseTransform =
-        applyTransformToAllPhotos && templateTransform
-          ? templateTransform
-          : getDefaultTransform(aspectRatio, previewAspectRatio);
-
-      newPhotos.push({
-        id: `${Date.now()}-batch-${index}-${file.name}`,
-        name: file.name,
-        kind: 'image',
-        file,
-        url,
-        hash,
-        aspectRatio,
-        durationSeconds: 0,
-        transform: normalizeTransformForMedia(baseTransform, aspectRatio, previewAspectRatio),
-        crop: defaultCrop(),
-        background: defaultBackground(),
-        chromaKey: defaultChroma(),
-        timeline: buildDefaultTimeline(baseDuration)
-      });
+      newPhotos.push(await createBatchPhotoDraftFromFile(file, hash, index, buildDefaultTimeline(baseDuration)));
     }
 
     if (newPhotos.length > 0) {
@@ -1006,10 +1562,102 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     }
   };
 
-  const handleOverlayUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []).filter((file) =>
-      file.type.startsWith('image/') || file.type.startsWith('video/')
+  const createLinkedPairDraft = async (
+    puzzleFile: File,
+    diffFile: File,
+    pairName: string,
+    sortKey: string,
+    indexSeed: number
+  ): Promise<LinkedPairDraft> => ({
+    id: `${Date.now()}-pair-${indexSeed}-${pairName}`,
+    name: pairName,
+    puzzleFile,
+    diffFile,
+    puzzleUrl: URL.createObjectURL(puzzleFile),
+    diffUrl: URL.createObjectURL(diffFile),
+    sortKey
+  });
+
+  const handleLinkedPairUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.currentTarget.files;
+    const selectedFiles = fileList ? (Array.from(fileList as FileList) as File[]) : [];
+    const files = selectedFiles.filter((file) => file.type.startsWith('image/'));
+    if (!files.length) return;
+
+    const groupedPairs = new Map<string, { sortKey: string; baseName: string; base?: File; diff?: File }>();
+    const duplicateEntries: string[] = [];
+
+    files.forEach((file) => {
+      const parsed = parsePuzzlePairFilename(file.name);
+      const normalizedKey = parsed.base.trim().toLowerCase();
+      if (!normalizedKey) return;
+      const existing = groupedPairs.get(normalizedKey) ?? {
+        sortKey: parsed.base,
+        baseName: parsed.base.trim(),
+        base: undefined,
+        diff: undefined
+      };
+
+      if (parsed.type === 'diff') {
+        if (existing.diff) {
+          duplicateEntries.push(file.name);
+          return;
+        }
+        existing.diff = file;
+      } else {
+        if (existing.base) {
+          duplicateEntries.push(file.name);
+          return;
+        }
+        existing.base = file;
+      }
+
+      groupedPairs.set(normalizedKey, existing);
+    });
+
+    const existingPairNames = new Set(linkedPairs.map((item) => item.sortKey.toLowerCase()));
+    const incompletePairs: string[] = [];
+    const skippedExistingPairs: string[] = [];
+    const nextPairs: LinkedPairDraft[] = [];
+
+    const sortedGroups = [...groupedPairs.values()].sort((left, right) =>
+      left.sortKey.localeCompare(right.sortKey, undefined, { numeric: true, sensitivity: 'base' })
     );
+
+    for (let index = 0; index < sortedGroups.length; index += 1) {
+      const group = sortedGroups[index];
+      if (!group.base || !group.diff) {
+        incompletePairs.push(group.baseName);
+        continue;
+      }
+      if (existingPairNames.has(group.baseName.toLowerCase())) {
+        skippedExistingPairs.push(group.baseName);
+        continue;
+      }
+      existingPairNames.add(group.baseName.toLowerCase());
+      nextPairs.push(await createLinkedPairDraft(group.base, group.diff, group.baseName, group.baseName, index));
+    }
+
+    if (nextPairs.length > 0) {
+      setLinkedPairs((current) => [...current, ...nextPairs]);
+      setActiveLinkedPairId((current) => current ?? nextPairs[0].id);
+      setActiveClip(null);
+    }
+
+    const messages: string[] = [];
+    if (nextPairs.length > 0) messages.push(`Added ${nextPairs.length} linked puzzle pair(s).`);
+    if (incompletePairs.length > 0) messages.push(`${incompletePairs.length} incomplete pair(s) skipped.`);
+    if (skippedExistingPairs.length > 0) messages.push(`${skippedExistingPairs.length} existing pair(s) skipped.`);
+    if (duplicateEntries.length > 0) messages.push(`${duplicateEntries.length} duplicate image(s) skipped.`);
+    if (messages.length > 0) {
+      alert(messages.join('\n'));
+    }
+  };
+
+  const handleOverlayUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.currentTarget.files;
+    const selectedFiles = fileList ? (Array.from(fileList as FileList) as File[]) : [];
+    const files = selectedFiles.filter((file) => file.type.startsWith('image/') || file.type.startsWith('video/'));
     if (!files.length) return;
 
     const newOverlays: OverlayDraft[] = [];
@@ -1080,6 +1728,28 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     setActiveClip((current) => (current?.source === 'batch' ? null : current));
   };
 
+  const handleRemoveLinkedPair = (id: string) => {
+    setLinkedPairs((current) => {
+      const target = current.find((item) => item.id === id);
+      if (target) {
+        URL.revokeObjectURL(target.puzzleUrl);
+        URL.revokeObjectURL(target.diffUrl);
+      }
+      return current.filter((item) => item.id !== id);
+    });
+    setActiveLinkedPairId((current) => (current === id ? null : current));
+  };
+
+  const handleClearLinkedPairs = () => {
+    linkedPairs.forEach((item) => {
+      URL.revokeObjectURL(item.puzzleUrl);
+      URL.revokeObjectURL(item.diffUrl);
+    });
+    setLinkedPairs([]);
+    setActiveLinkedPairId(null);
+    setActiveClip((current) => (current?.source === 'overlay' ? current : null));
+  };
+
   const handleClearOverlays = () => {
     overlays.forEach((item) => URL.revokeObjectURL(item.url));
     overlayVideoRefs.current = {};
@@ -1093,8 +1763,12 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   };
 
   const handleExport = async () => {
-    if (batchPhotos.length === 0) {
-      alert('Upload at least one batch image.');
+    if (editorMode === 'linked_pairs' && linkedPairs.length === 0) {
+      alert('Upload at least one linked puzzle pair before exporting.');
+      return;
+    }
+    if (editorMode === 'standard' && baseMode !== 'video' && batchPhotos.length === 0) {
+      alert('Upload at least one batch image when using a photo/color base.');
       return;
     }
     if (baseMode === 'video' && !baseVideoFile) {
@@ -1107,6 +1781,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     }
 
     const payload: OverlayVideoEditorExportPayload = {
+      editorMode,
       base: {
         mode: baseMode,
         color: baseColor,
@@ -1136,7 +1811,19 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
         background: item.background,
         chromaKey: item.chromaKey,
         timeline: normalizeTimeline(item.timeline)
-      }))
+      })),
+      linkedPairs:
+        editorMode === 'linked_pairs'
+          ? linkedPairs.map((item) => ({
+              id: item.id,
+              name: item.name,
+              puzzleFile: item.puzzleFile,
+              diffFile: item.diffFile
+            }))
+          : [],
+      linkedPairLayout: editorMode === 'linked_pairs' ? normalizedLinkedPairLayout : undefined,
+      linkedPairStyle: editorMode === 'linked_pairs' ? linkedPairStyle : undefined,
+      linkedPairExportMode: editorMode === 'linked_pairs' ? linkedPairExportMode : undefined
     };
 
     await onExport(payload);
@@ -1144,13 +1831,15 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
   const timelineTracks = useMemo(() => {
     const tracks: Array<{ source: 'batch' | 'overlay'; item: DraftMediaBase; label: string }> = [];
-    batchPhotos.forEach((item, index) => {
-      tracks.push({
-        source: 'batch',
-        item,
-        label: `Batch ${index + 1}: ${item.name}`
+    if (editorMode === 'standard') {
+      batchPhotos.forEach((item, index) => {
+        tracks.push({
+          source: 'batch',
+          item,
+          label: `Batch ${index + 1}: ${item.name}`
+        });
       });
-    });
+    }
     overlays.forEach((item, index) => {
       tracks.push({
         source: 'overlay',
@@ -1159,14 +1848,36 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       });
     });
     return tracks;
-  }, [batchPhotos, overlays]);
+  }, [batchPhotos, editorMode, overlays]);
 
   const canExport =
-    batchPhotos.length > 0 &&
+    (editorMode === 'linked_pairs' ? linkedPairs.length > 0 : baseMode === 'video' || batchPhotos.length > 0) &&
     (baseMode !== 'video' || Boolean(baseVideoFile)) &&
     (baseMode !== 'photo' || Boolean(basePhotoFile));
 
+  const exportOutputCount =
+    editorMode === 'linked_pairs'
+      ? linkedPairs.length > 0
+        ? linkedPairExportMode === 'single_video'
+          ? 1
+          : linkedPairs.length
+        : 0
+      : batchPhotos.length > 0
+        ? batchPhotos.length
+        : baseMode === 'video'
+          ? 1
+          : 0;
+  const exportButtonLabel = isExporting
+    ? 'Exporting...'
+    : exportOutputCount > 0
+      ? `Export ${exportOutputCount} Video${exportOutputCount === 1 ? '' : 's'}`
+      : 'Export Video';
+
   const previewMaxWidth = previewAspectRatio < 1 ? 460 : undefined;
+  const linkedPairBounds = useMemo(
+    () => getLinkedPairBounds(normalizedLinkedPairLayout, previewAspectRatio),
+    [normalizedLinkedPairLayout, previewAspectRatio]
+  );
 
   const previewFrameStyle: React.CSSProperties = {
     aspectRatio: previewAspectRatio.toString(),
@@ -1174,18 +1885,19 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   };
 
   return (
-    <div className="w-full max-w-7xl mx-auto p-4 md:p-6">
+    <div className="w-full max-w-7xl mx-auto p-3 sm:p-4 md:p-6">
       <div className="bg-white border-4 border-black rounded-2xl shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] overflow-hidden">
-        <div className="bg-[#A7F3D0] p-4 md:p-6 border-b-4 border-black flex items-center justify-between gap-4">
-          <div className="flex items-center space-x-4">
+        <div className="bg-[#A7F3D0] border-b-4 border-black p-4 md:p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3 sm:items-center sm:gap-4">
             <button
               onClick={onBack}
               className="p-2 bg-white border-2 border-black rounded-lg hover:bg-black hover:text-white transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
             >
               <ArrowLeft size={24} strokeWidth={3} />
             </button>
-            <div>
-              <h2 className="text-2xl md:text-3xl font-black font-display uppercase tracking-tight text-black">
+            <div className="min-w-0">
+              <h2 className="text-xl sm:text-2xl md:text-3xl font-black font-display uppercase tracking-tight text-black">
                 Overlay Editor+
               </h2>
               <p className="text-xs md:text-sm font-bold text-slate-700 uppercase tracking-wide">
@@ -1193,15 +1905,39 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
               </p>
             </div>
           </div>
-          <div className="px-3 py-2 bg-black text-white font-bold rounded-lg uppercase tracking-wider text-xs md:text-sm">
-            Worker + WebCodecs
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+            <div className="px-3 py-2 bg-black text-white font-bold rounded-lg uppercase tracking-wider text-xs md:text-sm">
+              Worker + WebCodecs
+            </div>
+          </div>
           </div>
         </div>
 
         <div className="p-4 md:p-6 space-y-6">
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-              <div className="flex items-center justify-between">
+              <div className="space-y-2 pb-3 border-b-2 border-black">
+                <label className="text-xs font-black uppercase tracking-wide">Creation Mode</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setEditorMode('standard')}
+                    className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                      editorMode === 'standard' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    Standard Overlay
+                  </button>
+                  <button
+                    onClick={() => setEditorMode('linked_pairs')}
+                    className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                      editorMode === 'linked_pairs' ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    Linked Puzzle Pairs
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
                   <Video size={18} />
                   Base Source
@@ -1209,7 +1945,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                 <span className="text-xs font-black uppercase text-slate-600">{baseMode}</span>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <button
                   onClick={() => setBaseMode('video')}
                   className={`px-2 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
@@ -1258,7 +1994,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
               {baseMode === 'video' && (
                 <div className="space-y-2">
-                  <label className="inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer">
+                  <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
                     <Upload size={16} />
                     <span>Upload Base Video</span>
                     <input type="file" accept="video/*" className="hidden" onChange={handleBaseVideoUpload} />
@@ -1273,7 +2009,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
               {baseMode === 'photo' && (
                 <div className="space-y-2">
-                  <label className="inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer">
+                  <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
                     <Upload size={16} />
                     <span>Upload Base Photo</span>
                     <input type="file" accept="image/*" className="hidden" onChange={handleBasePhotoUpload} />
@@ -1329,70 +2065,166 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
             </div>
 
             <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-              <div className="flex items-center justify-between">
-                <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
-                  <ImagePlus size={18} />
-                  Batch Images
-                </label>
-                <span className="text-xs font-black uppercase text-slate-600">{batchPhotos.length} selected</span>
-              </div>
-              <label className="inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer">
-                <Upload size={16} />
-                <span>Upload Batch Photos</span>
-                <input type="file" accept="image/*" multiple className="hidden" onChange={handleBatchPhotoUpload} />
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={handleClearBatchPhotos}
-                  disabled={batchPhotos.length === 0}
-                  className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Clear Batch
-                </button>
-                <button
-                  onClick={() =>
-                    activeClip?.source === 'batch' &&
-                    updateActiveMedia((item) => ({
-                      ...item,
-                      background: {
-                        ...item.background,
-                        enabled: !item.background.enabled
+              {editorMode === 'standard' ? (
+                <>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
+                      <ImagePlus size={18} />
+                      Batch Images
+                    </label>
+                    <span className="text-xs font-black uppercase text-slate-600">{batchPhotos.length} selected</span>
+                  </div>
+                  <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
+                    <Upload size={16} />
+                    <span>Upload Batch Photos</span>
+                    <input type="file" accept="image/*" multiple className="hidden" onChange={handleBatchPhotoUpload} />
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleClearBatchPhotos}
+                      disabled={batchPhotos.length === 0}
+                      className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Clear Batch
+                    </button>
+                    <button
+                      onClick={() => void handleImportPuzzlesToBatch()}
+                      disabled={isImportingPuzzles || puzzles.length === 0}
+                      className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-[#A7F3D0] disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isImportingPuzzles ? 'Importing...' : `Import ${puzzles.length} Puzzle${puzzles.length === 1 ? '' : 's'}`}
+                    </button>
+                    <button
+                      onClick={() =>
+                        activeClip?.source === 'batch' &&
+                        updateActiveMedia((item) => ({
+                          ...item,
+                          background: {
+                            ...item.background,
+                            enabled: !item.background.enabled
+                          }
+                        }))
                       }
-                    }))
-                  }
-                  disabled={activeClip?.source !== 'batch'}
-                  className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {activeBatchPhoto?.background.enabled ? 'BG: ON' : 'Add BG'}
-                </button>
-                <button
-                  onClick={() =>
-                    activeClip?.source === 'batch' &&
-                    updateActiveMedia((item) => ({
-                      ...item,
-                      crop: defaultCrop()
-                    }))
-                  }
-                  disabled={activeClip?.source !== 'batch'}
-                  className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Reset Crop
-                </button>
-              </div>
-              <p className="text-[10px] font-black uppercase text-slate-600">
-                One output video will be exported per batch image.
-              </p>
+                      disabled={activeClip?.source !== 'batch'}
+                      className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {activeBatchPhoto?.background.enabled ? 'BG: ON' : 'Add BG'}
+                    </button>
+                    <button
+                      onClick={() =>
+                        activeClip?.source === 'batch' &&
+                        updateActiveMedia((item) => ({
+                          ...item,
+                          crop: defaultCrop()
+                        }))
+                      }
+                      disabled={activeClip?.source !== 'batch'}
+                      className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Reset Crop
+                    </button>
+                  </div>
+                  {(isImportingVideoFrames || videoFrameImportSummary) && (
+                    <div className="text-[10px] font-black uppercase text-slate-700 bg-[#EEF9FF] border-2 border-black rounded-lg px-3 py-2">
+                      {isImportingVideoFrames ? 'Importing raw clips from Video mode...' : videoFrameImportSummary}
+                    </div>
+                  )}
+                  <p className="text-[10px] font-black uppercase text-slate-600">
+                    {baseMode === 'video' && batchPhotos.length === 0
+                      ? 'No batch image selected: export will render one edited base video.'
+                      : 'One output video will be exported per batch image.'}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
+                      <Columns2 size={18} />
+                      Puzzle Pairs
+                    </label>
+                    <span className="text-xs font-black uppercase text-slate-600">{linkedPairs.length} paired</span>
+                  </div>
+                  <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
+                    <Upload size={16} />
+                    <span>Upload Puzzle + Answer Images</span>
+                    <input type="file" accept="image/*" multiple className="hidden" onChange={handleLinkedPairUpload} />
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleClearLinkedPairs}
+                      disabled={linkedPairs.length === 0}
+                      className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Clear Pairs
+                    </button>
+                    <button
+                      onClick={() => {
+                        setLinkedPairLayout(createDefaultLinkedPairLayout());
+                        setLinkedPairStyle(createDefaultLinkedPairStyle());
+                        setActiveClip(null);
+                      }}
+                      className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100"
+                    >
+                      Reset Pair Frame
+                    </button>
+                  </div>
+                  <div className="space-y-3 pt-1 border-t-2 border-black">
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Linked Gap: {(normalizedLinkedPairLayout.gap * 100).toFixed(1)}%</label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={0.3}
+                        step={0.005}
+                        value={normalizedLinkedPairLayout.gap}
+                        onChange={(event) =>
+                          updateLinkedPairLayout({
+                            ...normalizedLinkedPairLayout,
+                            gap: Number(event.target.value)
+                          })
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Export Style</label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button
+                          onClick={() => setLinkedPairExportMode('one_per_pair')}
+                          className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                            linkedPairExportMode === 'one_per_pair' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                          }`}
+                        >
+                          One Video Per Pair
+                        </button>
+                        <button
+                          onClick={() => setLinkedPairExportMode('single_video')}
+                          className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                            linkedPairExportMode === 'single_video' ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                          }`}
+                        >
+                          All Pairs In One
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-[10px] font-black uppercase text-slate-600">
+                    Images are paired by filename. Files ending in <code>diff</code> become the answer frame; the matching base
+                    name becomes the puzzle frame.
+                  </p>
+                </>
+              )}
             </div>
 
             <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
                   <Layers size={18} />
                   Extra Overlays
                 </label>
                 <span className="text-xs font-black uppercase text-slate-600">{overlays.length} selected</span>
               </div>
-              <label className="inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer">
+              <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
                 <Upload size={16} />
                 <span>Add Photos/Videos</span>
                 <input type="file" accept="image/*,video/*" multiple className="hidden" onChange={handleOverlayUpload} />
@@ -1422,7 +2254,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                 <span className="text-xs font-black uppercase text-slate-600">{selectedPhotoPositionLabel}</span>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
                 <button
                   onClick={() => setIsPreviewPlaying((value) => !value)}
                   className="inline-flex items-center gap-2 px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100"
@@ -1430,7 +2262,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                   {isPreviewPlaying ? <Pause size={14} /> : <Play size={14} />}
                   <span>{isPreviewPlaying ? 'Pause' : 'Play'}</span>
                 </button>
-                <div className="flex-1 min-w-[220px]">
+                <div className="w-full min-w-0 flex-1">
                   <input
                     type="range"
                     min={0}
@@ -1441,7 +2273,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                     className="w-full h-4 border-2 border-black rounded-full accent-black"
                   />
                 </div>
-                <div className="text-xs font-black uppercase bg-white border-2 border-black rounded-lg px-3 py-2 tabular-nums">
+                <div className="w-full rounded-lg border-2 border-black bg-white px-3 py-2 text-center text-xs font-black uppercase tabular-nums sm:w-auto">
                   {previewTime.toFixed(2)}s / {timelineDuration.toFixed(2)}s
                 </div>
               </div>
@@ -1471,6 +2303,87 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                 {baseMode === 'photo' && !basePhotoUrl && (
                   <div className="absolute inset-0 flex items-center justify-center text-white font-black uppercase tracking-wide text-sm">
                     Upload a base photo
+                  </div>
+                )}
+
+                {editorMode === 'linked_pairs' && previewLinkedPair && (
+                  <div
+                    onPointerDown={(event) => {
+                      if (isPreviewColorPickerActive) return;
+                      const rect = previewRef.current?.getBoundingClientRect();
+                      if (!rect) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setActiveClip(null);
+                      setActiveLinkedPairId(previewLinkedPair.id);
+                      setLinkedPairDragState({
+                        pointerId: event.pointerId,
+                        mode: 'move',
+                        startClientX: event.clientX,
+                        startClientY: event.clientY,
+                        startLayout: normalizedLinkedPairLayout,
+                        previewWidth: Math.max(1, rect.width),
+                        previewHeight: Math.max(1, rect.height),
+                        previewMinDimension: Math.max(1, Math.min(rect.width, rect.height))
+                      });
+                    }}
+                    className={`absolute ${!activeClip ? 'cursor-move active:cursor-grabbing' : 'cursor-pointer'}`}
+                    style={{
+                      ...linkedPairBounds.container,
+                      touchAction: 'none'
+                    }}
+                  >
+                    {[
+                      { key: 'puzzle', label: 'Puzzle', src: previewLinkedPair.puzzleUrl, style: linkedPairBounds.puzzle },
+                      { key: 'diff', label: 'Answer', src: previewLinkedPair.diffUrl, style: linkedPairBounds.diff }
+                    ].map((panel) => (
+                      <div
+                        key={panel.key}
+                        className="absolute overflow-hidden bg-[#F8FAFC]"
+                        style={{
+                          ...panel.style,
+                          borderStyle: 'solid',
+                          borderWidth: `${linkedPairStyle.outlineWidth}px`,
+                          borderColor: linkedPairStyle.outlineColor,
+                          borderRadius: `${linkedPairStyle.cornerRadius}px`,
+                          boxSizing: 'border-box'
+                        }}
+                      >
+                        <div className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded bg-black/80 text-white text-[9px] font-black uppercase tracking-wide">
+                          {panel.label}
+                        </div>
+                        <img
+                          src={panel.src}
+                          alt={`${previewLinkedPair.name} ${panel.label}`}
+                          className="absolute inset-0 w-full h-full object-contain pointer-events-none select-none"
+                          draggable={false}
+                        />
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onPointerDown={(event) => {
+                        const rect = previewRef.current?.getBoundingClientRect();
+                        if (!rect) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setActiveClip(null);
+                        setActiveLinkedPairId(previewLinkedPair.id);
+                        setLinkedPairDragState({
+                          pointerId: event.pointerId,
+                          mode: 'resize',
+                          startClientX: event.clientX,
+                          startClientY: event.clientY,
+                          startLayout: normalizedLinkedPairLayout,
+                          previewWidth: Math.max(1, rect.width),
+                          previewHeight: Math.max(1, rect.height),
+                          previewMinDimension: Math.max(1, Math.min(rect.width, rect.height))
+                        });
+                      }}
+                      className="absolute -bottom-2 -right-2 z-20 h-6 w-6 rounded-full border-2 border-black bg-white text-[10px] font-black"
+                    >
+                      <Move size={10} className="mx-auto" />
+                    </button>
                   </div>
                 )}
 
@@ -1580,65 +2493,256 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
               <div className="flex flex-wrap items-center gap-2">
                 <button
-                  onClick={handleResetActivePosition}
-                  disabled={!activeMedia}
+                  onClick={() => {
+                    if (editorMode === 'linked_pairs') {
+                      setActiveClip(null);
+                      updateLinkedPairLayout(createDefaultLinkedPairLayout());
+                      setLinkedPairStyle(createDefaultLinkedPairStyle());
+                      return;
+                    }
+                    handleResetActivePosition();
+                  }}
+                  disabled={editorMode === 'standard' && !activeMedia}
                   className="inline-flex items-center gap-2 px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <RotateCcw size={14} />
-                  <span>Reset Position</span>
+                  <span>{editorMode === 'linked_pairs' ? 'Reset Pair Frame' : 'Reset Position'}</span>
                 </button>
-                <button
-                  onClick={() => setApplyTransformToAllPhotos((value) => !value)}
-                  className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase transition-colors ${
-                    applyTransformToAllPhotos ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                  }`}
-                >
-                  {applyTransformToAllPhotos ? 'Sync Batch: ON' : 'Sync Batch: OFF'}
-                </button>
+                {editorMode === 'standard' ? (
+                  <button
+                    onClick={() => setApplyTransformToAllPhotos((value) => !value)}
+                    className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase transition-colors ${
+                      applyTransformToAllPhotos ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    {applyTransformToAllPhotos ? 'Sync Batch: ON' : 'Sync Batch: OFF'}
+                  </button>
+                ) : (
+                  <span className="px-3 py-2 bg-[#FFF8D6] border-2 border-black rounded-lg text-[10px] font-black uppercase">
+                    Drag to move. Drag handle to resize linked squares.
+                  </span>
+                )}
               </div>
             </div>
 
             <div className="space-y-4">
-              <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                <h3 className="text-lg font-black uppercase tracking-wide">Batch Images</h3>
-                <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
-                  {batchPhotos.map((item, index) => (
-                    <div
-                      key={item.id}
-                      className={`p-2 border-2 border-black rounded-lg flex items-center gap-2 ${
-                        activeClip?.source === 'batch' && activeClip.id === item.id
-                          ? 'bg-[#A7F3D0] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                          : 'bg-white'
-                      }`}
-                    >
-                      <button
-                        onClick={() => setActiveClip({ source: 'batch', id: item.id })}
-                        className="flex-1 min-w-0 flex items-center gap-2 text-left"
+              {editorMode === 'standard' ? (
+                <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                  <h3 className="text-lg font-black uppercase tracking-wide">Batch Images</h3>
+                  <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
+                    {batchPhotos.map((item, index) => (
+                      <div
+                        key={item.id}
+                        className={`p-2 border-2 border-black rounded-lg flex items-center gap-2 ${
+                          activeClip?.source === 'batch' && activeClip.id === item.id
+                            ? 'bg-[#A7F3D0] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                            : 'bg-white'
+                        }`}
                       >
-                        <img src={item.url} alt={item.name} className="w-12 h-12 object-cover border-2 border-black rounded-md" />
-                        <div className="min-w-0">
-                          <div className="text-xs font-black uppercase truncate">{`${index + 1}. ${item.name}`}</div>
-                          <div className="text-[10px] font-bold uppercase text-slate-600">
-                            {`${item.timeline.start.toFixed(1)}s - ${item.timeline.end.toFixed(1)}s`}
+                        <button
+                          onClick={() => setActiveClip({ source: 'batch', id: item.id })}
+                          className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                        >
+                          <img src={item.url} alt={item.name} className="w-12 h-12 object-cover border-2 border-black rounded-md" />
+                          <div className="min-w-0">
+                            <div className="text-xs font-black uppercase truncate">{`${index + 1}. ${item.name}`}</div>
+                            <div className="text-[10px] font-bold uppercase text-slate-600">
+                              {`${item.timeline.start.toFixed(1)}s - ${item.timeline.end.toFixed(1)}s`}
+                            </div>
                           </div>
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => handleRemoveBatchPhoto(item.id)}
-                        className="p-1.5 bg-white border-2 border-black rounded-md hover:bg-red-50"
-                        aria-label={`Remove ${item.name}`}
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  ))}
-                  {batchPhotos.length === 0 && (
-                    <div className="text-xs font-bold uppercase text-slate-500 border-2 border-dashed border-slate-300 rounded-lg p-3 text-center">
-                      Upload batch images.
-                    </div>
-                  )}
+                        </button>
+                        <button
+                          onClick={() => handleRemoveBatchPhoto(item.id)}
+                          className="p-1.5 bg-white border-2 border-black rounded-md hover:bg-red-50"
+                          aria-label={`Remove ${item.name}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))}
+                    {batchPhotos.length === 0 && (
+                      <div className="text-xs font-bold uppercase text-slate-500 border-2 border-dashed border-slate-300 rounded-lg p-3 text-center">
+                        Upload batch images.
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-black uppercase tracking-wide">Linked Pairs</h3>
+                    <span className="text-xs font-black uppercase text-slate-600">{linkedPairs.length} total</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Pair X: {(normalizedLinkedPairLayout.x * 100).toFixed(1)}%</label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.005}
+                        value={normalizedLinkedPairLayout.x}
+                        onChange={(event) =>
+                          updateLinkedPairLayout({
+                            ...normalizedLinkedPairLayout,
+                            x: Number(event.target.value)
+                          })
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Pair Y: {(normalizedLinkedPairLayout.y * 100).toFixed(1)}%</label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.005}
+                        value={normalizedLinkedPairLayout.y}
+                        onChange={(event) =>
+                          updateLinkedPairLayout({
+                            ...normalizedLinkedPairLayout,
+                            y: Number(event.target.value)
+                          })
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Square Size: {(normalizedLinkedPairLayout.size * 100).toFixed(1)}%</label>
+                      <input
+                        type="range"
+                        min={0.08}
+                        max={0.48}
+                        step={0.005}
+                        value={normalizedLinkedPairLayout.size}
+                        onChange={(event) =>
+                          updateLinkedPairLayout({
+                            ...normalizedLinkedPairLayout,
+                            size: Number(event.target.value)
+                          })
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Outline Thickness: {linkedPairStyle.outlineWidth.toFixed(0)}px</label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={24}
+                        step={1}
+                        value={linkedPairStyle.outlineWidth}
+                        onChange={(event) =>
+                          updateLinkedPairStyle({
+                            ...linkedPairStyle,
+                            outlineWidth: Number(event.target.value)
+                          })
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Corner Roundness: {linkedPairStyle.cornerRadius.toFixed(0)}px</label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={48}
+                        step={1}
+                        value={linkedPairStyle.cornerRadius}
+                        onChange={(event) =>
+                          updateLinkedPairStyle({
+                            ...linkedPairStyle,
+                            cornerRadius: Number(event.target.value)
+                          })
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-black uppercase mb-1">Outline Color</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={linkedPairStyle.outlineColor}
+                          onChange={(event) =>
+                            updateLinkedPairStyle({
+                              ...linkedPairStyle,
+                              outlineColor: event.target.value
+                            })
+                          }
+                          className="w-10 h-10 border-2 border-black rounded bg-white"
+                        />
+                        <input
+                          type="text"
+                          value={linkedPairStyle.outlineColor}
+                          onChange={(event) =>
+                            updateLinkedPairStyle({
+                              ...linkedPairStyle,
+                              outlineColor: event.target.value
+                            })
+                          }
+                          className="flex-1 px-3 py-2 border-2 border-black rounded-lg font-bold text-sm bg-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="text-[10px] font-black uppercase text-slate-600 bg-[#EEF9FF] border-2 border-black rounded-lg px-3 py-3">
+                      Landscape layouts stay side by side. Vertical layouts stack top and bottom automatically. In single-video export,
+                      clicking a pair also seeks the preview to that pair's slot.
+                    </div>
+                  </div>
+                  <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
+                    {linkedPairs.map((item, index) => {
+                      const isSelected = activeLinkedPairId === item.id && !activeClip;
+                      const segment = linkedPairSegments[index];
+                      return (
+                        <div
+                          key={item.id}
+                          className={`p-2 border-2 border-black rounded-lg flex items-center gap-2 ${
+                            isSelected ? 'bg-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]' : 'bg-white'
+                          }`}
+                        >
+                          <button
+                            onClick={() => {
+                              setActiveLinkedPairId(item.id);
+                              setActiveClip(null);
+                              if (linkedPairExportMode === 'single_video' && segment) {
+                                setPreviewTime(segment.start);
+                              }
+                            }}
+                            className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                          >
+                            <div className="flex items-center gap-1">
+                              <img src={item.puzzleUrl} alt={`${item.name} puzzle`} className="w-10 h-10 object-cover border-2 border-black rounded-md" />
+                              <img src={item.diffUrl} alt={`${item.name} answer`} className="w-10 h-10 object-cover border-2 border-black rounded-md" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-xs font-black uppercase truncate">{`${index + 1}. ${item.name}`}</div>
+                              <div className="text-[10px] font-bold uppercase text-slate-600">
+                                {linkedPairExportMode === 'single_video' && segment
+                                  ? `${segment.start.toFixed(1)}s - ${segment.end.toFixed(1)}s`
+                                  : 'full clip duration'}
+                              </div>
+                            </div>
+                          </button>
+                          <button
+                            onClick={() => handleRemoveLinkedPair(item.id)}
+                            className="p-1.5 bg-white border-2 border-black rounded-md hover:bg-red-50"
+                            aria-label={`Remove ${item.name}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {linkedPairs.length === 0 && (
+                      <div className="text-xs font-bold uppercase text-slate-500 border-2 border-dashed border-slate-300 rounded-lg p-3 text-center">
+                        Upload matched puzzle and answer images.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
                 <h3 className="text-lg font-black uppercase tracking-wide">Overlays</h3>
@@ -1700,7 +2804,9 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
             {!activeMedia && (
               <div className="text-xs font-bold uppercase text-slate-500 border-2 border-dashed border-slate-300 rounded-lg p-3 text-center">
-                Select a batch image or overlay to edit crop, background, chroma key and timeline.
+                {editorMode === 'linked_pairs'
+                  ? 'Select an overlay to edit it. Linked pair layout is controlled from the linked pairs panel.'
+                  : 'Select a batch image or overlay to edit crop, background, chroma key and timeline.'}
               </div>
             )}
 
@@ -2094,7 +3200,9 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
               })}
               {timelineTracks.length === 0 && (
                 <div className="text-xs font-bold uppercase text-slate-500 border-2 border-dashed border-slate-300 rounded-lg p-3 text-center">
-                  Add batch photos and overlays to build the timeline.
+                  {editorMode === 'linked_pairs'
+                    ? 'Linked pairs render automatically. Add overlays if you want timed extra media.'
+                    : 'Add overlays, or add batch images to export multiple outputs.'}
                 </div>
               )}
             </div>
@@ -2102,7 +3210,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
           <div className="space-y-4 p-4 bg-[#EEF9FF] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
             <h3 className="text-lg font-black uppercase tracking-wide">Export Settings</h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-black uppercase mb-1">Resolution</label>
                 <select
@@ -2159,18 +3267,18 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
             </div>
           </div>
 
-          <div className="pt-4 border-t-4 border-black flex justify-end">
+          <div className="pt-4 border-t-4 border-black flex justify-stretch sm:justify-end">
             <button
               onClick={handleExport}
               disabled={isExporting || !canExport}
-              className={`px-8 py-4 border-4 border-black rounded-xl text-lg font-black uppercase tracking-wider transition-all flex items-center gap-2 ${
+              className={`w-full justify-center px-6 py-4 border-4 border-black rounded-xl text-base sm:text-lg font-black uppercase tracking-wider transition-all flex items-center gap-2 sm:w-auto ${
                 isExporting || !canExport
                   ? 'bg-slate-300 text-slate-600 cursor-not-allowed'
                   : 'bg-black text-white hover:bg-slate-900 shadow-[4px_4px_0px_0px_rgba(255,255,255,1)]'
               }`}
             >
               <Download size={20} strokeWidth={3} />
-              <span>{isExporting ? 'Exporting...' : `Export ${batchPhotos.length || ''} Videos`}</span>
+              <span>{exportButtonLabel}</span>
             </button>
           </div>
         </div>

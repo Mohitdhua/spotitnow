@@ -1,8 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowLeft, RotateCcw, ZoomIn, ZoomOut, CheckCircle, XCircle, Play } from 'lucide-react';
+import { ArrowLeft, CheckCircle, Play, Volume2, VolumeX, XCircle } from 'lucide-react';
 import { Puzzle, Region } from '../types';
 import confetti from 'canvas-confetti';
+import {
+  loadGameAudioMuted,
+  playGameSound,
+  primeGameAudio,
+  saveGameAudioMuted
+} from '../services/gameAudio';
 
 interface GameCanvasProps {
   puzzle: Puzzle;
@@ -20,11 +26,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
   const [gameOver, setGameOver] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [isFailed, setIsFailed] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [soundMuted, setSoundMuted] = useState(() => loadGameAudioMuted());
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const lastCountdownTickRef = useRef<number | null>(null);
 
   // Reset state when puzzle changes
   useEffect(() => {
@@ -36,6 +42,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
     setShowModal(false);
     setIsFailed(false);
     setClickFeedback(null);
+    lastCountdownTickRef.current = null;
   }, [puzzle]);
 
   // Timer
@@ -43,6 +50,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
     if (gameOver) return;
     
     if (timeLeft <= 0) {
+      playGameSound('lose');
       setIsFailed(true);
       setGameOver(true);
       setShowModal(true);
@@ -60,6 +68,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
     if (isFailed) return; // Don't trigger win if failed
     
     if (foundRegions.size === puzzle.regions.length && !gameOver) {
+      playGameSound('win');
       setGameOver(true);
       
       confetti({
@@ -86,6 +95,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
       }
     }
   }, [gameOver, isFailed, hasNextLevel, onNextLevel, foundRegions.size, puzzle.regions.length, showModal]);
+
+  useEffect(() => {
+    if (gameOver || timeLeft > 10 || timeLeft <= 0) {
+      if (timeLeft > 10 || timeLeft <= 0) {
+        lastCountdownTickRef.current = null;
+      }
+      return;
+    }
+
+    if (lastCountdownTickRef.current === timeLeft) return;
+
+    lastCountdownTickRef.current = timeLeft;
+    playGameSound('countdown');
+  }, [gameOver, timeLeft]);
 
   // Draw canvas
   useEffect(() => {
@@ -133,6 +156,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    void primeGameAudio();
+
     const rect = canvas.getBoundingClientRect();
     const clickX = (e.clientX - rect.left) / rect.width;
     const clickY = (e.clientY - rect.top) / rect.height;
@@ -149,6 +174,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
     if (found) {
       setFoundRegions(prev => new Set(prev).add(found.id));
       setClickFeedback({ x: e.clientX, y: e.clientY, type: 'success', id: Date.now() });
+      playGameSound('success');
     } else {
       const newMistakes = mistakes + 1;
       setMistakes(newMistakes);
@@ -157,6 +183,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
       // Reduce time on mistake? Optional, but adds pressure. 
       // For now, just keeping the mistake counter logic.
       if (newMistakes >= 5) { // Reduced max mistakes to 5 for 90s game
+        playGameSound('lose');
         setIsFailed(true);
         setGameOver(true);
         setShowModal(true);
@@ -169,6 +196,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
           }
         });
         setMissedRegions(missed);
+      } else {
+        playGameSound('error');
       }
     }
   };
@@ -179,40 +208,52 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const toggleSound = () => {
+    const nextMuted = !soundMuted;
+    setSoundMuted(nextMuted);
+    saveGameAudioMuted(nextMuted);
+
+    if (!nextMuted) {
+      void primeGameAudio();
+      playGameSound('success');
+    }
+  };
+
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-[#FFFDF5] p-4 lg:p-8 overflow-hidden">
+    <div className="flex min-h-[100dvh] w-full flex-col items-center justify-center overflow-x-hidden bg-[#FFFDF5] p-3 sm:p-4 lg:p-8">
       {/* Game Container - 16:9 Aspect Ratio */}
-      <div className="relative w-full max-w-[1600px] aspect-video bg-white border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] rounded-2xl overflow-hidden flex flex-col">
+      <div className="relative flex w-full max-w-[1600px] min-h-[calc(100dvh-1.5rem)] flex-col overflow-hidden rounded-2xl border-4 border-black bg-white shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] lg:min-h-0 lg:aspect-video">
         
         {/* HUD Header */}
-        <div className="h-20 bg-[#FFD93D] border-b-4 border-black flex items-center justify-between px-6 shrink-0 z-20">
-          <div className="flex items-center space-x-4">
+        <div className="z-20 shrink-0 border-b-4 border-black bg-[#FFD93D] px-4 py-4 sm:px-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="flex min-w-0 items-start gap-3 sm:gap-4">
             <button 
               onClick={onExit}
               className="p-2 bg-white border-2 border-black rounded-lg hover:bg-black hover:text-white transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
             >
               <ArrowLeft size={24} strokeWidth={3} />
             </button>
-            <div className="flex flex-col">
-              <h2 className="text-2xl font-black font-display uppercase leading-none tracking-tight text-black">
+            <div className="min-w-0">
+              <h2 className="break-words pr-2 text-lg font-black font-display uppercase leading-none tracking-tight text-black sm:text-2xl">
                 {puzzle.title || `Puzzle`}
               </h2>
-              <span className="text-xs font-bold uppercase tracking-widest opacity-70 text-black">
+              <span className="mt-1 block text-[10px] font-bold uppercase tracking-widest opacity-70 text-black sm:text-xs">
                 Level {foundRegions.size} / {puzzle.regions.length} Found
               </span>
             </div>
           </div>
 
           {/* Timer & Score */}
-          <div className="flex items-center space-x-6">
-            <div className="flex flex-col items-end">
-              <div className="flex items-center space-x-2 bg-black px-4 py-1 rounded-full border-2 border-black">
+            <div className="flex w-full flex-wrap items-center justify-between gap-3 md:w-auto md:justify-end md:gap-6">
+            <div className="flex min-w-[180px] flex-1 flex-col md:flex-none md:items-end">
+              <div className="flex items-center space-x-2 rounded-full border-2 border-black bg-black px-3 py-1 sm:px-4">
                 <div className={`w-3 h-3 rounded-full ${timeLeft <= 10 ? 'bg-[#FF6B6B] animate-pulse' : 'bg-[#4ECDC4]'}`} />
-                <span className={`font-mono text-xl font-bold ${timeLeft <= 10 ? 'text-[#FF6B6B]' : 'text-white'}`}>
+                <span className={`font-mono text-lg font-bold sm:text-xl ${timeLeft <= 10 ? 'text-[#FF6B6B]' : 'text-white'}`}>
                   {formatTime(timeLeft)}
                 </span>
               </div>
-              <div className="w-32 h-3 bg-white border-2 border-black rounded-full mt-1 overflow-hidden shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+              <div className="mt-1 h-3 w-full max-w-[200px] overflow-hidden rounded-full border-2 border-black bg-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] md:w-32">
                 <motion.div 
                   className="h-full bg-[#FF6B6B]"
                   initial={{ width: "100%" }}
@@ -222,24 +263,37 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
               </div>
             </div>
 
-            <div className="flex items-center space-x-2 bg-white border-2 border-black px-4 py-2 rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+            <div className="flex items-center space-x-2 rounded-xl border-2 border-black bg-white px-3 py-2 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:px-4">
               <XCircle size={24} className="text-[#FF6B6B] fill-current stroke-black stroke-2" />
-              <span className="font-black text-2xl font-mono text-black">{mistakes}</span>
+              <span className="font-mono text-xl font-black text-black sm:text-2xl">{mistakes}</span>
             </div>
+
+            <button
+              type="button"
+              onClick={toggleSound}
+              className={`inline-flex items-center gap-2 rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase tracking-[0.18em] shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-colors sm:px-4 ${
+                soundMuted ? 'bg-white text-slate-700 hover:bg-slate-100' : 'bg-[#A7F3D0] text-black hover:bg-[#86EFAC]'
+              }`}
+              title={soundMuted ? 'Enable sound effects' : 'Mute sound effects'}
+            >
+              {soundMuted ? <VolumeX size={18} strokeWidth={2.8} /> : <Volume2 size={18} strokeWidth={2.8} />}
+              <span>{soundMuted ? 'Sound Off' : 'Sound On'}</span>
+            </button>
           </div>
+        </div>
         </div>
 
         {/* Game Area */}
-        <div className="flex-1 relative bg-[#4ECDC4] overflow-hidden flex items-center justify-center p-4">
+        <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-[#4ECDC4] p-3 sm:p-4">
           {/* Background Pattern */}
           <div className="absolute inset-0 opacity-10" 
                style={{ backgroundImage: 'radial-gradient(circle, #000 2px, transparent 2px)', backgroundSize: '24px 24px' }} 
           />
 
-          <div className="relative w-full h-full flex gap-4 items-center justify-center" ref={containerRef}>
+          <div className="relative flex h-full w-full flex-col items-stretch justify-center gap-3 overflow-auto lg:flex-row lg:items-center lg:gap-4">
             {/* Original Image */}
-            <div className="relative h-full flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] group">
-              <div className="absolute top-0 left-0 bg-black text-white px-4 py-1 font-black uppercase tracking-wider border-b-4 border-r-4 border-black rounded-br-xl z-10 text-sm">
+            <div className="group relative min-h-[220px] w-full overflow-hidden rounded-xl border-4 border-black bg-white shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] sm:min-h-[300px] lg:h-full lg:flex-1">
+              <div className="absolute top-0 left-0 z-10 rounded-br-xl border-r-4 border-b-4 border-black bg-black px-3 py-1 text-xs font-black uppercase tracking-wider text-white sm:px-4 sm:text-sm">
                 Original
               </div>
               <img 
@@ -251,10 +305,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
 
             {/* Interactive Image */}
             <div 
-              className="relative h-full flex-1 bg-white border-4 border-black rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] cursor-crosshair group active:cursor-grabbing"
+              className="group relative min-h-[220px] w-full cursor-crosshair overflow-hidden rounded-xl border-4 border-black bg-white shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] active:cursor-grabbing sm:min-h-[300px] lg:h-full lg:flex-1"
               onClick={handleCanvasClick}
             >
-              <div className="absolute top-0 left-0 bg-[#FF6B6B] text-black px-4 py-1 font-black uppercase tracking-wider border-b-4 border-r-4 border-black rounded-br-xl z-10 animate-pulse text-sm">
+              <div className="absolute top-0 left-0 z-10 animate-pulse rounded-br-xl border-r-4 border-b-4 border-black bg-[#FF6B6B] px-3 py-1 text-xs font-black uppercase tracking-wider text-black sm:px-4 sm:text-sm">
                 Spot Differences
               </div>
               
@@ -286,7 +340,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
                       initial={{ scale: 0, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
                       exit={{ scale: 1.5, opacity: 0 }}
-                      className={`fixed w-16 h-16 -ml-8 -mt-8 rounded-full border-4 border-black flex items-center justify-center z-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] ${
+                      className={`fixed z-50 flex h-12 w-12 -ml-6 -mt-6 items-center justify-center rounded-full border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:h-16 sm:w-16 sm:-ml-8 sm:-mt-8 ${
                         clickFeedback.type === 'success' 
                           ? 'bg-[#4ECDC4] text-black' 
                           : 'bg-[#FF6B6B] text-black'
@@ -306,11 +360,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
         </div>
 
         {/* Progress Footer */}
-        <div className="h-16 bg-white border-t-4 border-black flex items-center justify-between px-6 shrink-0 z-20">
-          <div className="flex items-center space-x-4">
+        <div className="z-20 shrink-0 border-t-4 border-black bg-white px-4 py-3 sm:px-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
             <span className="font-black uppercase text-sm tracking-wider text-black">Progress:</span>
-            <div className="flex space-x-2">
-              {puzzle.regions.map((region, idx) => (
+            <div className="flex flex-wrap gap-2">
+              {puzzle.regions.map((region) => (
                 <motion.div
                   key={region.id}
                   initial={false}
@@ -326,9 +381,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
               ))}
             </div>
           </div>
-          <div className="font-black uppercase text-sm tracking-wider text-slate-400">
+          <div className="font-black uppercase text-sm tracking-wider text-slate-400 sm:text-right">
             {foundRegions.size} / {puzzle.regions.length} Found
           </div>
+        </div>
         </div>
       </div>
 
@@ -344,7 +400,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
             <motion.div 
               initial={{ scale: 0.8, rotate: -2 }}
               animate={{ scale: 1, rotate: 0 }}
-              className={`p-12 rounded-3xl border-8 border-black shadow-[16px_16px_0px_0px_rgba(255,255,255,1)] text-center max-w-lg w-full relative overflow-hidden ${
+              className={`relative w-full max-w-lg overflow-hidden rounded-3xl border-4 border-black p-6 text-center shadow-[16px_16px_0px_0px_rgba(255,255,255,1)] sm:border-8 sm:p-12 ${
                 isFailed ? 'bg-[#FF6B6B]' : 'bg-[#FFD93D]'
               }`}
             >
@@ -353,19 +409,19 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
               <motion.div 
                 animate={!isFailed ? { rotate: [0, 10, -10, 0] } : {}}
                 transition={{ repeat: Infinity, duration: 2 }}
-                className="inline-block mb-6 bg-white p-6 rounded-full border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+                className="mb-4 inline-block rounded-full border-4 border-black bg-white p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:mb-6 sm:p-6"
               >
                 {isFailed ? (
-                  <XCircle size={64} className="text-[#FF6B6B] fill-current stroke-black stroke-2" />
+                  <XCircle size={48} className="fill-current stroke-black stroke-2 text-[#FF6B6B] sm:h-16 sm:w-16" />
                 ) : (
-                  <CheckCircle size={64} className="text-[#4ECDC4] fill-current stroke-black stroke-2" />
+                  <CheckCircle size={48} className="fill-current stroke-black stroke-2 text-[#4ECDC4] sm:h-16 sm:w-16" />
                 )}
               </motion.div>
               
-              <h2 className="text-5xl font-black font-display uppercase mb-2 text-black leading-none tracking-tight">
+              <h2 className="mb-2 text-3xl font-black font-display uppercase leading-none tracking-tight text-black sm:text-5xl">
                 {isFailed ? 'Game Over!' : 'Level Complete!'}
               </h2>
-              <p className="text-xl font-bold text-black/80 mb-8 font-mono">
+              <p className="mb-6 font-mono text-base font-bold text-black/80 sm:mb-8 sm:text-xl">
                 {isFailed ? 'Better luck next time!' : `You found all differences!`}
               </p>
               
@@ -375,16 +431,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
                     onClick={() => {
                       if (onNextLevel) onNextLevel();
                     }}
-                    className="w-full py-4 bg-black text-white text-xl font-black uppercase tracking-wider rounded-xl hover:scale-105 transition-transform shadow-[8px_8px_0px_0px_rgba(255,255,255,1)] flex items-center justify-center space-x-3"
+                    className="flex w-full items-center justify-center space-x-3 rounded-xl bg-black py-4 text-base font-black uppercase tracking-wider text-white transition-transform hover:scale-105 shadow-[8px_8px_0px_0px_rgba(255,255,255,1)] sm:text-xl"
                   >
                     <span>Next Level</span>
                     <Play size={24} strokeWidth={3} />
                   </button>
                 ) : (
-                  <div className="flex space-x-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
                     <button 
                       onClick={onExit}
-                      className="flex-1 py-4 bg-white text-black text-lg font-black uppercase tracking-wider rounded-xl hover:bg-slate-50 transition-colors border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+                      className="flex-1 rounded-xl border-4 border-black bg-white py-4 text-base font-black uppercase tracking-wider text-black transition-colors hover:bg-slate-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:text-lg"
                     >
                       Menu
                     </button>
@@ -399,7 +455,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ puzzle, onExit, onNextLe
                         setTimeLeft(90);
                         setShowModal(false);
                       }}
-                      className="flex-1 py-4 bg-black text-white text-lg font-black uppercase tracking-wider rounded-xl hover:bg-slate-900 transition-colors border-4 border-black shadow-[4px_4px_0px_0px_rgba(255,255,255,1)]"
+                      className="flex-1 rounded-xl border-4 border-black bg-black py-4 text-base font-black uppercase tracking-wider text-white transition-colors hover:bg-slate-900 shadow-[4px_4px_0px_0px_rgba(255,255,255,1)] sm:text-lg"
                     >
                       Retry
                     </button>

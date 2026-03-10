@@ -26,7 +26,52 @@ export interface VisualTheme {
   completionIcon: string;
 }
 
+export const RANDOM_THEME_POOL = [
+  'classic',
+  'pop',
+  'neon',
+  'sunset',
+  'mint',
+  'midnight',
+  'mono',
+  'retro',
+  'cyber',
+  'oceanic',
+  'ember',
+  'candy',
+  'forest',
+  'aurora',
+  'slate',
+  'arcade',
+  'ivory',
+  'storybook'
+] as const satisfies ReadonlyArray<Exclude<VideoSettings['visualStyle'], 'random'>>;
+
 export const VISUAL_THEMES: Record<VideoSettings['visualStyle'], VisualTheme> = {
+  random: {
+    rootBg: '#FFFDF5',
+    headerBg: '#FFD93D',
+    headerText: '#000000',
+    headerSubText: '#1F2937',
+    gameBg: '#4ECDC4',
+    imagePanelBg: '#E6F7F3',
+    patternColor: '#000000',
+    playHoverBg: '#4ECDC4',
+    skipHoverBg: '#FFD93D',
+    timerBg: '#000000',
+    timerText: '#FFFFFF',
+    timerDot: '#4ECDC4',
+    timerBorder: '#000000',
+    timerShapeClass: 'rounded-full',
+    timerTextClass: 'font-mono font-bold',
+    progressTrackBg: '#FFFFFF',
+    progressTrackBorder: '#000000',
+    progressTrackClass: 'rounded-full',
+    progressFill: 'linear-gradient(90deg, #FF6B6B 0%, #FF8E53 100%)',
+    progressFillClass: '',
+    completionBg: '#FFD93D',
+    completionIcon: '#4ECDC4'
+  },
   classic: {
     rootBg: '#FFFDF5',
     headerBg: '#FFD93D',
@@ -440,6 +485,40 @@ export const VISUAL_THEMES: Record<VideoSettings['visualStyle'], VisualTheme> = 
     progressFillClass: '',
     completionBg: '#E7E5E4',
     completionIcon: '#292524'
+  },
+  storybook: {
+    rootBg: '#1A2830',
+    headerBg: '#D8B149',
+    headerText: '#2E2414',
+    headerSubText: '#5A4320',
+    gameBg: '#204759',
+    imagePanelBg: '#E9E2CF',
+    patternColor: '#000000',
+    playHoverBg: '#C9A540',
+    skipHoverBg: '#B08C32',
+    timerBg: '#4A3C24',
+    timerText: '#F7E8C2',
+    timerDot: '#FCD34D',
+    timerBorder: '#2E2414',
+    timerShapeClass: 'rounded-2xl',
+    timerTextClass: 'font-mono font-black',
+    progressTrackBg: '#8B6D33',
+    progressTrackBorder: '#2E2414',
+    progressTrackClass: 'rounded-full',
+    progressFill: 'linear-gradient(90deg, #D9C08B 0%, #8B6D33 65%, #5A4320 100%)',
+    progressFillClass: '',
+    completionBg: '#D8B149',
+    completionIcon: '#2E2414'
   }
+};
+
+export const resolveVisualThemeStyle = (
+  visualStyle: VideoSettings['visualStyle'],
+  puzzleIndex: number
+): Exclude<VideoSettings['visualStyle'], 'random'> => {
+  if (visualStyle !== 'random') return visualStyle;
+  const normalizedIndex = Math.max(0, Math.floor(puzzleIndex));
+  const hash = ((normalizedIndex + 1) * 2654435761) >>> 0;
+  return RANDOM_THEME_POOL[hash % RANDOM_THEME_POOL.length];
 };
 
