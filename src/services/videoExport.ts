@@ -318,6 +318,12 @@ const streamVideoWithWebCodecs = async (
   });
 };
 
+export const streamVideoToWritableWithWebCodecs = async (
+  options: ExportVideoOptions & { writable: FileSystemWritableFileStream }
+): Promise<void> => {
+  await streamVideoWithWebCodecs(options);
+};
+
 export const renderVideoWithWebCodecs = async (options: ExportVideoOptions): Promise<RenderedVideoResult> => {
   const { onProgress } = options;
 

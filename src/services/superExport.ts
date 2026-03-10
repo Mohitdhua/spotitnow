@@ -32,7 +32,7 @@ import type {
   SuperImageExportWorkerResponse
 } from './superImageExportProtocol';
 import { runBatchExportTasks } from './batchExportScheduler';
-import { cancelVideoExport, renderVideoWithWebCodecs } from './videoExport';
+import { cancelVideoExport, renderVideoWithWebCodecs, streamVideoToWritableWithWebCodecs } from './videoExport';
 import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
 import { acquireSuperImageProcessingPool, disposeSuperImageProcessingPool, releaseSuperImageProcessingPool } from './superImageProcessingPool';
 import type { BinaryRenderablePuzzle } from './videoRenderSource';
@@ -218,21 +218,36 @@ const getDirectoryPicker = (): DirectoryPicker | null => {
 };
 
 const supportsDirectoryExport = () => Boolean(getDirectoryPicker());
+const supportsWritableStreamExport = () => typeof WritableStream !== 'undefined';
+const canUseSuperVideoDirectoryExport = () => supportsDirectoryExport() && supportsWritableStreamExport();
 
 export const canUseSuperImageDirectoryExport = () => supportsDirectoryExport();
+
+const createDirectoryWritable = async (
+  directory: FileSystemDirectoryHandle,
+  filename: string
+): Promise<FileSystemWritableFileStream> => {
+  const fileHandle = await directory.getFileHandle(filename, { create: true });
+  return await fileHandle.createWritable();
+};
 
 const writeBlobToDirectory = async (
   directory: FileSystemDirectoryHandle,
   filename: string,
   blob: Blob
 ) => {
-  const fileHandle = await directory.getFileHandle(filename, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(blob);
-  await writable.close();
+  const writable = await createDirectoryWritable(directory, filename);
+  try {
+    await writable.write(blob);
+  } finally {
+    await writable.close();
+  }
 };
 
-const openSuperImageDirectory = async (rootFolderName: string): Promise<FileSystemDirectoryHandle | null> => {
+const openOutputDirectory = async (
+  rootFolderName: string,
+  cancelMessage: string
+): Promise<FileSystemDirectoryHandle | null> => {
   const picker = getDirectoryPicker();
   if (!picker) return null;
 
@@ -241,18 +256,31 @@ const openSuperImageDirectory = async (rootFolderName: string): Promise<FileSyst
     return await baseDirectory.getDirectoryHandle(rootFolderName, { create: true });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error('Super Image export canceled during folder selection.');
+      throw new Error(cancelMessage);
     }
     throw error;
   }
 };
 
+const getSuperImageRootFolderName = (splitterDefaults: SplitterDefaults) =>
+  `${sanitizePrefix(splitterDefaults.filenamePrefix)}-super-image`;
+
+const getSuperExportRootFolderName = (splitterDefaults: SplitterDefaults) =>
+  `${sanitizePrefix(splitterDefaults.filenamePrefix)}-super-export`;
+
 export const requestSuperImageOutputDirectory = async (
   splitterDefaults: SplitterDefaults
 ): Promise<FileSystemDirectoryHandle | null> => {
-  const rootFolderName = `${sanitizePrefix(splitterDefaults.filenamePrefix)}-super-image`;
-  return await openSuperImageDirectory(rootFolderName);
+  return await openOutputDirectory(
+    getSuperImageRootFolderName(splitterDefaults),
+    'Super Image export canceled during folder selection.'
+  );
 };
+
+const requestSuperExportOutputDirectory = async (
+  splitterDefaults: SplitterDefaults
+): Promise<FileSystemDirectoryHandle | null> =>
+  await openOutputDirectory(getSuperExportRootFolderName(splitterDefaults), createSuperExportCancellationError().message);
 
 const supportsSuperImageProcessorPool = () =>
   typeof Worker !== 'undefined' &&
@@ -837,6 +865,9 @@ const runFrameSuperExportOnMainThread = async ({
   watermarkRemoval,
   onProgress
 }: RunFrameSuperExportOptions): Promise<SuperExportResult> => {
+  const targetDirectory = canUseSuperVideoDirectoryExport()
+    ? await requestSuperExportOutputDirectory(splitterDefaults)
+    : null;
   const processed = await collectExactThreeDifferencePuzzles({
     videos,
     timestamps,
@@ -899,38 +930,57 @@ const runFrameSuperExportOnMainThread = async ({
       const exportStart = watermarkEnabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END;
       const batchStart = exportStart + (index / Math.max(1, batches.length)) * (1 - exportStart);
       const batchEnd = exportStart + ((index + 1) / Math.max(1, batches.length)) * (1 - exportStart);
+      const outputFileName = buildBatchVideoFilename(
+        videoSettings,
+        splitterDefaults,
+        index,
+        batches.length,
+        canvasBatch.length
+      );
       const compatibilityBatch = await Promise.all(
         canvasBatch.map((puzzle) => convertCanvasPuzzleToCompatibilityPuzzle(puzzle))
       );
 
-      const rendered = await renderVideoWithWebCodecs({
-        puzzles: compatibilityBatch,
-        settings: videoSettings,
-        onProgress: (progress, label) => {
-          onProgress?.({
-            stage: 'exporting',
-            progress: mapProgress(progress, batchStart, batchEnd),
-            label:
-              label ||
-              `Exporting video ${index + 1}/${batches.length} (${compatibilityBatch.length} puzzle${
-                compatibilityBatch.length === 1 ? '' : 's'
-              })`
-          });
-        }
-      });
+      if (targetDirectory) {
+        const writable = await createDirectoryWritable(targetDirectory, outputFileName);
+        await streamVideoToWritableWithWebCodecs({
+          puzzles: compatibilityBatch,
+          settings: videoSettings,
+          writable,
+          onProgress: (progress, label) => {
+            onProgress?.({
+              stage: 'exporting',
+              progress: mapProgress(progress, batchStart, batchEnd),
+              label:
+                label ||
+                `Exporting video ${index + 1}/${batches.length} (${compatibilityBatch.length} puzzle${
+                  compatibilityBatch.length === 1 ? '' : 's'
+                })`
+            });
+          }
+        });
+      } else {
+        const rendered = await renderVideoWithWebCodecs({
+          puzzles: compatibilityBatch,
+          settings: videoSettings,
+          onProgress: (progress, label) => {
+            onProgress?.({
+              stage: 'exporting',
+              progress: mapProgress(progress, batchStart, batchEnd),
+              label:
+                label ||
+                `Exporting video ${index + 1}/${batches.length} (${compatibilityBatch.length} puzzle${
+                  compatibilityBatch.length === 1 ? '' : 's'
+                })`
+            });
+          }
+        });
 
-      triggerBlobDownload(
-        rendered.blob,
-        buildBatchVideoFilename(
-          videoSettings,
-          splitterDefaults,
-          index,
-          batches.length,
-          compatibilityBatch.length
-        )
-      );
+        triggerBlobDownload(rendered.blob, outputFileName);
+        await delay(120);
+      }
+
       canvasBatch.forEach((puzzle) => releaseCanvasPuzzle(puzzle));
-      await delay(120);
     }
 
     return {
@@ -1296,6 +1346,9 @@ const runFrameSuperExportWithSharedPool = async ({
   };
 
   try {
+    const targetDirectory = canUseSuperVideoDirectoryExport()
+      ? await requestSuperExportOutputDirectory(splitterDefaults)
+      : null;
     const { processed, watermarkPairsCleaned } = await collectExactThreeDifferenceBinaryPuzzlesWithSharedPool({
       videos,
       timestamps,
@@ -1392,28 +1445,54 @@ const runFrameSuperExportWithSharedPool = async ({
           emitCoordinatorStats();
 
           try {
-            const rendered = await renderVideoWithWebCodecs({
-              source: 'binary',
-              puzzles: batch,
-              settings: videoSettings,
-              diagnosticsJob: job,
-              manageDiagnosticsLifecycle: false,
-              onProgress: (progress, label) => {
-                reportProgress(
-                  progress,
-                  label ||
-                    `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${batch.length === 1 ? '' : 's'})`
-                );
-              }
-            });
-
-            triggerBlobDownload(
-              rendered.blob,
-              buildBatchVideoFilename(videoSettings, splitterDefaults, index, totalBatches, batch.length)
+            const outputFileName = buildBatchVideoFilename(
+              videoSettings,
+              splitterDefaults,
+              index,
+              totalBatches,
+              batch.length
             );
-            await delay(120);
+            if (targetDirectory) {
+              const writable = await createDirectoryWritable(targetDirectory, outputFileName);
+              await streamVideoToWritableWithWebCodecs({
+                source: 'binary',
+                puzzles: batch,
+                settings: videoSettings,
+                writable,
+                diagnosticsJob: job,
+                manageDiagnosticsLifecycle: false,
+                onProgress: (progress, label) => {
+                  reportProgress(
+                    progress,
+                    label ||
+                      `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${batch.length === 1 ? '' : 's'})`
+                  );
+                }
+              });
+            } else {
+              const rendered = await renderVideoWithWebCodecs({
+                source: 'binary',
+                puzzles: batch,
+                settings: videoSettings,
+                diagnosticsJob: job,
+                manageDiagnosticsLifecycle: false,
+                onProgress: (progress, label) => {
+                  reportProgress(
+                    progress,
+                    label ||
+                      `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${batch.length === 1 ? '' : 's'})`
+                  );
+                }
+              });
+
+              triggerBlobDownload(rendered.blob, outputFileName);
+              await delay(120);
+            }
+
             completedBatches += 1;
-            return rendered;
+            return {
+              fileName: outputFileName
+            };
           } finally {
             activeBatchStats.delete(taskId);
             emitCoordinatorStats();
