@@ -6,6 +6,9 @@ import { BASE_STAGE_SIZE, CLASSIC_HUD_SPEC, TRANSITION_TUNING } from '../constan
 import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
 import { resolveVideoLayoutSettings } from '../constants/videoLayoutCustom';
 import { VIDEO_PACKAGE_PRESETS, resolvePackageImageArrangement } from '../constants/videoPackages';
+import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
+import { loadGeneratedBackgroundPacks } from '../services/backgroundPacks';
+import { resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
 import { resolveVisualThemeStyle } from '../constants/videoThemes';
 import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import { clampLogoZoom } from '../utils/logoProcessing';
@@ -17,6 +20,7 @@ interface VideoPlayerProps {
   onSendToEditor?: () => void;
   embedded?: boolean;
   hidePlaybackControls?: boolean;
+  backgroundPacksSessionId?: number;
 }
 
 type Phase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro' | 'finished';
@@ -839,7 +843,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onExit,
   onSendToEditor,
   embedded = false,
-  hidePlaybackControls = false
+  hidePlaybackControls = false,
+  backgroundPacksSessionId = 0
 }) => {
   const initialHasPuzzles = puzzles.length > 0;
   const initialPhase = getInitialPhase(initialHasPuzzles, settings);
@@ -983,6 +988,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     packagePreset.surfaceStyle === 'storybook' && settings.aspectRatio === '16:9' && !customLayoutEnabled;
   const isWidePuzzleDisplay = isStorybookStyle;
   const visualTheme = VISUAL_THEMES[effectiveVisualStyle];
+  const selectedBackgroundPack = useMemo(
+    () =>
+      settings.generatedBackgroundsEnabled
+        ? loadGeneratedBackgroundPacks().find((pack) => pack.id === settings.generatedBackgroundPackId) ?? null
+        : null,
+    [
+      backgroundPacksSessionId,
+      settings.generatedBackgroundPackId,
+      settings.generatedBackgroundsEnabled
+    ]
+  );
+  const currentGeneratedBackground = useMemo(
+    () =>
+      settings.generatedBackgroundsEnabled
+        ? resolveGeneratedBackgroundForIndex(
+            selectedBackgroundPack,
+            safeCurrentIndex,
+            settings.generatedBackgroundShuffleSeed
+          )
+        : null,
+    [
+      safeCurrentIndex,
+      selectedBackgroundPack,
+      settings.generatedBackgroundShuffleSeed,
+      settings.generatedBackgroundsEnabled
+    ]
+  );
   const resolvedLayout = useMemo(
     () => resolveVideoLayoutSettings(settings.videoPackagePreset, settings.aspectRatio, settings),
     [settings.videoPackagePreset, settings.aspectRatio, settings]
@@ -2433,6 +2465,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             padding: `${frameLayout.contentPadding}px`
           }}
         >
+          {currentGeneratedBackground && (
+            <div className="absolute inset-0">
+              <GeneratedBackgroundCanvas spec={currentGeneratedBackground} className="h-full w-full" />
+            </div>
+          )}
+
           {/* Background Pattern */}
           {isStorybookStyle ? (
             <div
@@ -2444,7 +2482,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             />
           ) : (
             <div
-              className="absolute inset-0 opacity-10"
+              className="absolute inset-0 opacity-[0.07]"
               style={{ backgroundImage: `radial-gradient(circle, ${visualTheme.patternColor} 2px, transparent 2px)`, backgroundSize: '24px 24px' }}
             />
           )}

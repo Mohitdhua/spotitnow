@@ -263,6 +263,8 @@ const processTask = async ({
       diffCount: puzzle.regions.length,
       puzzleBuffer,
       diffBuffer,
+      mimeType: 'image/png',
+      regions: puzzle.regions,
       watermarkApplied
     };
   } catch (error) {

@@ -19,9 +19,12 @@ import { CustomVideoLayout, Puzzle, VideoSettings } from '../types';
 import { BASE_STAGE_SIZE } from '../constants/videoLayoutSpec';
 import { buildDefaultCustomVideoLayout } from '../constants/videoLayoutCustom';
 import { VIDEO_PACKAGE_PRESETS, VIDEO_REVEAL_BEHAVIOR_OPTIONS } from '../constants/videoPackages';
+import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
 import { VideoPreviewCompare } from './VideoPreviewCompare';
 import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import { clampLogoZoom } from '../utils/logoProcessing';
+import { loadGeneratedBackgroundPacks } from '../services/backgroundPacks';
+import { resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
 import {
   applyVideoSceneCopyPresetToSettings,
   deleteVideoSceneCopyPreset,
@@ -41,6 +44,8 @@ interface VideoSettingsPanelProps {
   exportStatus: string;
   onStart: () => void;
   onBack: () => void;
+  backgroundPacksSessionId?: number;
+  onOpenBackgroundGenerator?: () => void;
 }
 
 type VisualStyleCard = {
@@ -184,7 +189,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   exportProgress,
   exportStatus,
   onStart,
-  onBack
+  onBack,
+  backgroundPacksSessionId = 0,
+  onOpenBackgroundGenerator
 }) => {
   const [activeTab, setActiveTab] = useState<PanelTab>('package');
   const [layoutPanels, setLayoutPanels] = useState<Record<LayoutPanelKey, boolean>>({
@@ -197,6 +204,10 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   const [sceneCopyPresets, setSceneCopyPresets] = useState<VideoSceneCopyPreset[]>([]);
   const [selectedSceneCopyPresetId, setSelectedSceneCopyPresetId] = useState('');
   const [sceneCopyPresetName, setSceneCopyPresetName] = useState('');
+  const availableBackgroundPacks = useMemo(
+    () => loadGeneratedBackgroundPacks(),
+    [backgroundPacksSessionId]
+  );
 
   const toggleLayoutPanel = (panel: LayoutPanelKey) => {
     setLayoutPanels((previous) => ({
@@ -226,6 +237,42 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
       }
     });
   };
+  const selectedBackgroundPack = useMemo(
+    () =>
+      availableBackgroundPacks.find((pack) => pack.id === settings.generatedBackgroundPackId) ??
+      availableBackgroundPacks[0] ??
+      null,
+    [availableBackgroundPacks, settings.generatedBackgroundPackId]
+  );
+  const backgroundPackPreview = useMemo(
+    () =>
+      settings.generatedBackgroundsEnabled
+        ? resolveGeneratedBackgroundForIndex(
+            selectedBackgroundPack,
+            0,
+            settings.generatedBackgroundShuffleSeed
+          )
+        : null,
+    [
+      selectedBackgroundPack,
+      settings.generatedBackgroundShuffleSeed,
+      settings.generatedBackgroundsEnabled
+    ]
+  );
+
+  useEffect(() => {
+    if (!availableBackgroundPacks.length) return;
+    if (
+      settings.generatedBackgroundPackId &&
+      availableBackgroundPacks.some((pack) => pack.id === settings.generatedBackgroundPackId)
+    ) {
+      return;
+    }
+    onSettingsChange({
+      ...settings,
+      generatedBackgroundPackId: availableBackgroundPacks[0].id
+    });
+  }, [availableBackgroundPacks, onSettingsChange, settings]);
   const applyVideoPackagePreset = (presetKey: VideoSettings['videoPackagePreset']) => {
     const preset = VIDEO_PACKAGE_PRESETS[presetKey];
     onSettingsChange({
@@ -872,10 +919,99 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                         Colors + Backgrounds
                       </span>
                     </div>
-                    <div className="mt-3 h-2 rounded-full border border-black overflow-hidden bg-white">
-                      <div className="h-full" style={{ width: '72%', background: selectedStyleOption.meter }} />
+                  <div className="mt-3 h-2 rounded-full border border-black overflow-hidden bg-white">
+                    <div className="h-full" style={{ width: '72%', background: selectedStyleOption.meter }} />
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border-2 border-black bg-[#FFFDF5] p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <div className="text-[10px] font-black uppercase text-slate-600">Generated Background Pack</div>
+                      <div className="mt-1 text-lg font-black uppercase leading-none text-slate-900">
+                        {selectedBackgroundPack?.name ?? 'No pack selected'}
+                      </div>
+                      <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">
+                        Optional scenic layer behind the game board in preview and export.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => updateSetting('generatedBackgroundsEnabled', !settings.generatedBackgroundsEnabled)}
+                      className={`rounded-full border-2 border-black px-3 py-1 text-[10px] font-black uppercase ${
+                        settings.generatedBackgroundsEnabled ? 'bg-[#A7F3D0]' : 'bg-white'
+                      }`}
+                    >
+                      {settings.generatedBackgroundsEnabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                  </div>
+
+                  <div className="mt-4 grid gap-4 lg:grid-cols-[180px_1fr]">
+                    <div className="overflow-hidden rounded-2xl border-2 border-black bg-slate-100">
+                      {backgroundPackPreview ? (
+                        <div className="aspect-video">
+                          <GeneratedBackgroundCanvas
+                            spec={backgroundPackPreview}
+                            className="h-full w-full"
+                            showSafeArea
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex aspect-video items-center justify-center text-[10px] font-black uppercase text-slate-500">
+                          Preview disabled
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-2">
+                        <span className="text-[10px] font-black uppercase text-slate-600">Pack</span>
+                        <select
+                          value={selectedBackgroundPack?.id ?? ''}
+                          onChange={(event) => updateSetting('generatedBackgroundPackId', event.target.value)}
+                          className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
+                        >
+                          {availableBackgroundPacks.map((pack) => (
+                            <option key={pack.id} value={pack.id}>
+                              {pack.name} ({pack.backgrounds.length})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="space-y-2">
+                        <span className="text-[10px] font-black uppercase text-slate-600">Shuffle Seed</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={9999}
+                          value={settings.generatedBackgroundShuffleSeed}
+                          onChange={(event) =>
+                            updateSetting(
+                              'generatedBackgroundShuffleSeed',
+                              Math.max(1, Math.min(9999, Number(event.target.value) || 1))
+                            )
+                          }
+                          className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
+                        />
+                      </label>
+
+                      <div className="rounded-xl border-2 border-black bg-[#F8FDFF] p-3 text-[10px] font-bold uppercase text-slate-600">
+                        {selectedBackgroundPack
+                          ? `${selectedBackgroundPack.backgrounds.length} stored scenes ready for rotation.`
+                          : 'Create a pack to enable generated backgrounds.'}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => onOpenBackgroundGenerator?.()}
+                        className="rounded-xl border-2 border-black bg-[#DBEAFE] px-3 py-3 text-xs font-black uppercase hover:bg-[#BFDBFE]"
+                      >
+                        Open Generator
+                      </button>
                     </div>
                   </div>
+                </div>
 
                   <div className="max-h-[520px] overflow-y-auto pr-1">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -1,4 +1,4 @@
-import type { Puzzle, Region, VideoSettings } from '../types';
+import type { GeneratedBackgroundPack, Puzzle, Region, VideoSettings } from '../types';
 
 export interface BinaryRenderablePuzzle {
   imageABuffer: ArrayBuffer;
@@ -22,6 +22,7 @@ export type VideoRenderSource = LegacyVideoRenderSource | BinaryVideoRenderSourc
 
 export type VideoExportWorkerStartPayload = VideoRenderSource & {
   settings: VideoSettings;
+  generatedBackgroundPack?: GeneratedBackgroundPack | null;
   streamOutput?: boolean;
   jobId?: string;
   workerSessionId?: string;

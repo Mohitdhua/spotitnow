@@ -1,4 +1,5 @@
 import { Puzzle, VideoSettings } from '../types';
+import { loadGeneratedBackgroundPacks } from './backgroundPacks';
 import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from './mediaTelemetry';
 import type { BinaryRenderablePuzzle, VideoExportWorkerStartPayload } from './videoRenderSource';
@@ -37,6 +38,11 @@ interface RenderVideoFramePreviewOptions {
   timestamp: number;
   signal?: AbortSignal;
 }
+
+const resolveGeneratedBackgroundPack = (settings: VideoSettings) =>
+  settings.generatedBackgroundsEnabled
+    ? loadGeneratedBackgroundPacks().find((pack) => pack.id === settings.generatedBackgroundPackId) ?? null
+    : null;
 
 type WorkerResponse =
   | { type: 'progress'; progress: number; status?: string }
@@ -149,6 +155,7 @@ const buildWorkerStartPayload = (
         source: 'binary',
         puzzles: options.puzzles,
         settings: options.settings,
+        generatedBackgroundPack: resolveGeneratedBackgroundPack(options.settings),
         jobId,
         workerSessionId: sessionId
       },
@@ -157,13 +164,14 @@ const buildWorkerStartPayload = (
   }
 
   return {
-    payload: {
-      source: 'legacy',
-      puzzles: options.puzzles,
-      settings: options.settings,
-      jobId,
-      workerSessionId: sessionId
-    },
+      payload: {
+        source: 'legacy',
+        puzzles: options.puzzles,
+        settings: options.settings,
+        generatedBackgroundPack: resolveGeneratedBackgroundPack(options.settings),
+        jobId,
+        workerSessionId: sessionId
+      },
     transferables: []
   };
 };
@@ -495,7 +503,8 @@ export const renderVideoFramePreview = async ({
       payload: {
         puzzles,
         settings,
-        timestamp
+        timestamp,
+        generatedBackgroundPack: resolveGeneratedBackgroundPack(settings)
       }
     });
   });

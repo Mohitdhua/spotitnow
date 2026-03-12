@@ -163,6 +163,50 @@ export interface VideoSettings {
   logoChromaKeyEnabled: boolean;
   logoChromaKeyColor: string;
   logoChromaKeyTolerance: number;
+  generatedBackgroundsEnabled: boolean;
+  generatedBackgroundPackId: string;
+  generatedBackgroundShuffleSeed: number;
+}
+
+export type GeneratedBackgroundSceneKind =
+  | 'arcade'
+  | 'studio'
+  | 'forest'
+  | 'city'
+  | 'seaside'
+  | 'dreamscape';
+
+export type GeneratedBackgroundPaletteId =
+  | 'sunrise'
+  | 'mint'
+  | 'midnight'
+  | 'candy'
+  | 'ocean'
+  | 'amber';
+
+export type GeneratedBackgroundPattern = 'dots' | 'grid' | 'sparkle' | 'waves';
+
+export interface GeneratedBackgroundSpec {
+  id: string;
+  name: string;
+  seed: number;
+  sceneKind: GeneratedBackgroundSceneKind;
+  paletteId: GeneratedBackgroundPaletteId;
+  horizon: number;
+  density: number;
+  accentScale: number;
+  pattern: GeneratedBackgroundPattern;
+}
+
+export interface GeneratedBackgroundPack {
+  id: string;
+  name: string;
+  description: string;
+  aspectRatio: VideoSettings['aspectRatio'];
+  createdAt: number;
+  updatedAt: number;
+  backgrounds: GeneratedBackgroundSpec[];
+  coverBackgroundId: string;
 }
 
 export interface VideoModeTransferPosition {
@@ -191,6 +235,7 @@ export type GameMode =
   | 'upload'
   | 'splitter'
   | 'image_upscaler'
+  | 'background_generator'
   | 'frame_extractor'
   | 'edit'
   | 'play'

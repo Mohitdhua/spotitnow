@@ -17,6 +17,7 @@ import {
   Scissors,
   Camera,
   ImagePlus,
+  Palette,
   Sparkles,
   Settings,
   Menu,
@@ -31,14 +32,17 @@ import { VideoPlayer } from './components/VideoPlayer'; // Assuming you created 
 import { OverlayVideoEditor } from './components/OverlayVideoEditor';
 import { ImageSplitterPanel } from './components/ImageSplitterPanel';
 import { ImageUpscalerMode } from './components/ImageUpscalerMode';
+import { BackgroundGeneratorMode } from './components/BackgroundGeneratorMode';
 import { ProgressBarMode } from './components/ProgressBarMode';
 import { FrameExtractorMode } from './components/FrameExtractorMode';
 import { WatermarkRemovalMode } from './components/WatermarkRemovalMode';
 import { AppSettingsModal } from './components/AppSettingsModal';
+import { MediaDiagnosticsDrawer } from './components/MediaDiagnosticsDrawer';
 import { ProcessingMode, Puzzle, PuzzleSet, GameMode, Region, VideoSettings, VideoModeTransferFrame } from './types';
 import { cancelVideoExport, exportVideoWithWebCodecs } from './services/videoExport';
 import { cancelOverlayBatchExport, exportOverlayBatchWithWebCodecs } from './services/overlayVideoExport';
-import { cancelSuperImageExport } from './services/superExport';
+import { cancelProgressBarExport } from './services/progressBarExport';
+import { cancelSuperExport, cancelSuperImageExport } from './services/superExport';
 import {
   AppGlobalSettings,
   loadAppGlobalSettings,
@@ -142,6 +146,7 @@ const QUICK_NAV_ITEMS: QuickNavItem[] = [
   { id: 'overlay_editor', label: 'Overlay', icon: PlaySquare },
   { id: 'splitter', label: 'Splitter', icon: Scissors },
   { id: 'image_upscaler', label: 'Upscaler', icon: Sparkles },
+  { id: 'background_generator', label: 'Backgrounds', icon: Palette },
   { id: 'progress_bar', label: 'Progress', icon: LoaderCircle },
   { id: 'frame_extractor', label: 'Frames', icon: Camera },
   { id: 'watermark_removal', label: 'Watermark', icon: ImagePlus }
@@ -152,6 +157,7 @@ const KNOWN_APP_MODES: AppMode[] = [
   'upload',
   'splitter',
   'image_upscaler',
+  'background_generator',
   'frame_extractor',
   'edit',
   'play',
@@ -177,6 +183,8 @@ const getModeLabel = (value: AppMode): string => {
       return 'Image Splitter';
     case 'image_upscaler':
       return 'Image Upscaler';
+    case 'background_generator':
+      return 'Background Generator';
     case 'frame_extractor':
       return 'Frame Extractor';
     case 'edit':
@@ -203,6 +211,7 @@ const INITIAL_MODE_MOUNTED_STATE: Record<AppMode, boolean> = {
   upload: false,
   splitter: false,
   image_upscaler: false,
+  background_generator: false,
   frame_extractor: false,
   edit: false,
   play: false,
@@ -217,6 +226,7 @@ const PERSISTENT_MODES: AppMode[] = [
   'upload',
   'splitter',
   'image_upscaler',
+  'background_generator',
   'frame_extractor',
   'edit',
   'video_setup',
@@ -240,9 +250,15 @@ export default function App() {
   const [isOverlayExporting, setIsOverlayExporting] = useState(false);
   const [overlayExportProgress, setOverlayExportProgress] = useState(0);
   const [overlayExportStatus, setOverlayExportStatus] = useState('');
+  const [isProgressBarExporting, setIsProgressBarExporting] = useState(false);
+  const [progressBarExportProgress, setProgressBarExportProgress] = useState(0);
+  const [progressBarExportStatus, setProgressBarExportStatus] = useState('');
   const [isSuperImageExporting, setIsSuperImageExporting] = useState(false);
   const [superImageExportProgress, setSuperImageExportProgress] = useState(0);
   const [superImageExportStatus, setSuperImageExportStatus] = useState('');
+  const [isSuperVideoExporting, setIsSuperVideoExporting] = useState(false);
+  const [superVideoExportProgress, setSuperVideoExportProgress] = useState(0);
+  const [superVideoExportStatus, setSuperVideoExportStatus] = useState('');
   const [incomingVideoFrames, setIncomingVideoFrames] = useState<VideoModeTransferFrame[]>([]);
   const [incomingVideoFramesSessionId, setIncomingVideoFramesSessionId] = useState(0);
   const [injectedUploadFiles, setInjectedUploadFiles] = useState<File[] | null>(null);
@@ -254,6 +270,8 @@ export default function App() {
   const [isMobileHeaderOpen, setIsMobileHeaderOpen] = useState(false);
   const [frameDefaultsSessionId, setFrameDefaultsSessionId] = useState(0);
   const [splitterDefaultsSessionId, setSplitterDefaultsSessionId] = useState(0);
+  const [backgroundPacksSessionId, setBackgroundPacksSessionId] = useState(0);
+  const [backgroundGeneratorReturnMode, setBackgroundGeneratorReturnMode] = useState<AppMode>('home');
   
   // Default Video Settings
   const [videoSettings, setVideoSettings] = useState<VideoSettings>(() => appDefaults.videoDefaults);
@@ -444,6 +462,15 @@ export default function App() {
     setMode('video_setup');
   }, []);
 
+  const handleOpenBackgroundGenerator = useCallback((returnMode: AppMode = 'home') => {
+    setBackgroundGeneratorReturnMode(returnMode);
+    setMode('background_generator');
+  }, []);
+
+  const handleCloseBackgroundGenerator = useCallback(() => {
+    setMode(backgroundGeneratorReturnMode === 'background_generator' ? 'home' : backgroundGeneratorReturnMode);
+  }, [backgroundGeneratorReturnMode]);
+
   const handleLoadPuzzle = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -518,6 +545,9 @@ export default function App() {
           setPuzzle(batch[0]);
         }
       }
+      if (targetMode === 'background_generator') {
+        setBackgroundGeneratorReturnMode('home');
+      }
       setMode(targetMode);
     },
     [batch, puzzle]
@@ -540,7 +570,7 @@ export default function App() {
       alert('Add or load at least one puzzle before exporting.');
       return;
     }
-    if (isOverlayExporting || isSuperImageExporting) {
+    if (isOverlayExporting || isSuperImageExporting || isSuperVideoExporting || isProgressBarExporting) {
       alert('Another export is already running. Please wait or cancel it first.');
       return;
     }
@@ -575,7 +605,15 @@ export default function App() {
     } finally {
       setIsExportingVideo(false);
     }
-  }, [batch, videoSettings, isExportingVideo, isOverlayExporting, isSuperImageExporting]);
+  }, [
+    batch,
+    videoSettings,
+    isExportingVideo,
+    isOverlayExporting,
+    isSuperImageExporting,
+    isSuperVideoExporting,
+    isProgressBarExporting
+  ]);
 
   const handleCancelVideoExport = useCallback(() => {
     cancelVideoExport();
@@ -633,7 +671,7 @@ export default function App() {
       };
       linkedPairExportMode?: 'single_video' | 'one_per_pair';
     }) => {
-      if (isExportingVideo || isSuperImageExporting) {
+      if (isExportingVideo || isSuperImageExporting || isSuperVideoExporting || isProgressBarExporting) {
         alert('Another export is already running. Please wait or cancel it first.');
         return;
       }
@@ -683,6 +721,8 @@ export default function App() {
       isOverlayExporting,
       isExportingVideo,
       isSuperImageExporting,
+      isSuperVideoExporting,
+      isProgressBarExporting,
       videoSettings.exportResolution,
       videoSettings.exportBitrateMbps,
       videoSettings.exportCodec
@@ -693,8 +733,16 @@ export default function App() {
     cancelOverlayBatchExport();
   }, []);
 
+  const handleCancelProgressBarExport = useCallback(() => {
+    cancelProgressBarExport();
+  }, []);
+
   const handleCancelSuperImageExport = useCallback(() => {
     cancelSuperImageExport();
+  }, []);
+
+  const handleCancelSuperExport = useCallback(() => {
+    cancelSuperExport();
   }, []);
 
   const handleCancelActiveExport = useCallback(() => {
@@ -708,28 +756,57 @@ export default function App() {
     }
     if (isSuperImageExporting) {
       handleCancelSuperImageExport();
+      return;
+    }
+    if (isSuperVideoExporting) {
+      handleCancelSuperExport();
+      return;
+    }
+    if (isProgressBarExporting) {
+      handleCancelProgressBarExport();
     }
   }, [
     isOverlayExporting,
     isExportingVideo,
     isSuperImageExporting,
+    isSuperVideoExporting,
+    isProgressBarExporting,
     handleCancelOverlayExport,
     handleCancelVideoExport,
-    handleCancelSuperImageExport
+    handleCancelSuperImageExport,
+    handleCancelSuperExport,
+    handleCancelProgressBarExport
   ]);
 
-  const isAnyExporting = isExportingVideo || isOverlayExporting || isSuperImageExporting;
+  const isAnyExporting =
+    isExportingVideo || isOverlayExporting || isSuperImageExporting || isSuperVideoExporting || isProgressBarExporting;
   const activeExportProgress = isOverlayExporting
     ? overlayExportProgress
     : isExportingVideo
       ? videoExportProgress
-      : superImageExportProgress;
+      : isSuperVideoExporting
+        ? superVideoExportProgress
+        : isSuperImageExporting
+          ? superImageExportProgress
+          : progressBarExportProgress;
   const activeExportLabel = isOverlayExporting
     ? overlayExportStatus || 'Exporting Batch Videos'
     : isExportingVideo
       ? videoExportStatus || 'Exporting Video'
-      : superImageExportStatus || 'Exporting Super Images';
-  const activeExportFillColor = isOverlayExporting ? '#10B981' : isExportingVideo ? '#6366F1' : '#F59E0B';
+      : isSuperVideoExporting
+        ? superVideoExportStatus || 'Exporting Super Videos'
+        : isSuperImageExporting
+          ? superImageExportStatus || 'Exporting Super Images'
+          : progressBarExportStatus || 'Exporting Progress Bars';
+  const activeExportFillColor = isOverlayExporting
+    ? '#10B981'
+    : isExportingVideo
+      ? '#6366F1'
+      : isSuperVideoExporting
+        ? '#DC2626'
+        : isSuperImageExporting
+          ? '#F59E0B'
+          : '#0F172A';
   const currentModeLabel = getModeLabel(mode);
 
   const handleSuperImageExportStateChange = useCallback(
@@ -737,6 +814,24 @@ export default function App() {
       setIsSuperImageExporting(next.isExporting);
       setSuperImageExportProgress(next.isExporting ? next.progress : 0);
       setSuperImageExportStatus(next.isExporting ? next.status : '');
+    },
+    []
+  );
+
+  const handleSuperExportStateChange = useCallback(
+    (next: { isExporting: boolean; progress: number; status: string }) => {
+      setIsSuperVideoExporting(next.isExporting);
+      setSuperVideoExportProgress(next.isExporting ? next.progress : 0);
+      setSuperVideoExportStatus(next.isExporting ? next.status : '');
+    },
+    []
+  );
+
+  const handleProgressBarExportStateChange = useCallback(
+    (next: { isExporting: boolean; progress: number; status: string }) => {
+      setIsProgressBarExporting(next.isExporting);
+      setProgressBarExportProgress(next.isExporting ? next.progress : 0);
+      setProgressBarExportStatus(next.isExporting ? next.status : '');
     },
     []
   );
@@ -793,12 +888,13 @@ export default function App() {
     setVideoSettings(result.appSettings.videoDefaults);
     setFrameDefaultsSessionId((current) => current + 1);
     setSplitterDefaultsSessionId((current) => current + 1);
+    setBackgroundPacksSessionId((current) => current + 1);
 
     const layoutSummary = result.hasSavedVideoLayout ? 'saved layout included' : 'no saved layout';
 
     return {
       gameAudioMuted: result.gameAudioMuted,
-      message: `Imported settings, ${result.timestampPresetCount} timestamp presets, ${result.watermarkPresetCount} watermark presets, ${result.sceneCopyPresetCount} scene copy presets, ${layoutSummary}.`
+      message: `Imported settings, ${result.timestampPresetCount} timestamp presets, ${result.watermarkPresetCount} watermark presets, ${result.sceneCopyPresetCount} scene copy presets, ${result.backgroundPackCount} background packs, ${layoutSummary}.`
     };
   }, []);
 
@@ -1277,6 +1373,21 @@ export default function App() {
                 </button>
 
                 <button
+                  onClick={() => handleOpenBackgroundGenerator('home')}
+                  className="rounded-xl border-2 border-black bg-[#E0E7FF] p-5 text-left hover:bg-[#C7D2FE] transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-900">Background Generator</h3>
+                      <p className="mt-1 text-sm text-slate-600">Build reusable generated packs for the game area.</p>
+                    </div>
+                    <div className="w-9 h-9 rounded-lg bg-white text-slate-700 border border-black flex items-center justify-center">
+                      <Palette size={18} />
+                    </div>
+                  </div>
+                </button>
+
+                <button
                   onClick={() => setMode('image_upscaler')}
                   className="rounded-xl border-2 border-black bg-[#E0F2FE] p-5 text-left hover:bg-[#BAE6FD] transition-colors"
                 >
@@ -1369,6 +1480,22 @@ export default function App() {
             </motion.div>
           )}
 
+          {shouldRenderMode('background_generator') && (
+            <motion.div
+              key={`background_generator-${backgroundPacksSessionId}`}
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className={mode === 'background_generator' ? 'h-full' : 'hidden h-full'}
+            >
+              <BackgroundGeneratorMode
+                onBack={handleCloseBackgroundGenerator}
+                storageRefreshKey={backgroundPacksSessionId}
+                onLibraryChange={() => setBackgroundPacksSessionId((current) => current + 1)}
+              />
+            </motion.div>
+          )}
+
           {shouldRenderMode('progress_bar') && (
             <motion.div
               key="progress_bar"
@@ -1390,6 +1517,8 @@ export default function App() {
                     ...patch
                   }));
                 }}
+                hasActiveAppExport={isAnyExporting}
+                onExportStateChange={handleProgressBarExportStateChange}
                 onBack={() => setMode('home')}
               />
             </motion.div>
@@ -1426,6 +1555,7 @@ export default function App() {
                 onSendToBatchAuto={(files) => handleOpenUploadWithInjectedFiles(files, 'auto')}
                 hasActiveAppExport={isAnyExporting}
                 onSuperImageExportStateChange={handleSuperImageExportStateChange}
+                onSuperExportStateChange={handleSuperExportStateChange}
               />
             </motion.div>
           )}
@@ -1544,6 +1674,7 @@ export default function App() {
               <VideoSettingsPanel
                 settings={videoSettings}
                 puzzles={batch}
+                backgroundPacksSessionId={backgroundPacksSessionId}
                 onSettingsChange={setVideoSettings}
                 onExport={handleExportVideo}
                 isExporting={isExportingVideo}
@@ -1556,6 +1687,7 @@ export default function App() {
                   }
                   setMode('video_play');
                 }}
+                onOpenBackgroundGenerator={() => handleOpenBackgroundGenerator('video_setup')}
                 onBack={() => setMode('home')}
               />
             </motion.div>
@@ -1572,6 +1704,7 @@ export default function App() {
               <VideoPlayer
                 puzzles={batch}
                 settings={videoSettings}
+                backgroundPacksSessionId={backgroundPacksSessionId}
                 onExit={() => setMode('video_setup')}
                 onSendToEditor={handleSendRawFramesToOverlayEditor}
               />
@@ -1589,6 +1722,7 @@ export default function App() {
         onImportSettings={handleImportAppDefaults}
         onResetDefaults={handleResetAppDefaults}
       />
+      {import.meta.env.DEV ? <MediaDiagnosticsDrawer /> : null}
     </div>
   );
 }

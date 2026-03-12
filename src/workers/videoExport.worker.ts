@@ -13,6 +13,7 @@ import { BASE_STAGE_SIZE, CLASSIC_HUD_SPEC, TRANSITION_TUNING } from '../constan
 import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
 import { resolveVideoLayoutSettings } from '../constants/videoLayoutCustom';
 import { VIDEO_PACKAGE_PRESETS, resolvePackageImageArrangement } from '../constants/videoPackages';
+import { drawGeneratedBackground, resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
 import { applyLogoChromaKey, clampLogoZoom } from '../utils/logoProcessing';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
 import type { BinaryRenderablePuzzle, VideoExportWorkerStartPayload, VideoRenderSource } from '../services/videoRenderSource';
@@ -50,6 +51,7 @@ type ExportVideoOptions =
       source: 'legacy';
       puzzles: Puzzle[];
       settings: VideoSettings;
+      generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
       streamOutput?: boolean;
       onProgress?: (progress: number, status?: string) => void;
     }
@@ -57,6 +59,7 @@ type ExportVideoOptions =
       source: 'binary';
       puzzles: BinaryRenderablePuzzle[];
       settings: VideoSettings;
+      generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
       streamOutput?: boolean;
       onProgress?: (progress: number, status?: string) => void;
     };
@@ -65,6 +68,7 @@ interface PreviewFrameOptions {
   puzzles: Puzzle[];
   settings: VideoSettings;
   timestamp: number;
+  generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
 }
 
 interface WorkerStartMessage {
@@ -78,6 +82,7 @@ interface WorkerPreviewFrameMessage {
     puzzles: Puzzle[];
     settings: VideoSettings;
     timestamp: number;
+    generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
   };
 }
 
@@ -1498,6 +1503,7 @@ const drawFrame = (
   loadedImages: Array<LoadedPuzzleImages | null>,
   brandLogo: ImageBitmap | null,
   settings: VideoSettings,
+  generatedBackgroundPack: VideoExportWorkerStartPayload['generatedBackgroundPack'],
   scene: RenderScene
 ) => {
   const packagePreset =
@@ -1519,6 +1525,13 @@ const drawFrame = (
   const boardStroke = isStorybookStyle ? '#3F301A' : '#000000';
   const headerBackground = visualTheme.headerBg;
   const gameBackground = visualTheme.gameBg;
+  const generatedBackgroundSpec = settings.generatedBackgroundsEnabled
+    ? resolveGeneratedBackgroundForIndex(
+        generatedBackgroundPack,
+        scene.segment.puzzleIndex,
+        settings.generatedBackgroundShuffleSeed
+      )
+    : null;
   const timerBackground = visualTheme.timerBg;
   const timerTextColor = visualTheme.timerText;
   const timerBorderColor = visualTheme.timerBorder;
@@ -2118,6 +2131,9 @@ const drawFrame = (
   ctx.save();
   roundRectPath(ctx, gameRect);
   ctx.clip();
+  if (generatedBackgroundSpec) {
+    drawGeneratedBackground(ctx, generatedBackgroundSpec, gameRect);
+  }
   if (isStorybookStyle) {
     const gameGradient = ctx.createLinearGradient(gameRect.x, gameRect.y, gameRect.x, gameRect.y + gameRect.height);
     gameGradient.addColorStop(0, 'rgba(255,255,255,0.12)');
@@ -2402,7 +2418,8 @@ const postMessageToMain = (message: WorkerResponse, transfer: Transferable[] = [
 const renderPreviewFrameInWorker = async ({
   puzzles,
   settings,
-  timestamp
+  timestamp,
+  generatedBackgroundPack
 }: PreviewFrameOptions): Promise<{ buffer: ArrayBuffer; mimeType: string }> => {
   if (!puzzles.length) throw new Error('No puzzles available for preview.');
 
@@ -2451,6 +2468,7 @@ const renderPreviewFrameInWorker = async ({
       loadedImages,
       brandLogo,
       settings,
+      generatedBackgroundPack,
       scene
     );
     throwIfCanceled();
@@ -2473,6 +2491,7 @@ const exportVideoInWorker = async ({
   source,
   puzzles,
   settings,
+  generatedBackgroundPack,
   streamOutput = false,
   onProgress
 }: ExportVideoOptions): Promise<
@@ -2622,6 +2641,7 @@ const exportVideoInWorker = async ({
         loadedImages,
         brandLogo,
         settings,
+        generatedBackgroundPack,
         scene
       );
       telemetry.totalRenderMs += Math.max(0, performance.now() - renderStart);
@@ -2729,6 +2749,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
               source: 'binary',
               puzzles: message.payload.puzzles,
               settings: message.payload.settings,
+              generatedBackgroundPack: message.payload.generatedBackgroundPack,
               streamOutput: message.payload.streamOutput,
               onProgress: (progress, status) => {
                 postMessageToMain({ type: 'progress', progress, status });
@@ -2738,6 +2759,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
               source: 'legacy',
               puzzles: message.payload.puzzles,
               settings: message.payload.settings,
+              generatedBackgroundPack: message.payload.generatedBackgroundPack,
               streamOutput: message.payload.streamOutput,
               onProgress: (progress, status) => {
                 postMessageToMain({ type: 'progress', progress, status });

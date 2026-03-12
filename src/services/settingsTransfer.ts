@@ -1,4 +1,4 @@
-import type { CustomVideoLayout } from '../types';
+import type { CustomVideoLayout, GeneratedBackgroundPack } from '../types';
 import type { WatermarkSelectionPreset } from './watermarkRemoval';
 import {
   applySplitterSetupSnapshot,
@@ -25,17 +25,22 @@ import {
   replaceVideoSceneCopyPresets,
   type VideoSceneCopyPreset
 } from './videoSceneCopyPresets';
+import {
+  loadGeneratedBackgroundPacks,
+  replaceGeneratedBackgroundPacks
+} from './backgroundPacks';
 import { loadWatermarkPresets, replaceWatermarkPresets } from './watermarkPresets';
 
 export interface AppSettingsTransferBundle {
-  kind: 'spotitnow-settings-transfer';
-  version: 1;
+  kind: 'spotitnow-settings-transfer@v2';
+  version: 2;
   exportedAt: string;
   appSettings: AppGlobalSettings;
   splitterSetup: SplitterSetupSnapshot;
   timestampPresets: FrameTimestampPreset[];
   watermarkPresets: WatermarkSelectionPreset[];
   sceneCopyPresets: VideoSceneCopyPreset[];
+  backgroundPacks: GeneratedBackgroundPack[];
   savedVideoLayout: CustomVideoLayout | null;
   gameAudioMuted: boolean;
 }
@@ -46,6 +51,7 @@ export interface ApplyAppSettingsTransferResult {
   timestampPresetCount: number;
   watermarkPresetCount: number;
   sceneCopyPresetCount: number;
+  backgroundPackCount: number;
   hasSavedVideoLayout: boolean;
   gameAudioMuted: boolean;
 }
@@ -55,8 +61,10 @@ interface CreateBundleOverrides {
   gameAudioMuted?: boolean;
 }
 
-const TRANSFER_KIND = 'spotitnow-settings-transfer';
-const TRANSFER_VERSION = 1;
+const TRANSFER_KIND = 'spotitnow-settings-transfer@v2';
+const TRANSFER_VERSION = 2;
+const LEGACY_TRANSFER_KIND = 'spotitnow-settings-transfer';
+const LEGACY_TRANSFER_VERSION = 1;
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object';
@@ -67,6 +75,7 @@ const hasKnownTransferField = (value: Record<string, unknown>) =>
   'timestampPresets' in value ||
   'watermarkPresets' in value ||
   'sceneCopyPresets' in value ||
+  'backgroundPacks' in value ||
   'savedVideoLayout' in value ||
   'gameAudioMuted' in value;
 
@@ -75,11 +84,19 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
     return null;
   }
 
-  if ('kind' in value && value.kind !== TRANSFER_KIND) {
+  if (
+    'kind' in value &&
+    value.kind !== TRANSFER_KIND &&
+    value.kind !== LEGACY_TRANSFER_KIND
+  ) {
     return null;
   }
 
-  if ('version' in value && value.version !== TRANSFER_VERSION) {
+  if (
+    'version' in value &&
+    value.version !== TRANSFER_VERSION &&
+    value.version !== LEGACY_TRANSFER_VERSION
+  ) {
     return null;
   }
 
@@ -97,6 +114,7 @@ export const createAppSettingsTransferBundle = (
   timestampPresets: loadFrameTimestampPresets(),
   watermarkPresets: loadWatermarkPresets(),
   sceneCopyPresets: loadVideoSceneCopyPresets(),
+  backgroundPacks: loadGeneratedBackgroundPacks(),
   savedVideoLayout: loadSavedVideoCustomLayout(),
   gameAudioMuted: overrides.gameAudioMuted ?? loadGameAudioMuted()
 });
@@ -138,6 +156,10 @@ export const applyAppSettingsTransferBundle = (
     'sceneCopyPresets' in candidate
       ? replaceVideoSceneCopyPresets(candidate.sceneCopyPresets)
       : currentBundle.sceneCopyPresets;
+  const backgroundPacks =
+    'backgroundPacks' in candidate
+      ? replaceGeneratedBackgroundPacks(candidate.backgroundPacks)
+      : currentBundle.backgroundPacks;
   const savedVideoLayout =
     'savedVideoLayout' in candidate
       ? replaceSavedVideoCustomLayout(candidate.savedVideoLayout)
@@ -156,6 +178,7 @@ export const applyAppSettingsTransferBundle = (
     timestampPresetCount: timestampPresets.length,
     watermarkPresetCount: watermarkPresets.length,
     sceneCopyPresetCount: sceneCopyPresets.length,
+    backgroundPackCount: backgroundPacks.length,
     hasSavedVideoLayout: Boolean(savedVideoLayout),
     gameAudioMuted
   };

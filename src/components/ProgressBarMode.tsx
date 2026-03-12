@@ -13,6 +13,8 @@ interface ProgressBarModeProps {
   settings: ProgressBarModeSettings;
   onSettingsChange: (patch: Partial<ProgressBarModeSettings>) => void;
   onBack: () => void;
+  hasActiveAppExport?: boolean;
+  onExportStateChange?: (state: { isExporting: boolean; progress: number; status: string }) => void;
 }
 
 const styleLabel = (style: VideoSettings['visualStyle']) =>
@@ -23,7 +25,13 @@ const styleLabel = (style: VideoSettings['visualStyle']) =>
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({ settings, onSettingsChange, onBack }) => {
+export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
+  settings,
+  onSettingsChange,
+  onBack,
+  hasActiveAppExport = false,
+  onExportStateChange
+}) => {
   const styleOptions = useMemo(
     () => Object.keys(VISUAL_THEMES) as VideoSettings['visualStyle'][],
     []
@@ -66,6 +74,14 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({ settings, onSe
     setPreviewTime((current) => Math.min(current, duration));
   }, [durationSeconds]);
 
+  useEffect(() => {
+    onExportStateChange?.({
+      isExporting,
+      progress: isExporting ? exportProgress : 0,
+      status: isExporting ? exportStatus : ''
+    });
+  }, [exportProgress, exportStatus, isExporting, onExportStateChange]);
+
   const previewTheme = VISUAL_THEMES[previewStyle];
   const previewDuration = Math.max(0.5, durationSeconds);
   const previewProgress = clamp(previewTime / previewDuration, 0, 1);
@@ -89,6 +105,10 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({ settings, onSe
   const handleExport = async () => {
     if (!selectedStyles.length) {
       alert('Select at least one progress bar style.');
+      return;
+    }
+    if (hasActiveAppExport && !isExporting) {
+      alert('Another export is already running. Please wait or cancel it first.');
       return;
     }
     if (isExporting) return;

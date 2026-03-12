@@ -180,20 +180,6 @@ const isSuperImageExportCancellationError = (error: unknown) =>
 const createSuperExportCancellationError = () => new Error('Super Export canceled.');
 const isSuperExportCancellationError = (error: unknown) =>
   error instanceof Error && error.message === 'Super Export canceled.';
-const handleSuperImageWorkerDiagnostics = (
-  job: MediaJobController | null,
-  message: SuperImageExportWorkerResponse
-) => {
-  if (!job) return;
-  if (message.type === 'task-event') {
-    job.handleTaskEvent(message.event);
-    return;
-  }
-  if (message.type === 'stats') {
-    job.updateWorkerStats(message.stats);
-  }
-};
-
 const sanitizePrefix = (value: string) => {
   const cleaned = value.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '').replace(/\s+/g, '');
   return cleaned || 'puzzle';
@@ -2388,11 +2374,6 @@ const runFrameSuperImageExportInWorker = async ({
 
     worker.onmessage = (event: MessageEvent<SuperImageExportWorkerResponse>) => {
       const message = event.data;
-
-      if (message.type === 'task-event' || message.type === 'stats') {
-        handleSuperImageWorkerDiagnostics(job, message);
-        return;
-      }
 
       if (message.type === 'progress') {
         onProgress?.({

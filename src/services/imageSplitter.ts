@@ -1631,6 +1631,13 @@ export const splitCombinedFileSmart = async (file: File): Promise<SplitCombinedF
   };
 };
 
+export const splitCombinedFileSmartToCanvas = async (file: File): Promise<SplitPairCanvasData> => {
+  const src = await readFileAsDataUrl(file);
+  const { sourceCanvas } = await createSourceCanvasFromImageSource(src);
+  const sourceMaskData = createForegroundMask(sourceCanvas);
+  return extractSplitPairCanvasesFromCanvas(sourceCanvas, sourceMaskData);
+};
+
 export const dataUrlToPngBlob = async (src: string): Promise<Blob> => {
   const image = await loadImageFromSource(src);
   const width = Math.max(1, 'naturalWidth' in image ? image.naturalWidth || image.width : image.width);

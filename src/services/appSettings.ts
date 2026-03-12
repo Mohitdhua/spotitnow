@@ -108,7 +108,10 @@ const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
   logoZoom: 1,
   logoChromaKeyEnabled: false,
   logoChromaKeyColor: '#00FF00',
-  logoChromaKeyTolerance: 70
+  logoChromaKeyTolerance: 70,
+  generatedBackgroundsEnabled: false,
+  generatedBackgroundPackId: '',
+  generatedBackgroundShuffleSeed: 1
 };
 
 export const DEFAULT_APP_GLOBAL_SETTINGS: AppGlobalSettings = {
@@ -252,6 +255,9 @@ const sanitizeOptionalText = (value: unknown) => (typeof value === 'string' ? va
 
 const sanitizeBoolean = (value: unknown, fallback: boolean) =>
   typeof value === 'boolean' ? value : fallback;
+
+const sanitizeInteger = (value: unknown, fallback: number, min: number, max: number) =>
+  clamp(Math.floor(Number(value) || fallback), min, max);
 
 const sanitizeSuperImageExportMode = (value: unknown): SuperImageExportMode =>
   value === 'folder' ? 'folder' : 'zip';
@@ -432,6 +438,17 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
         Number(mergedVideo.logoChromaKeyTolerance) || 0,
         0,
         255
+      ),
+      generatedBackgroundsEnabled: sanitizeBoolean(
+        mergedVideo.generatedBackgroundsEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.generatedBackgroundsEnabled
+      ),
+      generatedBackgroundPackId: sanitizeOptionalText(mergedVideo.generatedBackgroundPackId),
+      generatedBackgroundShuffleSeed: sanitizeInteger(
+        mergedVideo.generatedBackgroundShuffleSeed,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.generatedBackgroundShuffleSeed,
+        1,
+        9999
       )
     },
     frameExtractorDefaults: {

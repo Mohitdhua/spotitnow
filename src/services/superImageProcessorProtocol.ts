@@ -1,3 +1,4 @@
+import type { Region } from '../types';
 import type { SplitterSharedRegion } from './appSettings';
 import type { WatermarkSelectionPreset } from './watermarkRemoval';
 
@@ -22,6 +23,8 @@ export interface SuperImageProcessorSuccessPayload {
   diffCount: number;
   puzzleBuffer: ArrayBuffer;
   diffBuffer: ArrayBuffer;
+  mimeType: string;
+  regions: Region[];
   watermarkApplied: boolean;
 }
 

@@ -44,6 +44,7 @@ interface FrameExtractorModeProps {
   onSendToBatchAuto: (files: File[]) => void;
   hasActiveAppExport?: boolean;
   onSuperImageExportStateChange?: (state: { isExporting: boolean; progress: number; status: string }) => void;
+  onSuperExportStateChange?: (state: { isExporting: boolean; progress: number; status: string }) => void;
 }
 
 interface UploadedVideoItem {
@@ -144,7 +145,8 @@ export function FrameExtractorMode({
   defaultsSessionId,
   onSendToBatchAuto,
   hasActiveAppExport = false,
-  onSuperImageExportStateChange
+  onSuperImageExportStateChange,
+  onSuperExportStateChange
 }: FrameExtractorModeProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [videos, setVideos] = useState<UploadedVideoItem[]>([]);
@@ -206,6 +208,14 @@ export function FrameExtractorMode({
       status: isSuperImaging ? status : ''
     });
   }, [isSuperImaging, progress, status, onSuperImageExportStateChange]);
+
+  useEffect(() => {
+    onSuperExportStateChange?.({
+      isExporting: isSuperExporting,
+      progress: isSuperExporting ? Math.max(0, Math.min(1, progress)) : 0,
+      status: isSuperExporting ? status : ''
+    });
+  }, [isSuperExporting, onSuperExportStateChange, progress, status]);
 
   const parsedTimestamps = useMemo(() => parseTimestampInput(timestampsText), [timestampsText]);
   const requestedFrames = videos.length * parsedTimestamps.timestamps.length;
