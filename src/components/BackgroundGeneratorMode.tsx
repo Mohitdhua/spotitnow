@@ -1,14 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Download, Library, RefreshCcw, Trash2, Upload } from 'lucide-react';
+import { ConfirmDialog } from '../app/components/ConfirmDialog';
+import { TextPromptDialog } from '../app/components/TextPromptDialog';
 import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
-import { deleteGeneratedBackgroundPack, loadGeneratedBackgroundPacks, replaceGeneratedBackgroundPacks, saveGeneratedBackgroundPack } from '../services/backgroundPacks';
+import {
+  deleteGeneratedBackgroundPack,
+  loadGeneratedBackgroundPacks,
+  renameGeneratedBackgroundPack,
+  replaceGeneratedBackgroundPacks,
+  saveGeneratedBackgroundPack
+} from '../services/backgroundPacks';
 import {
   createGeneratedBackgroundPack,
+  GENERATED_BACKGROUND_FAMILY_OPTIONS,
+  GENERATED_BACKGROUND_PACK_SIZE,
   GENERATED_BACKGROUND_PALETTE_OPTIONS,
-  GENERATED_BACKGROUND_SCENE_OPTIONS,
   resolveGeneratedBackgroundForIndex
 } from '../services/generatedBackgrounds';
-import type { GeneratedBackgroundPaletteId, GeneratedBackgroundSceneKind, VideoSettings } from '../types';
+import type { GeneratedBackgroundMotifFamily, GeneratedBackgroundPaletteId, VideoSettings } from '../types';
 
 interface BackgroundGeneratorModeProps {
   onBack: () => void;
@@ -16,18 +25,17 @@ interface BackgroundGeneratorModeProps {
   onLibraryChange?: () => void;
 }
 
-type SceneFocus = 'balanced' | 'arcade' | 'nature' | 'city' | 'dream';
+type MotifFocus = 'balanced' | 'party' | 'paper' | 'comic' | 'calm';
 type PaletteFocus = 'mixed' | 'warm' | 'cool' | 'night';
 
-const PACK_COUNT_OPTIONS = [24, 50, 100];
 const ASPECT_RATIOS: VideoSettings['aspectRatio'][] = ['16:9', '9:16', '1:1', '4:3'];
 
-const SCENE_FOCUS_OPTIONS: Array<{ value: SceneFocus; label: string; description: string }> = [
-  { value: 'balanced', label: 'Balanced', description: 'A broad mix for general video production.' },
-  { value: 'arcade', label: 'Arcade', description: 'Cabinets, studio sets, and high-energy interiors.' },
-  { value: 'nature', label: 'Nature', description: 'Forest and seaside scenes with softer depth.' },
-  { value: 'city', label: 'City', description: 'Urban skylines and structured production floors.' },
-  { value: 'dream', label: 'Dream', description: 'Surreal, playful, and more stylized backdrops.' }
+const MOTIF_FOCUS_OPTIONS: Array<{ value: MotifFocus; label: string; description: string }> = [
+  { value: 'balanced', label: 'Balanced', description: 'A broad mix of decorative backdrops for general puzzle videos.' },
+  { value: 'party', label: 'Party', description: 'Confetti, bursts, spark trails, and high-energy celebration motifs.' },
+  { value: 'paper', label: 'Paper Cut', description: 'Layered collage, ribbons, blobs, and calmer handcrafted depth.' },
+  { value: 'comic', label: 'Comic', description: 'Halftone dots, doodles, stickers, and more punchy editorial energy.' },
+  { value: 'calm', label: 'Calm Motion', description: 'Waves, soft blobs, and lighter motion that stays quiet behind panels.' }
 ];
 
 const PALETTE_FOCUS_OPTIONS: Array<{ value: PaletteFocus; label: string; description: string }> = [
@@ -49,19 +57,19 @@ const downloadJson = (data: unknown, filename: string) => {
   URL.revokeObjectURL(url);
 };
 
-const resolveSceneKinds = (focus: SceneFocus): GeneratedBackgroundSceneKind[] => {
+const resolveFamilies = (focus: MotifFocus): GeneratedBackgroundMotifFamily[] => {
   switch (focus) {
-    case 'arcade':
-      return ['arcade', 'studio', 'city'];
-    case 'nature':
-      return ['forest', 'seaside', 'dreamscape'];
-    case 'city':
-      return ['city', 'studio', 'arcade'];
-    case 'dream':
-      return ['dreamscape', 'arcade', 'seaside'];
+    case 'party':
+      return ['confetti_field', 'starburst', 'spark_trails', 'sticker_scatter'];
+    case 'paper':
+      return ['paper_cut', 'ribbon_swoop', 'blob_garden', 'layered_waves'];
+    case 'comic':
+      return ['comic_dots', 'doodle_parade', 'sticker_scatter', 'starburst'];
+    case 'calm':
+      return ['layered_waves', 'paper_cut', 'blob_garden', 'spark_trails'];
     case 'balanced':
     default:
-      return GENERATED_BACKGROUND_SCENE_OPTIONS.map((entry) => entry.value);
+      return GENERATED_BACKGROUND_FAMILY_OPTIONS.map((entry) => entry.value);
   }
 };
 
@@ -89,11 +97,12 @@ export function BackgroundGeneratorMode({
   const [selectedPackId, setSelectedPackId] = useState(() => loadGeneratedBackgroundPacks()[0]?.id ?? '');
   const [previewIndex, setPreviewIndex] = useState(0);
   const [packName, setPackName] = useState(`Spotitnow Pack ${new Date().toLocaleDateString()}`);
-  const [packCount, setPackCount] = useState(100);
   const [aspectRatio, setAspectRatio] = useState<VideoSettings['aspectRatio']>('16:9');
-  const [sceneFocus, setSceneFocus] = useState<SceneFocus>('balanced');
+  const [motifFocus, setMotifFocus] = useState<MotifFocus>('balanced');
   const [paletteFocus, setPaletteFocus] = useState<PaletteFocus>('mixed');
   const [baseSeed, setBaseSeed] = useState(() => Math.max(1, Math.floor(Date.now() % 100000)));
+  const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 
   useEffect(() => {
     const nextPacks = loadGeneratedBackgroundPacks();
@@ -130,10 +139,10 @@ export function BackgroundGeneratorMode({
   const handleGeneratePack = () => {
     const pack = createGeneratedBackgroundPack({
       name: packName,
-      count: packCount,
+      count: GENERATED_BACKGROUND_PACK_SIZE,
       aspectRatio,
       baseSeed,
-      sceneKinds: resolveSceneKinds(sceneFocus),
+      families: resolveFamilies(motifFocus),
       paletteIds: resolvePaletteIds(paletteFocus)
     });
     saveGeneratedBackgroundPack(pack);
@@ -143,19 +152,39 @@ export function BackgroundGeneratorMode({
 
   const handleDeleteSelectedPack = () => {
     if (!selectedPack) return;
-    if (!window.confirm(`Delete "${selectedPack.name}"?`)) {
-      return;
-    }
+    setIsDeleteDialogOpen(true);
+  };
+
+  const confirmDeleteSelectedPack = () => {
+    if (!selectedPack) return;
     const nextPacks = deleteGeneratedBackgroundPack(selectedPack.id);
     setPacks(nextPacks);
     setSelectedPackId(nextPacks[0]?.id ?? '');
     setPreviewIndex(0);
+    setIsDeleteDialogOpen(false);
     onLibraryChange?.();
   };
 
   const handleExportSelectedPack = () => {
     if (!selectedPack) return;
     downloadJson(selectedPack, `${selectedPack.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'background-pack'}.json`);
+  };
+
+  const handleRenameSelectedPack = () => {
+    if (!selectedPack) return;
+    setIsRenameDialogOpen(true);
+  };
+
+  const confirmRenameSelectedPack = (nextName: string) => {
+    if (!selectedPack || nextName.trim() === selectedPack.name) {
+      setIsRenameDialogOpen(false);
+      return;
+    }
+    const nextPacks = renameGeneratedBackgroundPack(selectedPack.id, nextName.trim());
+    setPacks(nextPacks);
+    setSelectedPackId(selectedPack.id);
+    setIsRenameDialogOpen(false);
+    onLibraryChange?.();
   };
 
   const handleImportPack = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -200,7 +229,7 @@ export function BackgroundGeneratorMode({
                   Build reusable game-area packs
                 </h2>
                 <p className="mt-2 max-w-2xl text-sm font-semibold text-slate-700">
-                  Create structured background libraries, preview them live, and wire them straight into video setup and exports.
+                  Create engaging scene-background packs for spot-the-difference videos, preview the motion live, and use them in video setup and export.
                 </p>
               </div>
             </div>
@@ -284,39 +313,29 @@ export function BackgroundGeneratorMode({
               </div>
 
               <div className="mt-4 grid gap-4 md:grid-cols-3">
-                <div className="space-y-2">
+                <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4">
                   <div className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">Pack Size</div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {PACK_COUNT_OPTIONS.map((option) => (
-                      <button
-                        key={option}
-                        type="button"
-                        onClick={() => setPackCount(option)}
-                        className={`rounded-xl border-2 border-black px-3 py-3 text-xs font-black uppercase ${
-                          packCount === option ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                        }`}
-                      >
-                        {option}
-                      </button>
-                    ))}
+                  <div className="mt-2 text-3xl font-black text-slate-900">{GENERATED_BACKGROUND_PACK_SIZE}</div>
+                  <div className="mt-2 text-[10px] font-bold uppercase text-slate-500">
+                    Every saved pack always contains exactly 100 recipes.
                   </div>
                 </div>
 
                 <label className="space-y-2">
-                  <span className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">Scene Blend</span>
+                  <span className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">Motif Blend</span>
                   <select
-                    value={sceneFocus}
-                    onChange={(event) => setSceneFocus(event.target.value as SceneFocus)}
+                    value={motifFocus}
+                    onChange={(event) => setMotifFocus(event.target.value as MotifFocus)}
                     className="w-full rounded-xl border-2 border-black bg-[#FFFDF5] px-3 py-3 text-sm font-semibold text-slate-900 outline-none"
                   >
-                    {SCENE_FOCUS_OPTIONS.map((option) => (
+                    {MOTIF_FOCUS_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
                       </option>
                     ))}
                   </select>
                   <div className="text-[10px] font-bold uppercase text-slate-500">
-                    {SCENE_FOCUS_OPTIONS.find((option) => option.value === sceneFocus)?.description}
+                    {MOTIF_FOCUS_OPTIONS.find((option) => option.value === motifFocus)?.description}
                   </div>
                 </label>
 
@@ -405,19 +424,29 @@ export function BackgroundGeneratorMode({
                     {selectedPack ? `${selectedPack.backgrounds.length} backgrounds • ${aspectLabel}` : 'Create or import a pack to preview it here.'}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleDeleteSelectedPack}
-                  disabled={!selectedPack}
-                  className="rounded-xl border-2 border-black bg-white p-2.5 text-slate-800 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Trash2 size={18} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRenameSelectedPack}
+                    disabled={!selectedPack}
+                    className="rounded-xl border-2 border-black bg-white px-3 py-2 text-[10px] font-black uppercase text-slate-800 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Rename
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeleteSelectedPack}
+                    disabled={!selectedPack}
+                    className="rounded-xl border-2 border-black bg-white p-2.5 text-slate-800 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trash2 size={18} />
+                  </button>
+                </div>
               </div>
 
               <div className="mt-4 aspect-video overflow-hidden rounded-[22px] border-4 border-black bg-slate-100">
                 {selectedPreview ? (
-                  <GeneratedBackgroundCanvas spec={selectedPreview} className="h-full w-full" showSafeArea />
+                  <GeneratedBackgroundCanvas spec={selectedPreview} className="h-full w-full" showSafeArea animate />
                 ) : (
                   <div className="flex h-full items-center justify-center text-sm font-black uppercase text-slate-500">
                     No preview available
@@ -456,9 +485,7 @@ export function BackgroundGeneratorMode({
             <div className="rounded-2xl border-4 border-black bg-white p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] md:p-5">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-lg font-black uppercase">Preview Strip</h3>
-                <span className="text-[10px] font-bold uppercase text-slate-500">
-                  First eight backgrounds
-                </span>
+                <span className="text-[10px] font-bold uppercase text-slate-500">First eight recipes</span>
               </div>
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {starterThumbnails.map((background, index) => (
@@ -483,6 +510,28 @@ export function BackgroundGeneratorMode({
           </div>
         </div>
       </div>
+
+      <TextPromptDialog
+        open={isRenameDialogOpen}
+        title="Rename Background Pack"
+        description="Update the pack name without changing any generated backgrounds."
+        label="Pack name"
+        placeholder="Background pack"
+        initialValue={selectedPack?.name ?? ''}
+        confirmLabel="Rename"
+        onOpenChange={setIsRenameDialogOpen}
+        onConfirm={confirmRenameSelectedPack}
+      />
+
+      <ConfirmDialog
+        open={isDeleteDialogOpen}
+        title="Delete Background Pack?"
+        description={selectedPack ? `Delete "${selectedPack.name}" from your generated background library?` : ''}
+        confirmLabel="Delete"
+        tone="danger"
+        onOpenChange={setIsDeleteDialogOpen}
+        onConfirm={confirmDeleteSelectedPack}
+      />
     </div>
   );
 }

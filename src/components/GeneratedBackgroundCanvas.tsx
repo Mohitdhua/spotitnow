@@ -1,20 +1,27 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { GeneratedBackgroundSpec } from '../types';
+import type { GeneratedBackgroundRecipe } from '../types';
 import { renderGeneratedBackgroundToCanvas } from '../services/generatedBackgrounds';
 
 interface GeneratedBackgroundCanvasProps {
-  spec: GeneratedBackgroundSpec;
+  spec: GeneratedBackgroundRecipe;
   className?: string;
   showSafeArea?: boolean;
+  animate?: boolean;
+  paused?: boolean;
+  timeSeconds?: number;
 }
 
 export function GeneratedBackgroundCanvas({
   spec,
   className = '',
-  showSafeArea = false
+  showSafeArea = false,
+  animate = false,
+  paused = false,
+  timeSeconds
 }: GeneratedBackgroundCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const animationTimeRef = useRef(0);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
@@ -51,15 +58,45 @@ export function GeneratedBackgroundCanvas({
     if (!canvasRef.current || size.width <= 0 || size.height <= 0) {
       return;
     }
+    const canvas = canvasRef.current;
     const deviceScale = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     const renderWidth = Math.max(1, Math.round(size.width * deviceScale));
     const renderHeight = Math.max(1, Math.round(size.height * deviceScale));
-    canvasRef.current.width = renderWidth;
-    canvasRef.current.height = renderHeight;
-    renderGeneratedBackgroundToCanvas(spec, renderWidth, renderHeight, canvasRef.current);
-    canvasRef.current.style.width = `${size.width}px`;
-    canvasRef.current.style.height = `${size.height}px`;
-  }, [size.height, size.width, spec]);
+    canvas.width = renderWidth;
+    canvas.height = renderHeight;
+    canvas.style.width = `${size.width}px`;
+    canvas.style.height = `${size.height}px`;
+
+    let animationFrameId = 0;
+
+    const paint = (effectiveTime: number) => {
+      renderGeneratedBackgroundToCanvas(spec, renderWidth, renderHeight, canvas, effectiveTime);
+    };
+
+    if (typeof timeSeconds === 'number') {
+      animationTimeRef.current = timeSeconds;
+      paint(timeSeconds);
+      return;
+    }
+
+    if (!animate || paused) {
+      paint(animationTimeRef.current);
+      return;
+    }
+
+    const startedAt = performance.now() - animationTimeRef.current * 1000;
+    const tick = (now: number) => {
+      animationTimeRef.current = (now - startedAt) / 1000;
+      paint(animationTimeRef.current);
+      animationFrameId = window.requestAnimationFrame(tick);
+    };
+
+    animationFrameId = window.requestAnimationFrame(tick);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+    };
+  }, [animate, paused, size.height, size.width, spec, timeSeconds]);
 
   return (
     <div ref={containerRef} className={`relative overflow-hidden ${className}`}>

@@ -1,13 +1,18 @@
 import { VideoSettings } from '../types';
+import type { ProgressBarVisualStyle } from '../constants/progressBarThemes';
 
 export type ProgressBarExportSettings = Pick<
   VideoSettings,
   'exportResolution' | 'exportBitrateMbps' | 'exportCodec'
 >;
 
+export type ProgressBarRenderMode = 'bar' | 'text_fill';
+
 interface ExportProgressBarOptions {
-  style: VideoSettings['visualStyle'];
+  style: ProgressBarVisualStyle;
   durationSeconds: number;
+  renderMode: ProgressBarRenderMode;
+  progressLabel: string;
   settings: ProgressBarExportSettings;
   onProgress?: (progress: number, status?: string) => void;
 }
@@ -45,6 +50,8 @@ export const cancelProgressBarExport = () => {
 export const renderProgressBarWithWebCodecs = async ({
   style,
   durationSeconds,
+  renderMode,
+  progressLabel,
   settings,
   onProgress
 }: ExportProgressBarOptions): Promise<RenderedProgressBarResult> => {
@@ -109,6 +116,8 @@ export const renderProgressBarWithWebCodecs = async ({
       payload: {
         style,
         durationSeconds,
+        renderMode,
+        progressLabel,
         settings
       }
     });

@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Clock3, Download, Layers, LoaderCircle, Sparkles, Trash2, Upload, Video } from 'lucide-react';
+import { ConfirmDialog } from '../app/components/ConfirmDialog';
 import { VIDEO_PACKAGE_PRESETS } from '../constants/videoPackages';
-import { buildDefaultCustomVideoLayout } from '../constants/videoLayoutCustom';
+import { SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES } from '../constants/superExportThumbnailCopyTemplates';
+import { SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS } from '../constants/superExportThumbnailStyles';
 import { TimestampPresetPicker } from './TimestampPresetPicker';
 import {
   ExtractFramesSummary,
@@ -16,10 +18,11 @@ import {
   SplitterDefaults,
   type SuperImageExportMode
 } from '../services/appSettings';
-import { type CustomVideoLayout, type VideoSettings } from '../types';
+import { type VideoSettings, type VideoUserPackage } from '../types';
 import { runFrameAutoAligner, type FrameAutoAlignerResult } from '../services/frameAutoAligner';
 import {
   canUseSuperImageDirectoryExport,
+  renderSuperExportThumbnailPreview,
   requestSuperImageOutputDirectory,
   runFrameSuperExport,
   runFrameSuperImageExport,
@@ -28,20 +31,18 @@ import {
 } from '../services/superExport';
 import { loadWatermarkPresets } from '../services/watermarkPresets';
 import type { WatermarkSelectionPreset } from '../services/watermarkRemoval';
-import {
-  applyVideoSceneCopyPresetToSettings,
-  loadVideoSceneCopyPresets,
-  type VideoSceneCopyPreset
-} from '../services/videoSceneCopyPresets';
-import { loadSavedVideoCustomLayout } from '../services/videoLayoutStorage';
 
 interface FrameExtractorModeProps {
   onBack: () => void;
   defaults: FrameExtractorDefaults;
   splitterDefaults: SplitterDefaults;
   videoSettings: VideoSettings;
+  videoPackages: VideoUserPackage[];
+  activeVideoPackageId: string;
   defaultsSessionId: number;
   onSendToBatchAuto: (files: File[]) => void;
+  onSelectVideoPackage: (packageId: string) => void;
+  onOpenVideoMode: () => void;
   hasActiveAppExport?: boolean;
   onSuperImageExportStateChange?: (state: { isExporting: boolean; progress: number; status: string }) => void;
   onSuperExportStateChange?: (state: { isExporting: boolean; progress: number; status: string }) => void;
@@ -51,6 +52,13 @@ interface UploadedVideoItem {
   id: string;
   file: File;
   metadata: VideoFileMetadata;
+}
+
+interface PendingWatermarkConfirm {
+  kind: 'super_image' | 'super_video';
+  message: string;
+  currentPreset: WatermarkSelectionPreset | null;
+  targetDirectory?: FileSystemDirectoryHandle | null;
 }
 
 const pad = (value: number) => String(value).padStart(2, '0');
@@ -93,47 +101,26 @@ const triggerBlobDownload = (blob: Blob, filename: string) => {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const cloneVideoSettings = (settings: VideoSettings): VideoSettings => ({
-  ...settings,
-  sceneSettings: {
-    ...settings.sceneSettings
-  },
-  textTemplates: {
-    ...settings.textTemplates
-  },
-  customLayout: settings.customLayout ? { ...settings.customLayout } : undefined
-});
+const buildThumbnailCopyText = (title: string, subtitle: string) =>
+  [title.trim(), subtitle.trim()].filter(Boolean).join('\n');
 
-const resolveSuperExportVideoSettings = ({
-  baseSettings,
-  sceneCopyPreset,
-  savedCustomLayout
-}: {
-  baseSettings: VideoSettings;
-  sceneCopyPreset?: VideoSceneCopyPreset | null;
-  savedCustomLayout?: CustomVideoLayout | null;
-}) => {
-  let nextSettings = cloneVideoSettings(baseSettings);
+const parseThumbnailCopyText = (value: string) => {
+  const lines = value
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-  if (sceneCopyPreset) {
-    nextSettings = applyVideoSceneCopyPresetToSettings(nextSettings, sceneCopyPreset);
-  }
-
-  if (savedCustomLayout) {
-    nextSettings = {
-      ...nextSettings,
-      useCustomLayout: true,
-      customLayout: {
-        ...buildDefaultCustomVideoLayout(nextSettings.videoPackagePreset, nextSettings.aspectRatio),
-        ...savedCustomLayout
-      }
+  if (lines.length === 0) {
+    return {
+      title: '',
+      subtitle: ''
     };
   }
 
   return {
-    settings: nextSettings,
-    appliedSceneCopyPresetName: sceneCopyPreset?.name ?? null,
-    appliedSavedCustomLayout: Boolean(savedCustomLayout)
+    title: lines[0] ?? '',
+    subtitle: lines.slice(1).join(' ')
   };
 };
 
@@ -142,19 +129,51 @@ export function FrameExtractorMode({
   defaults,
   splitterDefaults,
   videoSettings,
+  videoPackages,
+  activeVideoPackageId,
   defaultsSessionId,
   onSendToBatchAuto,
+  onSelectVideoPackage,
+  onOpenVideoMode,
   hasActiveAppExport = false,
   onSuperImageExportStateChange,
   onSuperExportStateChange
 }: FrameExtractorModeProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sourceSectionRef = useRef<HTMLDivElement>(null);
+  const timestampsSectionRef = useRef<HTMLDivElement>(null);
+  const outputSectionRef = useRef<HTMLDivElement>(null);
+  const recentRunsSectionRef = useRef<HTMLDivElement>(null);
   const [videos, setVideos] = useState<UploadedVideoItem[]>([]);
   const [timestampsText, setTimestampsText] = useState(defaults.timestampsText);
   const [imageFormat, setImageFormat] = useState<'jpeg' | 'png'>(defaults.format);
   const [jpegQuality, setJpegQuality] = useState(defaults.jpegQuality);
   const [superExportImagesPerVideo, setSuperExportImagesPerVideo] = useState(defaults.superExportImagesPerVideo);
   const [superImageExportMode, setSuperImageExportMode] = useState<SuperImageExportMode>(defaults.superImageExportMode);
+  const [superExportThumbnailEnabled, setSuperExportThumbnailEnabled] = useState(
+    defaults.superExportThumbnail.enabled
+  );
+  const [superExportThumbnailExportMode, setSuperExportThumbnailExportMode] = useState(
+    defaults.superExportThumbnail.exportMode
+  );
+  const [superExportThumbnailStylePreset, setSuperExportThumbnailStylePreset] = useState(
+    defaults.superExportThumbnail.stylePreset
+  );
+  const [superExportThumbnailCopyText, setSuperExportThumbnailCopyText] = useState(
+    buildThumbnailCopyText(defaults.superExportThumbnail.title, defaults.superExportThumbnail.subtitle)
+  );
+  const [superExportThumbnailTextScale, setSuperExportThumbnailTextScale] = useState(
+    defaults.superExportThumbnail.textScale
+  );
+  const [superExportThumbnailTextOffsetX, setSuperExportThumbnailTextOffsetX] = useState(
+    defaults.superExportThumbnail.textOffsetX
+  );
+  const [superExportThumbnailTextOffsetY, setSuperExportThumbnailTextOffsetY] = useState(
+    defaults.superExportThumbnail.textOffsetY
+  );
+  const [thumbnailPreviewUrl, setThumbnailPreviewUrl] = useState<string | null>(null);
+  const [thumbnailPreviewStatus, setThumbnailPreviewStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [thumbnailPreviewError, setThumbnailPreviewError] = useState('');
   const [isReadingMetadata, setIsReadingMetadata] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isSuperAligning, setIsSuperAligning] = useState(false);
@@ -171,15 +190,7 @@ export function FrameExtractorMode({
   );
   const [watermarkPresets, setWatermarkPresets] = useState<WatermarkSelectionPreset[]>([]);
   const [selectedWatermarkPresetId, setSelectedWatermarkPresetId] = useState(defaults.superExportWatermarkPresetId);
-  const [sceneCopyPresets, setSceneCopyPresets] = useState<VideoSceneCopyPreset[]>([]);
-  const [selectedSceneCopyPresetId, setSelectedSceneCopyPresetId] = useState(defaults.sceneCopyPresetId);
-  const [useSavedSceneCopyForSuperExport, setUseSavedSceneCopyForSuperExport] = useState(
-    defaults.useSceneCopyPresetForSuperExport
-  );
-  const [useSavedLayoutForSuperExport, setUseSavedLayoutForSuperExport] = useState(
-    defaults.useSavedVideoLayoutForSuperExport
-  );
-  const [savedVideoCustomLayout, setSavedVideoCustomLayout] = useState<CustomVideoLayout | null>(null);
+  const [pendingWatermarkConfirm, setPendingWatermarkConfirm] = useState<PendingWatermarkConfirm | null>(null);
 
   useEffect(() => {
     setTimestampsText(defaults.timestampsText);
@@ -187,18 +198,22 @@ export function FrameExtractorMode({
     setJpegQuality(defaults.jpegQuality);
     setSuperExportImagesPerVideo(defaults.superExportImagesPerVideo);
     setSuperImageExportMode(defaults.superImageExportMode);
+    setSuperExportThumbnailEnabled(defaults.superExportThumbnail.enabled);
+    setSuperExportThumbnailExportMode(defaults.superExportThumbnail.exportMode);
+    setSuperExportThumbnailStylePreset(defaults.superExportThumbnail.stylePreset);
+    setSuperExportThumbnailCopyText(
+      buildThumbnailCopyText(defaults.superExportThumbnail.title, defaults.superExportThumbnail.subtitle)
+    );
+    setSuperExportThumbnailTextScale(defaults.superExportThumbnail.textScale);
+    setSuperExportThumbnailTextOffsetX(defaults.superExportThumbnail.textOffsetX);
+    setSuperExportThumbnailTextOffsetY(defaults.superExportThumbnail.textOffsetY);
     setUseSuperExportWatermarkRemoval(defaults.superExportWatermarkRemoval);
     setSelectedWatermarkPresetId(defaults.superExportWatermarkPresetId);
-    setSelectedSceneCopyPresetId(defaults.sceneCopyPresetId);
-    setUseSavedSceneCopyForSuperExport(defaults.useSceneCopyPresetForSuperExport);
-    setUseSavedLayoutForSuperExport(defaults.useSavedVideoLayoutForSuperExport);
   }, [defaults, defaultsSessionId]);
 
   useEffect(() => {
     const nextPresets = loadWatermarkPresets();
     setWatermarkPresets(nextPresets);
-    setSceneCopyPresets(loadVideoSceneCopyPresets());
-    setSavedVideoCustomLayout(loadSavedVideoCustomLayout());
   }, [defaultsSessionId]);
 
   useEffect(() => {
@@ -231,30 +246,21 @@ export function FrameExtractorMode({
     () => watermarkPresets.find((preset) => preset.id === selectedWatermarkPresetId) ?? null,
     [watermarkPresets, selectedWatermarkPresetId]
   );
-  const selectedSceneCopyPreset = useMemo(
-    () => sceneCopyPresets.find((preset) => preset.id === selectedSceneCopyPresetId) ?? null,
-    [sceneCopyPresets, selectedSceneCopyPresetId]
+  const activeVideoPackage = useMemo(
+    () => videoPackages.find((entry) => entry.id === activeVideoPackageId) ?? videoPackages[0] ?? null,
+    [activeVideoPackageId, videoPackages]
   );
-  const effectiveSuperExportVideoSetup = useMemo(
-    () =>
-      resolveSuperExportVideoSettings({
-        baseSettings: videoSettings,
-        sceneCopyPreset: useSavedSceneCopyForSuperExport ? selectedSceneCopyPreset : null,
-        savedCustomLayout: useSavedLayoutForSuperExport ? savedVideoCustomLayout : null
-      }),
-    [
-      videoSettings,
-      useSavedSceneCopyForSuperExport,
-      selectedSceneCopyPreset,
-      useSavedLayoutForSuperExport,
-      savedVideoCustomLayout
-    ]
-  );
+  const parsedThumbnailCopy = useMemo(() => parseThumbnailCopyText(superExportThumbnailCopyText), [superExportThumbnailCopyText]);
   const effectiveSuperExportPackageLabel =
-    VIDEO_PACKAGE_PRESETS[effectiveSuperExportVideoSetup.settings.videoPackagePreset]?.label ??
-    effectiveSuperExportVideoSetup.settings.videoPackagePreset;
+    activeVideoPackage?.name ??
+    VIDEO_PACKAGE_PRESETS[videoSettings.videoPackagePreset]?.label ??
+    videoSettings.videoPackagePreset;
+  const currentVideoPresetLabel =
+    VIDEO_PACKAGE_PRESETS[videoSettings.videoPackagePreset]?.label ?? videoSettings.videoPackagePreset;
+  const effectiveThumbnailBadgeLabel = videoSettings.textTemplates.puzzleBadgeLabel;
   const supportsDirectoryExport = canUseSuperImageDirectoryExport();
   const superImageExportTargetLabel = superImageExportMode === 'folder' ? 'folder' : 'zip';
+  const thumbnailPreviewAspectRatio = videoSettings.aspectRatio.replace(':', ' / ');
 
   useEffect(() => {
     if (!supportsDirectoryExport && superImageExportMode === 'folder') {
@@ -262,22 +268,112 @@ export function FrameExtractorMode({
     }
   }, [superImageExportMode, supportsDirectoryExport]);
 
-  const refreshSavedSuperExportVideoSetup = () => {
-    const nextSceneCopyPresets = loadVideoSceneCopyPresets();
-    const nextSavedVideoCustomLayout = loadSavedVideoCustomLayout();
-    setSceneCopyPresets(nextSceneCopyPresets);
-    setSavedVideoCustomLayout(nextSavedVideoCustomLayout);
-    if (
-      selectedSceneCopyPresetId &&
-      !nextSceneCopyPresets.some((preset) => preset.id === selectedSceneCopyPresetId)
-    ) {
-      setSelectedSceneCopyPresetId('');
-    }
-    return {
-      nextSceneCopyPresets,
-      nextSavedVideoCustomLayout
+  useEffect(() => {
+    return () => {
+      if (thumbnailPreviewUrl) {
+        URL.revokeObjectURL(thumbnailPreviewUrl);
+      }
     };
-  };
+  }, [thumbnailPreviewUrl]);
+
+  useEffect(() => {
+    if (
+      !superExportThumbnailEnabled ||
+      isBusy ||
+      videos.length === 0 ||
+      parsedTimestamps.timestamps.length === 0
+    ) {
+      setThumbnailPreviewStatus('idle');
+      setThumbnailPreviewError('');
+      return;
+    }
+
+    const firstVideo = videos[0]?.file;
+    const firstTimestamp = parsedTimestamps.timestamps[0];
+    if (!firstVideo || !firstTimestamp) {
+      setThumbnailPreviewStatus('idle');
+      setThumbnailPreviewError('');
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setThumbnailPreviewStatus('loading');
+      setThumbnailPreviewError('');
+
+      try {
+        const previewBlob = await renderSuperExportThumbnailPreview({
+          video: firstVideo,
+          timestamp: firstTimestamp,
+          format: imageFormat,
+          jpegQuality,
+          videoSettings,
+          sharedRegion: readSplitterSharedRegion(),
+          thumbnail: {
+            enabled: true,
+            exportMode: superExportThumbnailExportMode,
+            stylePreset: superExportThumbnailStylePreset,
+            title: parsedThumbnailCopy.title,
+            subtitle: parsedThumbnailCopy.subtitle,
+            badgeLabel: effectiveThumbnailBadgeLabel,
+            textScale: superExportThumbnailTextScale,
+            textOffsetX: superExportThumbnailTextOffsetX,
+            textOffsetY: superExportThumbnailTextOffsetY
+          },
+          watermarkRemoval: {
+            enabled: useSuperExportWatermarkRemoval,
+            selectionPreset: useSuperExportWatermarkRemoval ? selectedWatermarkPreset : null
+          },
+          signal: controller.signal
+        });
+
+        const nextUrl = URL.createObjectURL(previewBlob);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(nextUrl);
+          return;
+        }
+
+        setThumbnailPreviewUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return nextUrl;
+        });
+        setThumbnailPreviewStatus('ready');
+      } catch (error) {
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+          return;
+        }
+        setThumbnailPreviewStatus('error');
+        setThumbnailPreviewError(
+          error instanceof Error ? error.message : 'Thumbnail preview render failed.'
+        );
+      }
+    }, 260);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [
+    imageFormat,
+    isBusy,
+    jpegQuality,
+    parsedThumbnailCopy.subtitle,
+    parsedThumbnailCopy.title,
+    parsedTimestamps.timestamps,
+    selectedWatermarkPreset,
+    effectiveThumbnailBadgeLabel,
+    superExportThumbnailEnabled,
+    superExportThumbnailExportMode,
+    superExportThumbnailStylePreset,
+    superExportThumbnailTextOffsetX,
+    superExportThumbnailTextOffsetY,
+    superExportThumbnailTextScale,
+    useSuperExportWatermarkRemoval,
+    videoSettings,
+    videos
+  ]);
 
   const handleAddVideos = async (files: FileList | null) => {
     const selected = files ? Array.from(files).filter((file) => file.type.startsWith('video/')) : [];
@@ -431,41 +527,13 @@ export function FrameExtractorMode({
     }
   };
 
-  const handleSuperImageExport = async () => {
-    if (!canSuperImage) return;
-    if (hasActiveAppExport && !isSuperImaging) {
-      alert('Another export is already running. Please wait or cancel it first.');
-      return;
-    }
-
-    let targetDirectory: FileSystemDirectoryHandle | null = null;
-    if (superImageExportMode === 'folder' && canUseSuperImageDirectoryExport()) {
-      try {
-        targetDirectory = await requestSuperImageOutputDirectory(splitterDefaults);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to select a folder for Super Image export.';
-        alert(message);
-        return;
-      }
-    }
-
-    const latestPresets = loadWatermarkPresets();
-    setWatermarkPresets(latestPresets);
-    const currentPreset =
-      latestPresets.find((preset) => preset.id === selectedWatermarkPresetId) ?? selectedWatermarkPreset;
-
-    if (useSuperExportWatermarkRemoval) {
-      const methodLabel = currentPreset
-        ? `the saved preset "${currentPreset.name}"`
-        : 'automatic watermark detection';
-      const confirmed = window.confirm(
-        `Super Image Export will remove watermarks using ${methodLabel} before building the ${superImageExportTargetLabel}. Puzzle Image (A) maps to files like puzzle1.png and Diff Image (B) maps to files like puzzle1diff.png. This adds extra processing time. Continue?`
-      );
-      if (!confirmed) {
-        return;
-      }
-    }
-
+  const runSuperImageExportFlow = async ({
+    targetDirectory,
+    currentPreset
+  }: {
+    targetDirectory: FileSystemDirectoryHandle | null;
+    currentPreset: WatermarkSelectionPreset | null;
+  }) => {
     setSummary(null);
     setAlignerSummary(null);
     setSuperImageSummary(null);
@@ -519,8 +587,23 @@ export function FrameExtractorMode({
     }
   };
 
-  const handleSuperExport = async () => {
-    if (!canSuperExport) return;
+  const handleSuperImageExport = async () => {
+    if (!canSuperImage) return;
+    if (hasActiveAppExport && !isSuperImaging) {
+      alert('Another export is already running. Please wait or cancel it first.');
+      return;
+    }
+
+    let targetDirectory: FileSystemDirectoryHandle | null = null;
+    if (superImageExportMode === 'folder' && canUseSuperImageDirectoryExport()) {
+      try {
+        targetDirectory = await requestSuperImageOutputDirectory(splitterDefaults);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to select a folder for Super Image export.';
+        alert(message);
+        return;
+      }
+    }
 
     const latestPresets = loadWatermarkPresets();
     setWatermarkPresets(latestPresets);
@@ -531,14 +614,22 @@ export function FrameExtractorMode({
       const methodLabel = currentPreset
         ? `the saved preset "${currentPreset.name}"`
         : 'automatic watermark detection';
-      const confirmed = window.confirm(
-        `Super Export Videos will remove watermarks using ${methodLabel} before rendering the videos. Puzzle Image (A) maps to files like puzzle1.png and Diff Image (B) maps to files like puzzle1diff.png. This adds extra processing time. Continue?`
-      );
-      if (!confirmed) {
-        return;
-      }
+      setPendingWatermarkConfirm({
+        kind: 'super_image',
+        message: `Super Image Export will remove watermarks using ${methodLabel} before building the ${superImageExportTargetLabel}. Puzzle Image (A) maps to files like puzzle1.png and Diff Image (B) maps to files like puzzle1diff.png. This adds extra processing time. Continue?`,
+        currentPreset,
+        targetDirectory
+      });
+      return;
     }
 
+    await runSuperImageExportFlow({
+      targetDirectory,
+      currentPreset
+    });
+  };
+
+  const runSuperVideoExportFlow = async (currentPreset: WatermarkSelectionPreset | null) => {
     setSummary(null);
     setAlignerSummary(null);
     setSuperImageSummary(null);
@@ -554,12 +645,23 @@ export function FrameExtractorMode({
         format: imageFormat,
         jpegQuality,
         splitterDefaults,
-        videoSettings: effectiveSuperExportVideoSetup.settings,
+        videoSettings,
         imagesPerVideo: superExportImagesPerVideo,
         sharedRegion: readSplitterSharedRegion(),
         watermarkRemoval: {
           enabled: useSuperExportWatermarkRemoval,
           selectionPreset: useSuperExportWatermarkRemoval ? currentPreset : null
+        },
+        thumbnail: {
+          enabled: superExportThumbnailEnabled,
+          exportMode: superExportThumbnailExportMode,
+          stylePreset: superExportThumbnailStylePreset,
+          title: parsedThumbnailCopy.title,
+          subtitle: parsedThumbnailCopy.subtitle,
+          badgeLabel: effectiveThumbnailBadgeLabel,
+          textScale: superExportThumbnailTextScale,
+          textOffsetX: superExportThumbnailTextOffsetX,
+          textOffsetY: superExportThumbnailTextOffsetY
         },
         onProgress: (next) => {
           setProgress(Math.max(0, Math.min(1, next.progress)));
@@ -569,11 +671,17 @@ export function FrameExtractorMode({
 
       setSuperSummary(result);
       setProgress(1);
-      if (result.exportedVideoCount > 0) {
+      if (result.exportedVideoCount > 0 || result.exportedThumbnailCount > 0) {
         setStatus(
-          `Exported ${result.exportedVideoCount} video${result.exportedVideoCount === 1 ? '' : 's'} from ${
-            result.validPuzzleCount
-          } puzzle${result.validPuzzleCount === 1 ? '' : 's'}.`
+          result.exportMode === 'thumbnails_only'
+            ? `Exported ${result.exportedThumbnailCount} thumbnail${result.exportedThumbnailCount === 1 ? '' : 's'} from ${
+                result.validPuzzleCount
+              } puzzle${result.validPuzzleCount === 1 ? '' : 's'}.`
+            : `Exported ${result.exportedVideoCount} video${result.exportedVideoCount === 1 ? '' : 's'}${
+                result.thumbnailEnabled
+                  ? ` and ${result.exportedThumbnailCount} thumbnail${result.exportedThumbnailCount === 1 ? '' : 's'}`
+                  : ''
+              } from ${result.validPuzzleCount} puzzle${result.validPuzzleCount === 1 ? '' : 's'}.`
         );
       } else {
         setStatus('Super Export finished, but no exact 3-difference puzzles were available to export.');
@@ -585,6 +693,29 @@ export function FrameExtractorMode({
     } finally {
       setIsSuperExporting(false);
     }
+  };
+
+  const handleSuperExport = async () => {
+    if (!canSuperExport) return;
+
+    const latestPresets = loadWatermarkPresets();
+    setWatermarkPresets(latestPresets);
+    const currentPreset =
+      latestPresets.find((preset) => preset.id === selectedWatermarkPresetId) ?? selectedWatermarkPreset;
+
+    if (useSuperExportWatermarkRemoval) {
+      const methodLabel = currentPreset
+        ? `the saved preset "${currentPreset.name}"`
+        : 'automatic watermark detection';
+      setPendingWatermarkConfirm({
+        kind: 'super_video',
+        message: `Super Export Videos will remove watermarks using ${methodLabel} before rendering the videos. Puzzle Image (A) maps to files like puzzle1.png and Diff Image (B) maps to files like puzzle1diff.png. This adds extra processing time. Continue?`,
+        currentPreset
+      });
+      return;
+    }
+
+    await runSuperVideoExportFlow(currentPreset);
   };
 
   const totalVideoDurationSeconds = useMemo(
@@ -614,11 +745,17 @@ export function FrameExtractorMode({
         : 'Add at least one video and one valid timestamp to unlock the actions.');
   const effectiveOutputModeLabel =
     superImageExportMode === 'folder' && supportsDirectoryExport ? 'Folder Picker' : 'Zip Download';
+  const scrollToSection = (sectionRef: React.RefObject<HTMLDivElement | null>) => {
+    sectionRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start'
+    });
+  };
 
   return (
-    <div className="w-full max-w-7xl mx-auto p-3 sm:p-4 md:p-6">
-      <div className="overflow-hidden rounded-[28px] border-4 border-black bg-[#FFFDF8] shadow-[10px_10px_0px_0px_rgba(0,0,0,1)]">
-        <div className="border-b-4 border-black bg-[linear-gradient(135deg,#FED7AA_0%,#FDE68A_48%,#BFDBFE_100%)] p-4 sm:p-6 md:p-7">
+    <div className="mx-auto w-full max-w-7xl p-2.5 sm:p-4 md:p-6">
+      <div className="overflow-hidden rounded-[24px] border-4 border-black bg-[#FFFDF8] shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] sm:rounded-[28px] sm:shadow-[10px_10px_0px_0px_rgba(0,0,0,1)]">
+        <div className="border-b-4 border-black bg-[linear-gradient(135deg,#FED7AA_0%,#FDE68A_48%,#BFDBFE_100%)] p-3.5 sm:p-6 md:p-7">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div className="flex items-start gap-3 sm:gap-4">
               <button
@@ -628,11 +765,11 @@ export function FrameExtractorMode({
                 <ArrowLeft size={22} strokeWidth={3} />
               </button>
               <div>
-                <h2 className="text-2xl sm:text-3xl lg:text-4xl font-black font-display uppercase tracking-tight text-black">
+                <h2 className="text-xl font-black font-display uppercase tracking-tight text-black sm:text-3xl lg:text-4xl">
                   Frame Extractor
                 </h2>
-                <p className="mt-2 max-w-2xl text-sm sm:text-[15px] font-bold text-slate-700">
-                  Apply one timestamp plan across every loaded clip, then run the export path you need.
+                <p className="mt-1.5 max-w-2xl text-[13px] font-bold leading-5 text-slate-700 sm:mt-2 sm:text-[15px]">
+                  Build one extraction plan, jump to the section you need, and run the exact export path without the desktop sprawl.
                 </p>
               </div>
             </div>
@@ -647,8 +784,8 @@ export function FrameExtractorMode({
             </div>
           </div>
 
-          <div className="mt-5 grid grid-cols-2 gap-3 xl:grid-cols-4">
-            <div className="rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+          <div className="-mx-1 mt-4 flex gap-3 overflow-x-auto px-1 pb-1 sm:mx-0 sm:grid sm:grid-cols-2 sm:gap-3 sm:overflow-visible sm:px-0 xl:grid-cols-4">
+            <div className="min-w-[150px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
               <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Videos</div>
               <div className="mt-2 text-2xl font-black text-slate-900">{videos.length}</div>
               <div className="mt-1 text-[11px] font-bold text-slate-700">
@@ -657,7 +794,7 @@ export function FrameExtractorMode({
               <div className="mt-1 text-[11px] font-bold text-slate-600">{formatFileSize(totalVideoBytes)}</div>
             </div>
 
-            <div className="rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+            <div className="min-w-[150px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
               <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Timestamps</div>
               <div className="mt-2 text-2xl font-black text-slate-900">{parsedTimestamps.timestamps.length}</div>
               <div className="mt-1 text-[11px] font-bold text-slate-700">
@@ -667,7 +804,7 @@ export function FrameExtractorMode({
               </div>
             </div>
 
-            <div className="rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+            <div className="min-w-[150px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
               <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Requests</div>
               <div className="mt-2 text-2xl font-black text-slate-900">{requestedFrames}</div>
               <div className="mt-1 text-[11px] font-bold text-slate-700">
@@ -676,7 +813,7 @@ export function FrameExtractorMode({
               <div className="mt-1 text-[11px] font-bold text-slate-600">{imageFormat === 'png' ? 'PNG' : 'JPEG'}</div>
             </div>
 
-            <div className="rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+            <div className="min-w-[170px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
               <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Package</div>
               <div className="mt-2 text-sm font-black uppercase text-slate-900">{effectiveSuperExportPackageLabel}</div>
               <div className="mt-2 text-[11px] font-bold text-slate-700">
@@ -687,10 +824,10 @@ export function FrameExtractorMode({
         </div>
 
         <div className="space-y-6 bg-[radial-gradient(circle_at_top_right,#DBEAFE_0%,#FFFDF8_34%,#FFF7ED_100%)] p-4 sm:p-6 md:p-8">
-          <div className="rounded-[24px] border-4 border-black bg-[#111827] p-4 sm:p-5 text-white shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
+          <div className="rounded-[22px] border-4 border-black bg-[#111827] p-3.5 text-white shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] sm:rounded-[24px] sm:p-5 sm:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 text-lg sm:text-xl font-black">
+                <div className="flex items-center gap-2 text-base font-black sm:text-xl">
                   {isBusy && <LoaderCircle size={18} className="animate-spin" />}
                   <Clock3 size={18} />
                   <span className="truncate">{activeStatusLabel}</span>
@@ -714,8 +851,39 @@ export function FrameExtractorMode({
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-2 lg:hidden">
+            <button
+              type="button"
+              onClick={() => scrollToSection(sourceSectionRef)}
+              className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+            >
+              Source Clips
+            </button>
+            <button
+              type="button"
+              onClick={() => scrollToSection(timestampsSectionRef)}
+              className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+            >
+              Timestamps
+            </button>
+            <button
+              type="button"
+              onClick={() => scrollToSection(outputSectionRef)}
+              className="rounded-2xl border-2 border-black bg-[#DBEAFE] px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+            >
+              Output + Run
+            </button>
+            <button
+              type="button"
+              onClick={() => scrollToSection(recentRunsSectionRef)}
+              className="rounded-2xl border-2 border-black bg-[#FFF7ED] px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+            >
+              Recent Runs
+            </button>
+          </div>
+
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
-            <div className="min-w-0 space-y-5 xl:col-span-7">
+            <div ref={sourceSectionRef} className="min-w-0 scroll-mt-32 space-y-5 xl:col-span-7">
               <div className="rounded-[24px] border-4 border-black bg-[#FFF7ED] p-4 sm:p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                   <h3 className="text-xl sm:text-2xl font-black uppercase text-slate-900">Source Clips</h3>
@@ -753,35 +921,34 @@ export function FrameExtractorMode({
                   }}
                 />
 
-                <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <div className="rounded-2xl border-2 border-black bg-white p-4">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Runtime</div>
-                    <div className="mt-2 text-lg font-black text-slate-900">
-                      {videos.length ? formatDurationShort(totalVideoDurationSeconds) : '--'}
-                    </div>
+                <div className="mt-4 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wide text-slate-700">
+                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
+                    Runtime {videos.length ? formatDurationShort(totalVideoDurationSeconds) : '--'}
                   </div>
-                  <div className="rounded-2xl border-2 border-black bg-white p-4">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Size</div>
-                    <div className="mt-2 text-lg font-black text-slate-900">{formatFileSize(totalVideoBytes)}</div>
+                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
+                    Size {formatFileSize(totalVideoBytes)}
                   </div>
-                  <div className="rounded-2xl border-2 border-black bg-white p-4">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Plan</div>
-                    <div className="mt-2 text-lg font-black text-slate-900">
-                      {parsedTimestamps.timestamps.length} timestamp{parsedTimestamps.timestamps.length === 1 ? '' : 's'}
-                    </div>
+                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
+                    Plan {parsedTimestamps.timestamps.length} timestamp{parsedTimestamps.timestamps.length === 1 ? '' : 's'}
+                  </div>
+                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
+                    Requests {requestedFrames}
                   </div>
                 </div>
 
-                <div className="mt-5 max-h-[560px] space-y-3 overflow-auto pr-1">
+                <div className="mt-4 max-h-[430px] space-y-3 overflow-auto pr-1">
                   {videos.length === 0 ? (
-                    <div className="rounded-[24px] border-2 border-dashed border-black bg-white px-6 py-10 text-center">
-                      <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border-2 border-black bg-[#FEF3C7]">
-                        <Video size={28} strokeWidth={2.8} />
+                    <div className="rounded-[24px] border-2 border-dashed border-black bg-white px-6 py-8 text-center">
+                      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border-2 border-black bg-[#FEF3C7]">
+                        <Video size={24} strokeWidth={2.8} />
                       </div>
                       <div className="mt-4 text-lg font-black uppercase text-slate-900">No videos loaded</div>
+                      <div className="mt-2 text-[11px] font-bold uppercase tracking-wide text-slate-600">
+                        Add clips once, then keep the queue scrollable instead of stretching the page.
+                      </div>
                       <button
                         onClick={() => fileInputRef.current?.click()}
-                        className="mt-5 inline-flex items-center gap-2 rounded-xl border-2 border-black bg-black px-4 py-2 text-xs font-black uppercase text-white shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 hover:bg-slate-900"
+                        className="mt-4 inline-flex items-center gap-2 rounded-xl border-2 border-black bg-black px-4 py-2 text-xs font-black uppercase text-white shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 hover:bg-slate-900"
                       >
                         <Upload size={14} strokeWidth={3} />
                         <span>Choose Videos</span>
@@ -791,12 +958,12 @@ export function FrameExtractorMode({
                     videos.map((item, index) => (
                       <div
                         key={item.id}
-                        className="rounded-[22px] border-2 border-black bg-white p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5"
+                        className="rounded-[20px] border-2 border-black bg-white p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5"
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-base font-black text-slate-900">{item.file.name}</div>
-                            <div className="mt-3 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wide">
+                            <div className="truncate text-sm font-black text-slate-900">{item.file.name}</div>
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wide">
                               <div className="rounded-full border-2 border-black bg-[#FED7AA] px-2.5 py-1">
                                 Clip {index + 1}
                               </div>
@@ -830,7 +997,10 @@ export function FrameExtractorMode({
               </div>
             </div>
 
-            <div className="min-w-0 space-y-5 xl:col-span-5">
+            <div
+              ref={timestampsSectionRef}
+              className="min-w-0 self-start scroll-mt-32 space-y-5 xl:sticky xl:top-6 xl:col-span-5"
+            >
               <div className="rounded-[24px] border-4 border-black bg-[#EEF9FF] p-4 sm:p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] space-y-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <h3 className="text-xl sm:text-2xl font-black uppercase text-slate-900">Shared Timestamps</h3>
@@ -845,11 +1015,21 @@ export function FrameExtractorMode({
                     )}
                   </div>
                 </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-bold text-slate-700">
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Requests</div>
+                    <div className="mt-2 text-lg font-black text-slate-900">{requestedFrames}</div>
+                  </div>
+                  <div className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-bold text-slate-700">
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Format</div>
+                    <div className="mt-2 text-lg font-black text-slate-900">{imageFormat.toUpperCase()}</div>
+                  </div>
+                </div>
                 <textarea
                   value={timestampsText}
                   onChange={(event) => setTimestampsText(event.target.value)}
-                  rows={8}
-                  className="min-h-[220px] w-full resize-y rounded-[22px] border-2 border-black bg-white p-4 font-mono text-sm shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+                  rows={6}
+                  className="min-h-[170px] w-full resize-y rounded-[22px] border-2 border-black bg-white p-4 font-mono text-sm shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
                   placeholder="00:05.000, 00:10.500, 90"
                 />
                 <div className="rounded-2xl border-2 border-black bg-white px-4 py-3 text-[11px] font-bold text-slate-700">
@@ -870,7 +1050,7 @@ export function FrameExtractorMode({
               </div>
             </div>
 
-            <div className="min-w-0 xl:col-span-12">
+            <div ref={outputSectionRef} className="min-w-0 scroll-mt-32 xl:col-span-12">
               <div className="rounded-[24px] border-4 border-black bg-[#F8FDFF] p-4 sm:p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] space-y-5">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <h3 className="text-xl sm:text-2xl font-black uppercase text-slate-900">Output + Routing</h3>
@@ -884,6 +1064,7 @@ export function FrameExtractorMode({
                   </div>
                 </div>
 
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                 <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4">
                   <div className="text-sm font-black uppercase text-slate-900">Image Format</div>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -921,7 +1102,7 @@ export function FrameExtractorMode({
                 </div>
               )}
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 xl:col-span-2">
                 <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700 break-words">
                   <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Workload</div>
                   <div className="mt-2 text-lg font-black text-slate-900">{requestedFrames}</div>
@@ -933,13 +1114,13 @@ export function FrameExtractorMode({
                   <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Split Area</div>
                   <div className="mt-2 text-lg font-black text-slate-900">{hasSavedSharedRegion ? 'Saved' : 'Missing'}</div>
                 </div>
-                <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700">
-                  <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Watermark</div>
-                  <div className="mt-2 text-lg font-black text-slate-900">
-                    {useSuperExportWatermarkRemoval ? 'On' : 'Off'}
+                  <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700">
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Watermark</div>
+                    <div className="mt-2 text-lg font-black text-slate-900">
+                      {useSuperExportWatermarkRemoval ? 'On' : 'Off'}
+                    </div>
                   </div>
                 </div>
-              </div>
 
               <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -973,72 +1154,230 @@ export function FrameExtractorMode({
                 </div>
               </div>
 
-              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4">
+              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4 xl:col-span-2">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-sm font-black uppercase text-slate-900">Super Export Video Setup</div>
+                  <div className="text-sm font-black uppercase text-slate-900">Super Export Video Package</div>
                   <button
-                    onClick={() => refreshSavedSuperExportVideoSetup()}
+                    onClick={onOpenVideoMode}
                     className="rounded-xl border-2 border-black bg-white px-3 py-2 text-[11px] font-black uppercase transition-all hover:bg-slate-100"
                   >
-                    Refresh
+                    Open Video Mode
                   </button>
                 </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <button
-                    onClick={() => setUseSavedSceneCopyForSuperExport((current) => !current)}
-                    disabled={isBusy}
-                    className={`rounded-2xl border-2 border-black px-4 py-3 text-left transition-all ${
-                      useSavedSceneCopyForSuperExport
-                        ? 'bg-[#DBEAFE] shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
-                        : 'bg-white hover:bg-slate-100'
-                    } ${isBusy ? 'bg-slate-200 text-slate-500 cursor-not-allowed shadow-none' : ''}`}
-                  >
-                    <div className="text-sm font-black uppercase text-slate-900">Scene Copy</div>
-                    <div className="mt-1 text-[11px] font-bold text-slate-600">
-                      {useSavedSceneCopyForSuperExport ? selectedSceneCopyPreset?.name ?? 'Enabled' : 'Off'}
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => setUseSavedLayoutForSuperExport((current) => !current)}
-                    disabled={isBusy}
-                    className={`rounded-2xl border-2 border-black px-4 py-3 text-left transition-all ${
-                      useSavedLayoutForSuperExport
-                        ? 'bg-[#FEF3C7] shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
-                        : 'bg-white hover:bg-slate-100'
-                    } ${isBusy ? 'bg-slate-200 text-slate-500 cursor-not-allowed shadow-none' : ''}`}
-                  >
-                    <div className="text-sm font-black uppercase text-slate-900">Saved Layout</div>
-                    <div className="mt-1 text-[11px] font-bold text-slate-600">
-                      {useSavedLayoutForSuperExport
-                        ? savedVideoCustomLayout
-                          ? 'Enabled'
-                          : 'No layout saved'
-                        : 'Off'}
-                    </div>
-                  </button>
+                <div className="rounded-xl border border-black bg-[#EFF6FF] px-3 py-2 text-[11px] font-bold text-slate-700">
+                  Super Export now uses the active Video Mode package directly. Choose the package here, then open
+                  Video Mode when you want to tune the full package settings, text, layout, timing, or export options.
                 </div>
                 <label className="block">
-                  <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Scene Copy Preset</div>
+                  <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Active Video Package</div>
                   <select
-                    value={selectedSceneCopyPresetId}
-                    onChange={(event) => setSelectedSceneCopyPresetId(event.target.value)}
-                    disabled={isBusy || !useSavedSceneCopyForSuperExport}
+                    value={activeVideoPackageId}
+                    onChange={(event) => onSelectVideoPackage(event.target.value)}
+                    disabled={isBusy || videoPackages.length === 0}
                     className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
                   >
-                    <option value="">None</option>
-                    {sceneCopyPresets.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.name}
+                    {videoPackages.map((videoPackage) => (
+                      <option key={videoPackage.id} value={videoPackage.id}>
+                        {videoPackage.name}
                       </option>
                     ))}
                   </select>
                 </label>
-                <div className="rounded-xl border border-black bg-[#FFF7ED] px-3 py-2 text-[11px] font-bold text-slate-700">
-                  Package {effectiveSuperExportPackageLabel}
-                  {effectiveSuperExportVideoSetup.appliedSceneCopyPresetName
-                    ? ` | ${effectiveSuperExportVideoSetup.appliedSceneCopyPresetName}`
-                    : ' | Scene copy off'}
-                  {effectiveSuperExportVideoSetup.appliedSavedCustomLayout ? ' | Saved layout on' : ' | Package layout'}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-xl border border-black bg-[#FFF7ED] px-3 py-2 text-[11px] font-bold text-slate-700">
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Package</div>
+                    <div className="mt-2 text-sm font-black text-slate-900">{effectiveSuperExportPackageLabel}</div>
+                  </div>
+                  <div className="rounded-xl border border-black bg-white px-3 py-2 text-[11px] font-bold text-slate-700">
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Preset</div>
+                    <div className="mt-2 text-sm font-black text-slate-900">{currentVideoPresetLabel}</div>
+                  </div>
+                  <div className="rounded-xl border border-black bg-white px-3 py-2 text-[11px] font-bold text-slate-700">
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Aspect Ratio</div>
+                    <div className="mt-2 text-sm font-black text-slate-900">{videoSettings.aspectRatio}</div>
+                  </div>
+                  <div className="rounded-xl border border-black bg-white px-3 py-2 text-[11px] font-bold text-slate-700">
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Export</div>
+                    <div className="mt-2 text-sm font-black text-slate-900">
+                      {videoSettings.exportResolution} / {videoSettings.exportCodec.toUpperCase()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-3 xl:col-span-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-black uppercase text-slate-900">Super Export Thumbnail</div>
+                  <button
+                    onClick={() => setSuperExportThumbnailEnabled((current) => !current)}
+                    disabled={isBusy}
+                    className={`px-3 py-2 rounded-lg border-2 border-black text-[11px] font-black uppercase ${
+                      superExportThumbnailEnabled ? 'bg-[#BFDBFE]' : 'bg-white hover:bg-slate-100'
+                    } ${isBusy ? 'cursor-not-allowed bg-slate-200 text-slate-500' : ''}`}
+                  >
+                    {superExportThumbnailEnabled ? 'On' : 'Off'}
+                  </button>
+                </div>
+
+                <div className="rounded-xl border border-black bg-[#EFF6FF] px-3 py-2 text-[11px] font-bold text-slate-700">
+                  Uses the first puzzle of each exported batch. Timer and progress bar are always removed.
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className="block sm:col-span-2">
+                    <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Thumbnail Export Mode</div>
+                    <select
+                      value={superExportThumbnailExportMode}
+                      onChange={(event) =>
+                        setSuperExportThumbnailExportMode(event.target.value as typeof superExportThumbnailExportMode)
+                      }
+                      disabled={isBusy || !superExportThumbnailEnabled}
+                      className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
+                    >
+                      <option value="with_video">Video + Thumbnail</option>
+                      <option value="thumbnail_only">Thumbnail Only</option>
+                    </select>
+                  </label>
+                  <label className="block sm:col-span-2">
+                    <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Thumbnail Style</div>
+                    <select
+                      value={superExportThumbnailStylePreset}
+                      onChange={(event) => setSuperExportThumbnailStylePreset(event.target.value as typeof superExportThumbnailStylePreset)}
+                      disabled={isBusy || !superExportThumbnailEnabled}
+                      className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
+                    >
+                      {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="mt-1 text-[11px] font-bold text-slate-600">
+                      {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.find((preset) => preset.id === superExportThumbnailStylePreset)
+                        ?.description ?? 'Use the selected thumbnail style preset.'}
+                    </div>
+                  </label>
+                  <label className="block sm:col-span-2">
+                    <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Thumbnail Copy</div>
+                    <textarea
+                      rows={3}
+                      value={superExportThumbnailCopyText}
+                      onChange={(event) => setSuperExportThumbnailCopyText(event.target.value)}
+                      disabled={isBusy || !superExportThumbnailEnabled}
+                      className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
+                      placeholder={'SPOT THE 3 DIFFERENCES\nCan you find them before the reveal?'}
+                    />
+                  </label>
+                  <div className="sm:col-span-2">
+                    <div className="mb-2 text-[11px] font-black uppercase text-slate-600">Quick Templates</div>
+                    <div className="flex flex-wrap gap-2">
+                      {SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES.map((template) => (
+                        <button
+                          key={template.id}
+                          type="button"
+                          onClick={() => setSuperExportThumbnailCopyText(template.text)}
+                          disabled={isBusy || !superExportThumbnailEnabled}
+                          className="rounded-full border-2 border-black bg-white px-3 py-1.5 text-[10px] font-black uppercase hover:bg-slate-100 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+                        >
+                          {template.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="sm:col-span-2 rounded-xl border border-black bg-white p-3">
+                    <div className="mb-3 text-[11px] font-black uppercase text-slate-700">Text Layout</div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      <label className="block">
+                        <div className="mb-1 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
+                          <span>Text Size</span>
+                          <span>{Math.round(superExportThumbnailTextScale * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.6"
+                          max="2.4"
+                          step="0.05"
+                          value={superExportThumbnailTextScale}
+                          onChange={(event) => setSuperExportThumbnailTextScale(Number(event.target.value))}
+                          disabled={isBusy || !superExportThumbnailEnabled}
+                          className="w-full accent-slate-900 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                      <label className="block">
+                        <div className="mb-1 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
+                          <span>Text X</span>
+                          <span>{superExportThumbnailTextOffsetX}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-320"
+                          max="320"
+                          step="4"
+                          value={superExportThumbnailTextOffsetX}
+                          onChange={(event) => setSuperExportThumbnailTextOffsetX(Number(event.target.value))}
+                          disabled={isBusy || !superExportThumbnailEnabled}
+                          className="w-full accent-slate-900 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                      <label className="block">
+                        <div className="mb-1 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
+                          <span>Text Y</span>
+                          <span>{superExportThumbnailTextOffsetY}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-180"
+                          max="180"
+                          step="4"
+                          value={superExportThumbnailTextOffsetY}
+                          onChange={(event) => setSuperExportThumbnailTextOffsetY(Number(event.target.value))}
+                          disabled={isBusy || !superExportThumbnailEnabled}
+                          className="w-full accent-slate-900 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                  <div className="sm:col-span-2 rounded-xl border-2 border-black bg-[#F8FAFC] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-[11px] font-black uppercase text-slate-900">Thumbnail Preview</div>
+                        <div className="text-[10px] font-bold uppercase text-slate-600">
+                          First uploaded video + first timestamp
+                        </div>
+                      </div>
+                      <div className="rounded-full border-2 border-black bg-white px-2 py-1 text-[10px] font-black uppercase">
+                        {videoSettings.aspectRatio}
+                      </div>
+                    </div>
+                    <div
+                      className="mt-3 overflow-hidden rounded-xl border-2 border-black bg-slate-200"
+                      style={{ aspectRatio: thumbnailPreviewAspectRatio }}
+                    >
+                      {thumbnailPreviewStatus === 'ready' && thumbnailPreviewUrl ? (
+                        <img
+                          src={thumbnailPreviewUrl}
+                          alt="Super export thumbnail preview"
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center px-4 text-center text-[11px] font-black uppercase text-slate-600">
+                          {thumbnailPreviewStatus === 'loading' ? (
+                            <span className="inline-flex items-center gap-2">
+                              <LoaderCircle size={14} className="animate-spin" strokeWidth={3} />
+                              Rendering preview
+                            </span>
+                          ) : thumbnailPreviewStatus === 'error' ? (
+                            thumbnailPreviewError || 'Thumbnail preview failed.'
+                          ) : (
+                            'Add a video and timestamp to preview the thumbnail.'
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-black bg-slate-50 px-3 py-2 text-[11px] font-bold text-slate-600">
+                    One box controls the visible thumbnail copy. Press Enter if you want an optional second line under the headline. Use the sliders to scale the text and move it inside the thumbnail preview.
+                  </div>
                 </div>
               </div>
 
@@ -1097,9 +1436,9 @@ export function FrameExtractorMode({
                 />
               </div>
 
-              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4">
+              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4 xl:col-span-2">
                 <div className="text-sm font-black uppercase text-slate-900">Run</div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <button
                     onClick={handleExtractFrames}
                     disabled={!canExtract}
@@ -1173,10 +1512,11 @@ export function FrameExtractorMode({
                   </div>
                 )}
               </div>
+                </div>
             </div>
 
             {recentRunCount > 0 && (
-              <div className="space-y-3 xl:col-span-12">
+              <div ref={recentRunsSectionRef} className="space-y-3 scroll-mt-32 xl:col-span-12">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div className="text-lg font-black uppercase text-slate-900">Recent Runs</div>
                   <div className="rounded-full border-2 border-black bg-white px-3 py-1.5 text-[11px] font-black uppercase">
@@ -1249,6 +1589,15 @@ export function FrameExtractorMode({
                       <div className="text-sm font-black uppercase">Super Video Export</div>
                       <div className="text-xs font-bold text-slate-700">
                         {superSummary.validPuzzleCount} valid | {superSummary.exportedVideoCount} videos
+                        {superSummary.thumbnailEnabled ? ` | ${superSummary.exportedThumbnailCount} thumbnails` : ''}
+                      </div>
+                      <div className="text-xs font-bold text-slate-700">
+                        Mode:{' '}
+                        {superSummary.exportMode === 'thumbnails_only'
+                          ? 'Thumbnails only'
+                          : superSummary.exportMode === 'videos_and_thumbnails'
+                          ? 'Videos + thumbnails'
+                          : 'Videos only'}
                       </div>
                       <div className="text-xs font-bold text-slate-700">
                         Batch sizes: {superSummary.batchSizes.length > 0 ? superSummary.batchSizes.join(', ') : 'none'}
@@ -1271,7 +1620,33 @@ export function FrameExtractorMode({
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(pendingWatermarkConfirm)}
+        title="Enable Watermark Removal?"
+        description={pendingWatermarkConfirm?.message}
+        confirmLabel="Continue"
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingWatermarkConfirm(null);
+          }
+        }}
+        onConfirm={() => {
+          const pending = pendingWatermarkConfirm;
+          setPendingWatermarkConfirm(null);
+          if (!pending) return;
+          if (pending.kind === 'super_image') {
+            void runSuperImageExportFlow({
+              targetDirectory: pending.targetDirectory ?? null,
+              currentPreset: pending.currentPreset
+            });
+            return;
+          }
+          void runSuperVideoExportFlow(pending.currentPreset);
+        }}
+      />
     </div>
   </div>
   );
 }
+

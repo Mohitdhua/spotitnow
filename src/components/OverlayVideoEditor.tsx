@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback } from 'react';
 import {
   ArrowLeft,
   Clock3,
@@ -15,7 +16,8 @@ import {
   Sparkles,
   Trash2,
   Upload,
-  Video
+  Video,
+  Volume2
 } from 'lucide-react';
 import { OverlayTransform, Puzzle, VideoModeTransferFrame, VideoSettings } from '../types';
 import type {
@@ -30,8 +32,14 @@ import type {
   OverlayLinkedPairLayout,
   OverlayLinkedPairStyle,
   OverlayMediaClipInput,
+  OverlaySoundtrackInput,
   OverlayTimeline
 } from '../services/overlayVideoExport';
+import { EditorTimeline } from './editorTimeline/EditorTimeline';
+import { buildOverlayEditorTimeline } from './editorTimeline/overlayTimelineAdapter';
+import { createSeededEditorTimeline } from './editorTimeline/seededDemo';
+import type { EditorTimelineClip, EditorTimelineClipChange, EditorTimelineTrack } from './editorTimeline/types';
+import { applyTimelineClipChange } from './editorTimeline/utils';
 
 type OverlayExportSettings = Pick<VideoSettings, 'exportResolution' | 'exportBitrateMbps' | 'exportCodec'>;
 
@@ -43,16 +51,6 @@ interface DragState {
   startTransform: OverlayTransform;
   previewWidth: number;
   previewHeight: number;
-}
-
-interface TimelineDragState {
-  pointerId: number;
-  source: 'batch' | 'overlay';
-  id: string;
-  mode: 'move' | 'trimStart' | 'trimEnd';
-  startClientX: number;
-  startTimeline: OverlayTimeline;
-  laneWidth: number;
 }
 
 type BaseMode = OverlayBaseInput['mode'];
@@ -85,6 +83,12 @@ interface LinkedPairDraft extends OverlayLinkedPairInput {
   sortKey: string;
 }
 
+interface SoundtrackDraft extends OverlaySoundtrackInput {
+  name: string;
+  url: string;
+  durationSeconds: number;
+}
+
 interface LinkedPairDragState {
   pointerId: number;
   mode: 'move' | 'resize';
@@ -112,6 +116,7 @@ interface OverlayVideoEditorExportPayload {
   base: OverlayBaseInput;
   batchPhotos: OverlayBatchPhotoInput[];
   overlays: OverlayMediaClipInput[];
+  soundtrack?: OverlaySoundtrackInput;
   linkedPairs?: OverlayLinkedPairInput[];
   linkedPairLayout?: OverlayLinkedPairLayout;
   linkedPairStyle?: OverlayLinkedPairStyle;
@@ -124,11 +129,17 @@ interface OverlayVideoEditorProps {
   incomingVideoFrames?: VideoModeTransferFrame[];
   incomingVideoFramesSessionId?: number;
   defaultPuzzleClipDurationSeconds?: number;
+  defaultLogo?: string;
+  defaultLogoChromaKeyEnabled?: boolean;
+  defaultLogoChromaKeyColor?: string;
+  defaultLogoChromaKeyTolerance?: number;
   onSettingsChange: (patch: Partial<OverlayExportSettings>) => void;
   onExport: (payload: OverlayVideoEditorExportPayload) => void | Promise<void>;
   onBack: () => void;
   isExporting: boolean;
 }
+
+type LinkedPairOutputMode = 'video' | 'thumbnail';
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -280,6 +291,21 @@ const readVideoMetadata = (url: string) =>
     };
     video.onloadedmetadata = handleDone;
     video.onerror = handleDone;
+  });
+
+const readAudioMetadata = (url: string) =>
+  new Promise<{ duration: number }>((resolve) => {
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+    audio.src = url;
+    const handleDone = () => {
+      resolve({
+        duration: Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0
+      });
+      audio.src = '';
+    };
+    audio.onloadedmetadata = handleDone;
+    audio.onerror = handleDone;
   });
 
 const getCroppedStyle = (crop: OverlayCrop): React.CSSProperties => {
@@ -475,6 +501,52 @@ const createDefaultLinkedPairStyle = (): OverlayLinkedPairStyle => ({
   cornerRadius: 18
 });
 
+const EXPORT_RESOLUTION_HEIGHT: Record<OverlayExportSettings['exportResolution'], number> = {
+  '480p': 480,
+  '720p': 720,
+  '1080p': 1080,
+  '1440p': 1440,
+  '2160p': 2160
+};
+
+const computeOutputSizeFromAspect = (aspectRatio: number, resolution: OverlayExportSettings['exportResolution']) => {
+  const baseHeight = EXPORT_RESOLUTION_HEIGHT[resolution];
+  const safeAspect = Number.isFinite(aspectRatio) && aspectRatio > 0 ? aspectRatio : 16 / 9;
+
+  if (safeAspect >= 1) {
+    return {
+      width: Math.max(2, Math.round(baseHeight * safeAspect)),
+      height: baseHeight
+    };
+  }
+
+  return {
+    width: baseHeight,
+    height: Math.max(2, Math.round(baseHeight / safeAspect))
+  };
+};
+
+const getSoundtrackAvailableDuration = (soundtrack: SoundtrackDraft | null) => {
+  if (!soundtrack) return 0;
+  return Math.max(0, soundtrack.durationSeconds - soundtrack.trimStart);
+};
+
+const getSoundtrackTrackRange = (soundtrack: SoundtrackDraft | null, timelineDuration: number) => {
+  if (!soundtrack) return null;
+  const start = clamp(soundtrack.start, 0, Math.max(0, timelineDuration));
+  const availableDuration = getSoundtrackAvailableDuration(soundtrack);
+  if (availableDuration <= 0.001) {
+    return {
+      start,
+      end: Math.min(timelineDuration, start + 0.05)
+    };
+  }
+  return {
+    start,
+    end: soundtrack.loop ? timelineDuration : Math.min(timelineDuration, start + availableDuration)
+  };
+};
+
 const getLinkedPairFrameMetrics = (frameAspectRatio: number) => {
   const safeAspect = clamp(frameAspectRatio, 0.3, 4);
   return safeAspect >= 1
@@ -579,6 +651,196 @@ const getLinkedPairBounds = (layout: OverlayLinkedPairLayout, frameAspectRatio: 
   };
 };
 
+const addRoundedRectPath = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) => {
+  const safeRadius = clamp(radius, 0, Math.min(width, height) / 2);
+  ctx.beginPath();
+  if (safeRadius <= 0) {
+    ctx.rect(x, y, width, height);
+    return;
+  }
+  ctx.moveTo(x + safeRadius, y);
+  ctx.arcTo(x + width, y, x + width, y + height, safeRadius);
+  ctx.arcTo(x + width, y + height, x, y + height, safeRadius);
+  ctx.arcTo(x, y + height, x, y, safeRadius);
+  ctx.arcTo(x, y, x + width, y, safeRadius);
+  ctx.closePath();
+};
+
+const drawImageCover = (
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  sourceWidth: number,
+  sourceHeight: number,
+  width: number,
+  height: number
+) => {
+  const safeSourceWidth = Math.max(1, sourceWidth);
+  const safeSourceHeight = Math.max(1, sourceHeight);
+  const scale = Math.max(width / safeSourceWidth, height / safeSourceHeight);
+  const drawWidth = safeSourceWidth * scale;
+  const drawHeight = safeSourceHeight * scale;
+  const drawX = (width - drawWidth) / 2;
+  const drawY = (height - drawHeight) / 2;
+  ctx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+};
+
+const drawLinkedPairToCanvas = async (options: {
+  ctx: CanvasRenderingContext2D;
+  pair: LinkedPairDraft;
+  layout: OverlayLinkedPairLayout;
+  style: OverlayLinkedPairStyle;
+  frameAspectRatio: number;
+  frameWidth: number;
+  frameHeight: number;
+  imageResolver: (url: string) => Promise<HTMLImageElement>;
+}) => {
+  const { ctx, pair, layout, style, frameAspectRatio, frameWidth, frameHeight, imageResolver } = options;
+  const bounds = getLinkedPairBounds(layout, frameAspectRatio);
+  const safeStyle = {
+    outlineColor: style.outlineColor || '#000000',
+    outlineWidth: clamp(style.outlineWidth, 0, 36),
+    cornerRadius: clamp(style.cornerRadius, 0, 72)
+  };
+  const outputScale = Math.min(frameWidth, frameHeight) / 1080;
+  const frameStroke = Math.max(0, safeStyle.outlineWidth * outputScale);
+  const cornerRadius = Math.max(0, safeStyle.cornerRadius * outputScale);
+  const panelFill = '#F8FAFC';
+  const [puzzleImage, diffImage] = await Promise.all([imageResolver(pair.puzzleUrl), imageResolver(pair.diffUrl)]);
+
+  const panels = [
+    {
+      image: puzzleImage,
+      bounds: bounds.puzzle,
+      label: 'Puzzle'
+    },
+    {
+      image: diffImage,
+      bounds: bounds.diff,
+      label: 'Answer'
+    }
+  ];
+
+  panels.forEach((panel) => {
+    const x = (parseFloat(panel.bounds.left) / 100) * frameWidth + (parseFloat(bounds.container.left) / 100) * frameWidth;
+    const y = (parseFloat(panel.bounds.top) / 100) * frameHeight + (parseFloat(bounds.container.top) / 100) * frameHeight;
+    const width = (parseFloat(panel.bounds.width) / 100) * ((parseFloat(bounds.container.width) / 100) * frameWidth);
+    const height = (parseFloat(panel.bounds.height) / 100) * ((parseFloat(bounds.container.height) / 100) * frameHeight);
+
+    ctx.save();
+    addRoundedRectPath(ctx, x, y, width, height, cornerRadius);
+    ctx.fillStyle = panelFill;
+    ctx.fill();
+    ctx.clip();
+    drawImageContain(ctx, panel.image, x, y, width, height);
+    ctx.restore();
+
+    if (frameStroke > 0) {
+      ctx.save();
+      addRoundedRectPath(
+        ctx,
+        x + frameStroke / 2,
+        y + frameStroke / 2,
+        Math.max(1, width - frameStroke),
+        Math.max(1, height - frameStroke),
+        Math.max(0, cornerRadius - frameStroke / 2)
+      );
+      ctx.strokeStyle = safeStyle.outlineColor;
+      ctx.lineWidth = frameStroke;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    const tagHeight = Math.max(16, frameHeight * 0.03);
+    ctx.save();
+    ctx.font = `900 ${Math.max(10, tagHeight * 0.52)}px Inter, sans-serif`;
+    const label = panel.label.toUpperCase();
+    const tagWidth = Math.max(tagHeight * 2.8, ctx.measureText(label).width + tagHeight * 0.9);
+    const tagX = x + frameStroke + tagHeight * 0.2;
+    const tagY = y + frameStroke + tagHeight * 0.2;
+    addRoundedRectPath(ctx, tagX, tagY, tagWidth, tagHeight, tagHeight / 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.82)';
+    ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, tagX + tagWidth / 2, tagY + tagHeight / 2 + 0.5);
+    ctx.restore();
+  });
+};
+
+const drawOverlayToCanvas = async (options: {
+  ctx: CanvasRenderingContext2D;
+  overlay: OverlayDraft;
+  previewTime: number;
+  frameWidth: number;
+  frameHeight: number;
+  scratchCanvas: HTMLCanvasElement;
+  scratchCtx: CanvasRenderingContext2D;
+  imageResolver: (url: string) => Promise<HTMLImageElement>;
+  videoResolver: (id: string) => HTMLVideoElement | null;
+}) => {
+  const { ctx, overlay, previewTime, frameWidth, frameHeight, scratchCanvas, scratchCtx, imageResolver, videoResolver } = options;
+  const timeline = normalizeTimeline(overlay.timeline);
+  if (previewTime < timeline.start || previewTime > timeline.end) return;
+
+  const transform = overlay.transform;
+  const x = clamp(transform.x, 0, 1) * frameWidth;
+  const y = clamp(transform.y, 0, 1) * frameHeight;
+  const width = Math.max(1, clamp(transform.width, 0.01, 1) * frameWidth);
+  const height = Math.max(1, clamp(transform.height, 0.01, 1) * frameHeight);
+  const drawWidth = Math.min(width, Math.max(1, frameWidth - x));
+  const drawHeight = Math.min(height, Math.max(1, frameHeight - y));
+
+  if (overlay.background.enabled) {
+    ctx.fillStyle = overlay.background.color || '#ffffff';
+    ctx.fillRect(x, y, drawWidth, drawHeight);
+  }
+
+  let source: CanvasImageSource | null = null;
+  let sourceWidth = 0;
+  let sourceHeight = 0;
+
+  if (overlay.kind === 'image') {
+    const image = await imageResolver(overlay.url);
+    source = image;
+    sourceWidth = image.naturalWidth || image.width;
+    sourceHeight = image.naturalHeight || image.height;
+  } else {
+    const videoNode = videoResolver(overlay.id);
+    if (!videoNode || !videoNode.videoWidth || !videoNode.videoHeight) return;
+    source = videoNode;
+    sourceWidth = videoNode.videoWidth;
+    sourceHeight = videoNode.videoHeight;
+  }
+
+  if (!source || !sourceWidth || !sourceHeight) return;
+
+  const crop = normalizeCrop(overlay.crop);
+  const sx = Math.floor(crop.x * sourceWidth);
+  const sy = Math.floor(crop.y * sourceHeight);
+  const sw = Math.max(1, Math.floor(crop.width * sourceWidth));
+  const sh = Math.max(1, Math.floor(crop.height * sourceHeight));
+
+  if (!overlay.chromaKey.enabled) {
+    ctx.drawImage(source, sx, sy, sw, sh, x, y, drawWidth, drawHeight);
+    return;
+  }
+
+  scratchCanvas.width = Math.max(1, Math.round(drawWidth));
+  scratchCanvas.height = Math.max(1, Math.round(drawHeight));
+  scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
+  scratchCtx.drawImage(source, sx, sy, sw, sh, 0, 0, scratchCanvas.width, scratchCanvas.height);
+  applyChromaKeyToCanvas(scratchCtx, scratchCanvas.width, scratchCanvas.height, overlay.chromaKey);
+  ctx.drawImage(scratchCanvas, x, y, drawWidth, drawHeight);
+};
+
 const PreviewChromaMedia: React.FC<PreviewChromaMediaProps> = ({ item, previewTime, registerVideoRef }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -664,11 +926,16 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   incomingVideoFrames = [],
   incomingVideoFramesSessionId = 0,
   defaultPuzzleClipDurationSeconds = 8,
+  defaultLogo,
+  defaultLogoChromaKeyEnabled = false,
+  defaultLogoChromaKeyColor = '#00FF00',
+  defaultLogoChromaKeyTolerance = 70,
   onSettingsChange,
   onExport,
   onBack,
   isExporting
 }) => {
+  const thumbnailPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [baseMode, setBaseMode] = useState<BaseMode>('video');
   const [baseVideoFile, setBaseVideoFile] = useState<File | null>(null);
   const [baseVideoUrl, setBaseVideoUrl] = useState<string | null>(null);
@@ -684,6 +951,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   const [staticDurationSeconds, setStaticDurationSeconds] = useState(8);
 
   const [editorMode, setEditorMode] = useState<OverlayEditorMode>('standard');
+  const [linkedPairOutputMode, setLinkedPairOutputMode] = useState<LinkedPairOutputMode>('video');
   const [batchPhotos, setBatchPhotos] = useState<BatchPhotoDraft[]>([]);
   const [linkedPairs, setLinkedPairs] = useState<LinkedPairDraft[]>([]);
   const [activeLinkedPairId, setActiveLinkedPairId] = useState<string | null>(null);
@@ -691,11 +959,14 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   const [linkedPairStyle, setLinkedPairStyle] = useState<OverlayLinkedPairStyle>(createDefaultLinkedPairStyle);
   const [linkedPairExportMode, setLinkedPairExportMode] = useState<OverlayLinkedPairExportMode>('one_per_pair');
   const [overlays, setOverlays] = useState<OverlayDraft[]>([]);
+  const [soundtrack, setSoundtrack] = useState<SoundtrackDraft | null>(null);
   const [activeClip, setActiveClip] = useState<ActiveClipRef | null>(null);
   const [applyTransformToAllPhotos, setApplyTransformToAllPhotos] = useState(true);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [linkedPairDragState, setLinkedPairDragState] = useState<LinkedPairDragState | null>(null);
-  const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null);
+  const [demoTimelineState, setDemoTimelineState] = useState(createSeededEditorTimeline);
+  const [demoSelectedClipId, setDemoSelectedClipId] = useState<string | null>(null);
+  const [demoSelectedTrackId, setDemoSelectedTrackId] = useState<string | null>(null);
 
   const [previewTime, setPreviewTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
@@ -706,12 +977,14 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
   const previewRef = useRef<HTMLDivElement>(null);
   const baseVideoRef = useRef<HTMLVideoElement | null>(null);
+  const soundtrackPreviewRef = useRef<HTMLAudioElement | null>(null);
   const overlayVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const previewColorSampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageSamplingCacheRef = useRef<Record<string, HTMLImageElement>>({});
 
   const baseVideoUrlRef = useRef<string | null>(null);
   const basePhotoUrlRef = useRef<string | null>(null);
+  const soundtrackUrlRef = useRef<string | null>(null);
   const batchPhotosRef = useRef<BatchPhotoDraft[]>([]);
   const linkedPairsRef = useRef<LinkedPairDraft[]>([]);
   const overlaysRef = useRef<OverlayDraft[]>([]);
@@ -723,6 +996,9 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   useEffect(() => {
     basePhotoUrlRef.current = basePhotoUrl;
   }, [basePhotoUrl]);
+  useEffect(() => {
+    soundtrackUrlRef.current = soundtrack?.url ?? null;
+  }, [soundtrack]);
   useEffect(() => {
     batchPhotosRef.current = batchPhotos;
   }, [batchPhotos]);
@@ -737,6 +1013,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     return () => {
       if (baseVideoUrlRef.current) URL.revokeObjectURL(baseVideoUrlRef.current);
       if (basePhotoUrlRef.current) URL.revokeObjectURL(basePhotoUrlRef.current);
+      if (soundtrackUrlRef.current) URL.revokeObjectURL(soundtrackUrlRef.current);
       batchPhotosRef.current.forEach((item) => URL.revokeObjectURL(item.url));
       linkedPairsRef.current.forEach((item) => {
         URL.revokeObjectURL(item.puzzleUrl);
@@ -810,6 +1087,21 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
         : baseDuration;
     return Math.max(1, baseDuration, maxBatchEnd, maxOverlayEnd, maxLinkedPairEnd);
   }, [baseDuration, batchPhotos, editorMode, linkedPairExportMode, linkedPairSegments, overlays]);
+
+  useEffect(() => {
+    setSoundtrack((current) => {
+      if (!current) return current;
+      const maxTrimStart = Math.max(0, current.durationSeconds - 0.05);
+      const nextStart = clamp(current.start, 0, Math.max(0, timelineDuration));
+      const nextTrimStart = clamp(current.trimStart, 0, maxTrimStart);
+      if (nextStart === current.start && nextTrimStart === current.trimStart) return current;
+      return {
+        ...current,
+        start: nextStart,
+        trimStart: nextTrimStart
+      };
+    });
+  }, [timelineDuration]);
 
   useEffect(() => {
     setPreviewTime((current) => clamp(current, 0, timelineDuration));
@@ -893,6 +1185,193 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     return selectedLinkedPair;
   }, [editorMode, linkedPairExportMode, linkedPairSegments, linkedPairs.length, previewTime, selectedLinkedPair]);
 
+  const shouldUseDemoTimeline =
+    baseMode === 'color' &&
+    batchPhotos.length === 0 &&
+    overlays.length === 0 &&
+    linkedPairs.length === 0 &&
+    !soundtrack;
+
+  const editorTimelineState = useMemo(
+    () =>
+      shouldUseDemoTimeline
+        ? demoTimelineState
+        : buildOverlayEditorTimeline({
+            duration: timelineDuration,
+            editorMode,
+            linkedPairOutputMode,
+            linkedPairExportMode,
+            selectedLinkedPairId: activeLinkedPairId,
+            base: {
+              mode: baseMode,
+              duration: baseDuration,
+              previewUrl: baseMode === 'photo' ? basePhotoUrl : baseMode === 'video' ? baseVideoUrl : null,
+              label:
+                baseMode === 'video'
+                  ? baseVideoFile?.name ?? 'Base Video'
+                  : baseMode === 'photo'
+                    ? basePhotoFile?.name ?? 'Base Photo'
+                    : 'Solid Canvas'
+            },
+            batchPhotos: batchPhotos.map((item) => ({
+              id: item.id,
+              name: item.name,
+              kind: item.kind,
+              url: item.url,
+              timeline: normalizeTimeline(item.timeline),
+              crop: normalizeCrop(item.crop),
+              background: item.background,
+              chromaKey: item.chromaKey
+            })),
+            overlays: overlays.map((item) => ({
+              id: item.id,
+              name: item.name,
+              kind: item.kind,
+              url: item.url,
+              timeline: normalizeTimeline(item.timeline),
+              crop: normalizeCrop(item.crop),
+              background: item.background,
+              chromaKey: item.chromaKey
+            })),
+            linkedPairs: linkedPairs.map((item, index) => {
+              const segment =
+                linkedPairOutputMode === 'video' && linkedPairExportMode === 'single_video'
+                  ? linkedPairSegments[index]
+                  : {
+                      start: 0,
+                      end: baseDuration
+                    };
+
+              return {
+                id: item.id,
+                name: item.name,
+                puzzleUrl: item.puzzleUrl,
+                diffUrl: item.diffUrl,
+                start: segment?.start ?? 0,
+                end: segment?.end ?? baseDuration
+              };
+            }),
+            soundtrack: soundtrack
+              ? {
+                  name: soundtrack.name,
+                  start: soundtrack.start,
+                  trimStart: soundtrack.trimStart,
+                  durationSeconds: soundtrack.durationSeconds,
+                  loop: soundtrack.loop
+                }
+              : null
+          }),
+    [
+      activeLinkedPairId,
+      baseDuration,
+      baseMode,
+      basePhotoFile,
+      basePhotoUrl,
+      baseVideoFile,
+      baseVideoUrl,
+      batchPhotos,
+      demoTimelineState,
+      editorMode,
+      linkedPairExportMode,
+      linkedPairOutputMode,
+      linkedPairSegments,
+      linkedPairs,
+      overlays,
+      shouldUseDemoTimeline,
+      soundtrack,
+      timelineDuration
+    ]
+  );
+
+  const findTimelineTrackIdByClipId = useCallback(
+    (clipId: string | null) => {
+      if (!clipId) return null;
+      return editorTimelineState.tracks.find((track) => track.clips.some((clip) => clip.id === clipId))?.id ?? null;
+    },
+    [editorTimelineState]
+  );
+
+  const selectedTimelineClipId = shouldUseDemoTimeline
+    ? demoSelectedClipId
+    : activeClip?.source === 'batch'
+      ? `batch-${activeClip.id}`
+      : activeClip?.source === 'overlay'
+        ? `overlay-${activeClip.id}`
+        : editorMode === 'linked_pairs' && activeLinkedPairId
+          ? `pair-${activeLinkedPairId}`
+          : null;
+
+  const selectedTimelineTrackId = shouldUseDemoTimeline
+    ? demoSelectedTrackId
+    : findTimelineTrackIdByClipId(selectedTimelineClipId);
+
+  const handleTimelineClipSelect = useCallback(
+    (clip: EditorTimelineClip, track: EditorTimelineTrack) => {
+      setPreviewTime(clip.start);
+
+      if (shouldUseDemoTimeline) {
+        setDemoSelectedClipId(clip.id);
+        setDemoSelectedTrackId(track.id);
+        return;
+      }
+
+      if (clip.id.startsWith('batch-')) {
+        setActiveClip({ source: 'batch', id: clip.id.slice('batch-'.length) });
+        setDemoSelectedClipId(null);
+        setDemoSelectedTrackId(null);
+        return;
+      }
+
+      if (clip.id.startsWith('overlay-')) {
+        setActiveClip({ source: 'overlay', id: clip.id.slice('overlay-'.length) });
+        setDemoSelectedClipId(null);
+        setDemoSelectedTrackId(null);
+        return;
+      }
+
+      if (clip.id.startsWith('pair-')) {
+        setActiveClip(null);
+        setActiveLinkedPairId(clip.id.slice('pair-'.length));
+        setDemoSelectedClipId(null);
+        setDemoSelectedTrackId(null);
+        return;
+      }
+
+      setActiveClip(null);
+    },
+    [shouldUseDemoTimeline]
+  );
+
+  const handleTimelineClipChange = useCallback(
+    (change: EditorTimelineClipChange) => {
+      if (shouldUseDemoTimeline) {
+        setDemoTimelineState((current) => applyTimelineClipChange(current, change));
+        return;
+      }
+
+      const nextTimeline = normalizeTimeline({
+        start: change.start,
+        end: change.start + change.duration
+      });
+
+      if (change.clipId.startsWith('batch-')) {
+        const batchId = change.clipId.slice('batch-'.length);
+        setBatchPhotos((currentPhotos) =>
+          currentPhotos.map((photo) => (photo.id === batchId ? { ...photo, timeline: nextTimeline } : photo))
+        );
+        return;
+      }
+
+      if (change.clipId.startsWith('overlay-')) {
+        const overlayId = change.clipId.slice('overlay-'.length);
+        setOverlays((currentOverlays) =>
+          currentOverlays.map((item) => (item.id === overlayId ? { ...item, timeline: nextTimeline } : item))
+        );
+      }
+    },
+    [shouldUseDemoTimeline]
+  );
+
   const previewEntries = useMemo(() => {
     const entries: Array<{ source: 'batch' | 'overlay'; item: DraftMediaBase }> = [];
     if (previewPrimaryPhoto) {
@@ -947,7 +1426,11 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     if (baseMode === 'video' && baseVideoRef.current) {
       const video = baseVideoRef.current;
       const maxSeek = Math.max(0, baseVideoDuration - 0.033);
-      const target = clamp(previewTime, 0, maxSeek);
+      const rawTarget =
+        editorMode === 'linked_pairs' && linkedPairExportMode === 'single_video' && baseVideoDuration > 0.05
+          ? previewTime % baseVideoDuration
+          : previewTime;
+      const target = clamp(rawTarget, 0, maxSeek);
       if (Math.abs(video.currentTime - target) > 0.06) {
         try {
           video.currentTime = target;
@@ -980,7 +1463,47 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       }
       element.pause();
     });
-  }, [baseMode, baseVideoDuration, overlays, previewTime]);
+  }, [baseMode, baseVideoDuration, editorMode, linkedPairExportMode, overlays, previewTime]);
+
+  useEffect(() => {
+    const audio = soundtrackPreviewRef.current;
+    if (!audio || !soundtrack) {
+      if (audio) audio.pause();
+      return;
+    }
+
+    const availableDuration = getSoundtrackAvailableDuration(soundtrack);
+    if (availableDuration <= 0.001) {
+      audio.pause();
+      return;
+    }
+
+    const localTime = previewTime - soundtrack.start;
+    const isActive = localTime >= 0 && (soundtrack.loop || localTime <= availableDuration);
+    audio.volume = clamp(soundtrack.volume, 0, 1);
+
+    if (!isActive) {
+      audio.pause();
+      return;
+    }
+
+    const clipTime = soundtrack.loop ? localTime % availableDuration : Math.min(localTime, availableDuration);
+    const target = clamp(soundtrack.trimStart + Math.max(0, clipTime), 0, Math.max(0, soundtrack.durationSeconds - 0.01));
+
+    if (Number.isFinite(target) && Math.abs(audio.currentTime - target) > 0.12) {
+      try {
+        audio.currentTime = target;
+      } catch {
+        // Ignored while metadata is still loading.
+      }
+    }
+
+    if (isPreviewPlaying) {
+      void audio.play().catch(() => undefined);
+    } else {
+      audio.pause();
+    }
+  }, [isPreviewPlaying, previewTime, soundtrack]);
 
   const updateActiveTransform = (nextTransform: OverlayTransform) => {
     if (!activeClip || !activeMedia) return;
@@ -1077,6 +1600,109 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       image.src = url;
     });
 
+  const renderLinkedPairThumbnailScene = useCallback(
+    async (ctx: CanvasRenderingContext2D, pair: LinkedPairDraft, width: number, height: number) => {
+      ctx.clearRect(0, 0, width, height);
+
+      if (baseMode === 'video' && baseVideoRef.current?.videoWidth && baseVideoRef.current?.videoHeight) {
+        drawImageCover(
+          ctx,
+          baseVideoRef.current,
+          baseVideoRef.current.videoWidth,
+          baseVideoRef.current.videoHeight,
+          width,
+          height
+        );
+      } else if (baseMode === 'photo' && basePhotoUrl) {
+        const image = await getImageForSampling(basePhotoUrl);
+        ctx.fillStyle = baseColor;
+        ctx.fillRect(0, 0, width, height);
+        drawImageContain(ctx, image, 0, 0, width, height);
+      } else {
+        ctx.fillStyle = baseColor;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      await drawLinkedPairToCanvas({
+        ctx,
+        pair,
+        layout: normalizedLinkedPairLayout,
+        style: linkedPairStyle,
+        frameAspectRatio: previewAspectRatio,
+        frameWidth: width,
+        frameHeight: height,
+        imageResolver: getImageForSampling
+      });
+
+      const scratchCanvas = document.createElement('canvas');
+      const scratchCtx = scratchCanvas.getContext('2d');
+      if (!scratchCtx) {
+        throw new Error('Failed to initialize thumbnail preview scratch canvas.');
+      }
+
+      for (let index = 0; index < overlays.length; index += 1) {
+        await drawOverlayToCanvas({
+          ctx,
+          overlay: overlays[index],
+          previewTime,
+          frameWidth: width,
+          frameHeight: height,
+          scratchCanvas,
+          scratchCtx,
+          imageResolver: getImageForSampling,
+          videoResolver: (id) => overlayVideoRefs.current[id] ?? null
+        });
+      }
+    },
+    [
+      baseColor,
+      baseMode,
+      basePhotoUrl,
+      getImageForSampling,
+      linkedPairStyle,
+      normalizedLinkedPairLayout,
+      overlays,
+      previewAspectRatio,
+      previewTime
+    ]
+  );
+
+  useEffect(() => {
+    if (editorMode !== 'linked_pairs' || linkedPairOutputMode !== 'thumbnail') return;
+    const canvas = thumbnailPreviewCanvasRef.current;
+    const frame = previewRef.current;
+    const pair = previewLinkedPair ?? selectedLinkedPair;
+    if (!canvas || !frame || !pair) return;
+
+    let cancelled = false;
+
+    const render = async () => {
+      const width = Math.max(1, Math.floor(frame.clientWidth));
+      const height = Math.max(1, Math.floor(frame.clientHeight));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      try {
+        await renderLinkedPairThumbnailScene(ctx, pair, width, height);
+      } catch {
+        if (!cancelled) {
+          ctx.clearRect(0, 0, width, height);
+        }
+      }
+    };
+
+    void render();
+    return () => {
+      cancelled = true;
+    };
+  }, [editorMode, linkedPairOutputMode, previewLinkedPair, selectedLinkedPair, renderLinkedPairThumbnailScene]);
+
   const sampleColorFromActiveMediaAtPreviewPoint = async (clientX: number, clientY: number): Promise<string | null> => {
     if (!activeMedia || !previewRef.current) return null;
 
@@ -1141,33 +1767,6 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       }
     }));
     setIsPreviewColorPickerActive(false);
-  };
-
-  const startTimelineDrag = (
-    event: React.PointerEvent<HTMLElement>,
-    source: 'batch' | 'overlay',
-    id: string,
-    mode: TimelineDragState['mode'],
-    timeline: OverlayTimeline
-  ) => {
-    if (event.button !== 0) return;
-    const target = event.target as HTMLElement | null;
-    const lane = target?.closest('[data-timeline-lane="true"]') as HTMLElement | null;
-    const laneRect = lane?.getBoundingClientRect();
-    if (!laneRect || laneRect.width < 1) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    setActiveClip({ source, id });
-    setTimelineDragState({
-      pointerId: event.pointerId,
-      source,
-      id,
-      mode,
-      startClientX: event.clientX,
-      startTimeline: normalizeTimeline(timeline),
-      laneWidth: laneRect.width
-    });
   };
 
   useEffect(() => {
@@ -1273,60 +1872,6 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       window.removeEventListener('pointercancel', handlePointerUp);
     };
   }, [linkedPairDragState, previewAspectRatio]);
-
-  useEffect(() => {
-    if (!timelineDragState) return;
-
-    const handlePointerMove = (event: PointerEvent) => {
-      if (event.pointerId !== timelineDragState.pointerId) return;
-      event.preventDefault();
-
-      const minDuration = 0.05;
-      const startTimeline = normalizeTimeline(timelineDragState.startTimeline);
-      const currentDuration = Math.max(minDuration, startTimeline.end - startTimeline.start);
-      const deltaSeconds =
-        ((event.clientX - timelineDragState.startClientX) / Math.max(1, timelineDragState.laneWidth)) * timelineDuration;
-
-      if (timelineDragState.mode === 'move') {
-        const nextStart = clamp(startTimeline.start + deltaSeconds, 0, Math.max(0, timelineDuration - currentDuration));
-        updateClipTimeline(timelineDragState.source, timelineDragState.id, {
-          start: nextStart,
-          end: nextStart + currentDuration
-        });
-        return;
-      }
-
-      if (timelineDragState.mode === 'trimStart') {
-        const nextStart = clamp(startTimeline.start + deltaSeconds, 0, startTimeline.end - minDuration);
-        updateClipTimeline(timelineDragState.source, timelineDragState.id, {
-          start: nextStart,
-          end: startTimeline.end
-        });
-        return;
-      }
-
-      const nextEnd = clamp(startTimeline.end + deltaSeconds, startTimeline.start + minDuration, timelineDuration);
-      updateClipTimeline(timelineDragState.source, timelineDragState.id, {
-        start: startTimeline.start,
-        end: nextEnd
-      });
-    };
-
-    const handlePointerUp = (event: PointerEvent) => {
-      if (event.pointerId !== timelineDragState.pointerId) return;
-      setTimelineDragState(null);
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerUp);
-
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-    };
-  }, [timelineDragState, timelineDuration]);
 
   const applyBaseVideoFile = async (file: File) => {
     const nextUrl = URL.createObjectURL(file);
@@ -1703,6 +2248,43 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     }
   };
 
+  const handleSoundtrackUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('audio/')) {
+      alert('Choose an audio file for the soundtrack.');
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    const { duration } = await readAudioMetadata(url);
+
+    setSoundtrack((current) => {
+      if (current) URL.revokeObjectURL(current.url);
+      return {
+        file,
+        name: file.name,
+        url,
+        durationSeconds: duration,
+        start: 0,
+        trimStart: 0,
+        volume: 1,
+        loop: true
+      };
+    });
+  };
+
+  const handleClearSoundtrack = () => {
+    setSoundtrack((current) => {
+      if (current) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    if (soundtrackPreviewRef.current) {
+      soundtrackPreviewRef.current.pause();
+    }
+  };
+
   const handleRemoveBatchPhoto = (id: string) => {
     setBatchPhotos((current) => {
       const target = current.find((item) => item.id === id);
@@ -1762,7 +2344,61 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     updateActiveTransform(getDefaultTransform(activeMedia.aspectRatio, previewAspectRatio));
   };
 
+  const handleExportThumbnail = async () => {
+    if (editorMode !== 'linked_pairs') {
+      alert('Thumbnail export is only available in Linked Puzzle Pairs mode.');
+      return;
+    }
+    const pair = previewLinkedPair ?? selectedLinkedPair;
+    if (!pair) {
+      alert('Select or upload a linked puzzle pair first.');
+      return;
+    }
+    if (baseMode === 'video' && !baseVideoFile) {
+      alert('Upload a base video first.');
+      return;
+    }
+    if (baseMode === 'photo' && !basePhotoFile) {
+      alert('Upload a base photo first.');
+      return;
+    }
+
+    const { width, height } = computeOutputSizeFromAspect(previewAspectRatio, settings.exportResolution);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      alert('Failed to initialize thumbnail export canvas.');
+      return;
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await renderLinkedPairThumbnailScene(ctx, pair, width, height);
+
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      alert('Failed to create thumbnail export.');
+      return;
+    }
+
+    const fileName = `${sanitizeFileBaseName(pair.name)}-thumbnail.png`;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const handleExport = async () => {
+    if (editorMode === 'linked_pairs' && linkedPairOutputMode === 'thumbnail') {
+      await handleExportThumbnail();
+      return;
+    }
     if (editorMode === 'linked_pairs' && linkedPairs.length === 0) {
       alert('Upload at least one linked puzzle pair before exporting.');
       return;
@@ -1812,6 +2448,15 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
         chromaKey: item.chromaKey,
         timeline: normalizeTimeline(item.timeline)
       })),
+      soundtrack: soundtrack
+        ? {
+            file: soundtrack.file,
+            start: soundtrack.start,
+            trimStart: soundtrack.trimStart,
+            volume: soundtrack.volume,
+            loop: soundtrack.loop
+          }
+        : undefined,
       linkedPairs:
         editorMode === 'linked_pairs'
           ? linkedPairs.map((item) => ({
@@ -1829,27 +2474,6 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     await onExport(payload);
   };
 
-  const timelineTracks = useMemo(() => {
-    const tracks: Array<{ source: 'batch' | 'overlay'; item: DraftMediaBase; label: string }> = [];
-    if (editorMode === 'standard') {
-      batchPhotos.forEach((item, index) => {
-        tracks.push({
-          source: 'batch',
-          item,
-          label: `Batch ${index + 1}: ${item.name}`
-        });
-      });
-    }
-    overlays.forEach((item, index) => {
-      tracks.push({
-        source: 'overlay',
-        item,
-        label: `Overlay ${index + 1}: ${item.name}`
-      });
-    });
-    return tracks;
-  }, [batchPhotos, editorMode, overlays]);
-
   const canExport =
     (editorMode === 'linked_pairs' ? linkedPairs.length > 0 : baseMode === 'video' || batchPhotos.length > 0) &&
     (baseMode !== 'video' || Boolean(baseVideoFile)) &&
@@ -1857,11 +2481,15 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
 
   const exportOutputCount =
     editorMode === 'linked_pairs'
-      ? linkedPairs.length > 0
-        ? linkedPairExportMode === 'single_video'
+      ? linkedPairOutputMode === 'thumbnail'
+        ? previewLinkedPair || selectedLinkedPair
           ? 1
-          : linkedPairs.length
-        : 0
+          : 0
+        : linkedPairs.length > 0
+          ? linkedPairExportMode === 'single_video'
+            ? 1
+            : linkedPairs.length
+          : 0
       : batchPhotos.length > 0
         ? batchPhotos.length
         : baseMode === 'video'
@@ -1869,9 +2497,11 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
           : 0;
   const exportButtonLabel = isExporting
     ? 'Exporting...'
-    : exportOutputCount > 0
-      ? `Export ${exportOutputCount} Video${exportOutputCount === 1 ? '' : 's'}`
-      : 'Export Video';
+    : editorMode === 'linked_pairs' && linkedPairOutputMode === 'thumbnail'
+      ? 'Export Thumbnail'
+      : exportOutputCount > 0
+        ? `Export ${exportOutputCount} Video${exportOutputCount === 1 ? '' : 's'}`
+        : 'Export Video';
 
   const previewMaxWidth = previewAspectRatio < 1 ? 460 : undefined;
   const linkedPairBounds = useMemo(
@@ -1898,7 +2528,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
             </button>
             <div className="min-w-0">
               <h2 className="text-xl sm:text-2xl md:text-3xl font-black font-display uppercase tracking-tight text-black">
-                Overlay Editor+
+                Editor Mode
               </h2>
               <p className="text-xs md:text-sm font-bold text-slate-700 uppercase tracking-wide">
                 Batch images, crop/bg, extra overlays, chroma key and timeline
@@ -1937,131 +2567,133 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                   </button>
                 </div>
               </div>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
-                  <Video size={18} />
-                  Base Source
-                </label>
-                <span className="text-xs font-black uppercase text-slate-600">{baseMode}</span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <button
-                  onClick={() => setBaseMode('video')}
-                  className={`px-2 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                    baseMode === 'video' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                  }`}
-                >
-                  Video
-                </button>
-                <button
-                  onClick={() => setBaseMode('photo')}
-                  className={`px-2 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                    baseMode === 'photo' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                  }`}
-                >
-                  Photo
-                </button>
-                <button
-                  onClick={() => setBaseMode('color')}
-                  className={`px-2 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                    baseMode === 'color' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                  }`}
-                >
-                  Color
-                </button>
-              </div>
-
-              <div className="space-y-2 pt-1 border-t-2 border-black">
-                <label className="block text-xs font-black uppercase">Output Aspect Ratio</label>
-                <select
-                  value={frameAspectPreset}
-                  onChange={(event) => setFrameAspectPreset(event.target.value as AspectRatioPreset)}
-                  className="w-full px-3 py-2 border-2 border-black rounded-lg font-bold bg-white"
-                >
-                  {ASPECT_RATIO_PRESET_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <div className="text-[10px] font-black uppercase text-slate-600">
-                  {frameAspectPreset === 'auto'
-                    ? `Current: ${sourceAspectRatio.toFixed(3)} (base)`
-                    : `Current: ${previewAspectRatio.toFixed(3)}`}
-                </div>
-              </div>
-
-              {baseMode === 'video' && (
-                <div className="space-y-2">
-                  <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
-                    <Upload size={16} />
-                    <span>Upload Base Video</span>
-                    <input type="file" accept="video/*" className="hidden" onChange={handleBaseVideoUpload} />
-                  </label>
-                  <div className="text-[10px] font-black uppercase text-slate-600">
-                    {baseVideoFile
-                      ? `${baseVideoFile.name} | ${baseVideoDuration.toFixed(2)}s`
-                      : 'No base video selected'}
+              <>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
+                      <Video size={18} />
+                      Base Source
+                    </label>
+                    <span className="text-xs font-black uppercase text-slate-600">{baseMode}</span>
                   </div>
-                </div>
-              )}
 
-              {baseMode === 'photo' && (
-                <div className="space-y-2">
-                  <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
-                    <Upload size={16} />
-                    <span>Upload Base Photo</span>
-                    <input type="file" accept="image/*" className="hidden" onChange={handleBasePhotoUpload} />
-                  </label>
-                  <div className="text-[10px] font-black uppercase text-slate-600">
-                    {basePhotoFile ? basePhotoFile.name : 'No base photo selected'}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <button
+                      onClick={() => setBaseMode('video')}
+                      className={`px-2 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                        baseMode === 'video' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      Video
+                    </button>
+                    <button
+                      onClick={() => setBaseMode('photo')}
+                      className={`px-2 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                        baseMode === 'photo' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      Photo
+                    </button>
+                    <button
+                      onClick={() => setBaseMode('color')}
+                      className={`px-2 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                        baseMode === 'color' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      Color
+                    </button>
                   </div>
-                  <label className="block text-xs font-black uppercase">Photo/Color Duration: {staticDurationSeconds.toFixed(1)}s</label>
-                  <input
-                    type="range"
-                    min={1}
-                    max={60}
-                    step={0.5}
-                    value={staticDurationSeconds}
-                    onChange={(event) => setStaticDurationSeconds(Number(event.target.value))}
-                    className="w-full h-4 border-2 border-black rounded-full accent-black"
-                  />
-                </div>
-              )}
 
-              {baseMode === 'color' && (
-                <div className="space-y-2">
-                  <label className="block text-xs font-black uppercase">Duration: {staticDurationSeconds.toFixed(1)}s</label>
-                  <input
-                    type="range"
-                    min={1}
-                    max={60}
-                    step={0.5}
-                    value={staticDurationSeconds}
-                    onChange={(event) => setStaticDurationSeconds(Number(event.target.value))}
-                    className="w-full h-4 border-2 border-black rounded-full accent-black"
-                  />
-                </div>
-              )}
+                  <div className="space-y-2 pt-1 border-t-2 border-black">
+                    <label className="block text-xs font-black uppercase">Output Aspect Ratio</label>
+                    <select
+                      value={frameAspectPreset}
+                      onChange={(event) => setFrameAspectPreset(event.target.value as AspectRatioPreset)}
+                      className="w-full px-3 py-2 border-2 border-black rounded-lg font-bold bg-white"
+                    >
+                      {ASPECT_RATIO_PRESET_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="text-[10px] font-black uppercase text-slate-600">
+                      {frameAspectPreset === 'auto'
+                        ? `Current: ${sourceAspectRatio.toFixed(3)} (base)`
+                        : `Current: ${previewAspectRatio.toFixed(3)}`}
+                    </div>
+                  </div>
 
-              <div className="border-t-2 border-black pt-2">
-                <label className="block text-xs font-black uppercase mb-1">Base Background Color</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={baseColor}
-                    onChange={(event) => setBaseColor(event.target.value)}
-                    className="w-10 h-10 border-2 border-black rounded cursor-pointer bg-white"
-                  />
-                  <input
-                    type="text"
-                    value={baseColor}
-                    onChange={(event) => setBaseColor(event.target.value)}
-                    className="flex-1 px-3 py-2 border-2 border-black rounded-lg font-bold text-sm bg-white"
-                  />
-                </div>
-              </div>
+                  {baseMode === 'video' && (
+                    <div className="space-y-2">
+                      <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
+                        <Upload size={16} />
+                        <span>Upload Base Video</span>
+                        <input type="file" accept="video/*" className="hidden" onChange={handleBaseVideoUpload} />
+                      </label>
+                      <div className="text-[10px] font-black uppercase text-slate-600">
+                        {baseVideoFile
+                          ? `${baseVideoFile.name} | ${baseVideoDuration.toFixed(2)}s`
+                          : 'No base video selected'}
+                      </div>
+                    </div>
+                  )}
+
+                  {baseMode === 'photo' && (
+                    <div className="space-y-2">
+                      <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
+                        <Upload size={16} />
+                        <span>Upload Base Photo</span>
+                        <input type="file" accept="image/*" className="hidden" onChange={handleBasePhotoUpload} />
+                      </label>
+                      <div className="text-[10px] font-black uppercase text-slate-600">
+                        {basePhotoFile ? basePhotoFile.name : 'No base photo selected'}
+                      </div>
+                      <label className="block text-xs font-black uppercase">Photo/Color Duration: {staticDurationSeconds.toFixed(1)}s</label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={60}
+                        step={0.5}
+                        value={staticDurationSeconds}
+                        onChange={(event) => setStaticDurationSeconds(Number(event.target.value))}
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                  )}
+
+                  {baseMode === 'color' && (
+                    <div className="space-y-2">
+                      <label className="block text-xs font-black uppercase">Duration: {staticDurationSeconds.toFixed(1)}s</label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={60}
+                        step={0.5}
+                        value={staticDurationSeconds}
+                        onChange={(event) => setStaticDurationSeconds(Number(event.target.value))}
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                  )}
+
+                  <div className="border-t-2 border-black pt-2">
+                    <label className="block text-xs font-black uppercase mb-1">Base Background Color</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={baseColor}
+                        onChange={(event) => setBaseColor(event.target.value)}
+                        className="w-10 h-10 border-2 border-black rounded cursor-pointer bg-white"
+                      />
+                      <input
+                        type="text"
+                        value={baseColor}
+                        onChange={(event) => setBaseColor(event.target.value)}
+                        className="flex-1 px-3 py-2 border-2 border-black rounded-lg font-bold text-sm bg-white"
+                      />
+                    </div>
+                  </div>
+              </>
             </div>
 
             <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
@@ -2170,6 +2802,27 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                   </div>
                   <div className="space-y-3 pt-1 border-t-2 border-black">
                     <div>
+                      <label className="block text-xs font-black uppercase mb-1">Output Type</label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button
+                          onClick={() => setLinkedPairOutputMode('video')}
+                          className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                            linkedPairOutputMode === 'video' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                          }`}
+                        >
+                          Video
+                        </button>
+                        <button
+                          onClick={() => setLinkedPairOutputMode('thumbnail')}
+                          className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                            linkedPairOutputMode === 'thumbnail' ? 'bg-[#DBEAFE]' : 'bg-white hover:bg-slate-100'
+                          }`}
+                        >
+                          Thumbnail
+                        </button>
+                      </div>
+                    </div>
+                    <div>
                       <label className="block text-xs font-black uppercase mb-1">Linked Gap: {(normalizedLinkedPairLayout.gap * 100).toFixed(1)}%</label>
                       <input
                         type="range"
@@ -2186,27 +2839,33 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                         className="w-full h-4 border-2 border-black rounded-full accent-black"
                       />
                     </div>
-                    <div>
-                      <label className="block text-xs font-black uppercase mb-1">Export Style</label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <button
-                          onClick={() => setLinkedPairExportMode('one_per_pair')}
-                          className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                            linkedPairExportMode === 'one_per_pair' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                          }`}
-                        >
-                          One Video Per Pair
-                        </button>
-                        <button
-                          onClick={() => setLinkedPairExportMode('single_video')}
-                          className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                            linkedPairExportMode === 'single_video' ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
-                          }`}
-                        >
-                          All Pairs In One
-                        </button>
+                    {linkedPairOutputMode === 'video' ? (
+                      <div>
+                        <label className="block text-xs font-black uppercase mb-1">Export Style</label>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <button
+                            onClick={() => setLinkedPairExportMode('one_per_pair')}
+                            className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                              linkedPairExportMode === 'one_per_pair' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                            }`}
+                          >
+                            One Video Per Pair
+                          </button>
+                          <button
+                            onClick={() => setLinkedPairExportMode('single_video')}
+                            className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                              linkedPairExportMode === 'single_video' ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                            }`}
+                          >
+                            All Pairs In One
+                          </button>
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="rounded-lg border-2 border-black bg-[#EEF9FF] px-3 py-2 text-[10px] font-black uppercase text-slate-700">
+                        Thumbnail export uses the current pair preview and current timeline frame.
+                      </div>
+                    )}
                   </div>
                   <p className="text-[10px] font-black uppercase text-slate-600">
                     Images are paired by filename. Files ending in <code>diff</code> become the answer frame; the matching base
@@ -2217,30 +2876,160 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
             </div>
 
             <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
+                    <Layers size={18} />
+                    Extra Overlays
+                  </label>
+                  <span className="text-xs font-black uppercase text-slate-600">{overlays.length} selected</span>
+                </div>
+                <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
+                  <Upload size={16} />
+                  <span>Add Photos/Videos</span>
+                  <input type="file" accept="image/*,video/*" multiple className="hidden" onChange={handleOverlayUpload} />
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleClearOverlays}
+                    disabled={overlays.length === 0}
+                    className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Clear Overlays
+                  </button>
+                  <span className="px-3 py-2 bg-[#EEF9FF] border-2 border-black rounded-lg text-[10px] font-black uppercase">
+                    Chroma Key + Timeline Supported
+                  </span>
+                </div>
+              </div>
+            
+            <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <label className="text-lg font-black uppercase tracking-wide flex items-center gap-2">
-                  <Layers size={18} />
-                  Extra Overlays
+                  <Volume2 size={18} />
+                  Soundtrack
                 </label>
-                <span className="text-xs font-black uppercase text-slate-600">{overlays.length} selected</span>
+                <span className="text-xs font-black uppercase text-slate-600">{soundtrack ? 'loaded' : 'none'}</span>
               </div>
               <label className="inline-flex w-full items-center justify-center gap-2 px-4 py-2 bg-black text-white rounded-lg text-sm font-black uppercase tracking-wide cursor-pointer sm:w-auto">
                 <Upload size={16} />
-                <span>Add Photos/Videos</span>
-                <input type="file" accept="image/*,video/*" multiple className="hidden" onChange={handleOverlayUpload} />
+                <span>{soundtrack ? 'Replace Audio' : 'Upload Audio'}</span>
+                <input type="file" accept="audio/*" className="hidden" onChange={handleSoundtrackUpload} />
               </label>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={handleClearOverlays}
-                  disabled={overlays.length === 0}
-                  className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Clear Overlays
-                </button>
-                <span className="px-3 py-2 bg-[#EEF9FF] border-2 border-black rounded-lg text-[10px] font-black uppercase">
-                  Chroma Key + Timeline Supported
-                </span>
-              </div>
+              {soundtrack ? (
+                <div className="space-y-3">
+                  <div className="rounded-lg border-2 border-black bg-white px-3 py-2">
+                    <div className="text-xs font-black uppercase truncate">{soundtrack.name}</div>
+                    <div className="text-[10px] font-bold uppercase text-slate-600">
+                      {soundtrack.durationSeconds.toFixed(2)}s source length
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">
+                        Track Start: {soundtrack.start.toFixed(2)}s
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={timelineDuration}
+                        step={0.01}
+                        value={soundtrack.start}
+                        onChange={(event) =>
+                          setSoundtrack((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  start: Number(event.target.value)
+                                }
+                              : current
+                          )
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">
+                        Trim Start: {soundtrack.trimStart.toFixed(2)}s
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={Math.max(0, soundtrack.durationSeconds - 0.05)}
+                        step={0.01}
+                        value={soundtrack.trimStart}
+                        onChange={(event) =>
+                          setSoundtrack((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  trimStart: Number(event.target.value)
+                                }
+                              : current
+                          )
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">
+                        Volume: {(soundtrack.volume * 100).toFixed(0)}%
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={soundtrack.volume}
+                        onChange={(event) =>
+                          setSoundtrack((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  volume: Number(event.target.value)
+                                }
+                              : current
+                          )
+                        }
+                        className="w-full h-4 border-2 border-black rounded-full accent-black"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        onClick={() =>
+                          setSoundtrack((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  loop: !current.loop
+                                }
+                              : current
+                          )
+                        }
+                        className={`w-full px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                          soundtrack.loop ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                        }`}
+                      >
+                        {soundtrack.loop ? 'Loop: On' : 'Loop: Off'}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleClearSoundtrack}
+                      className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-red-50"
+                    >
+                      Clear Audio
+                    </button>
+                    <span className="px-3 py-2 bg-[#EEF9FF] border-2 border-black rounded-lg text-[10px] font-black uppercase">
+                      Uploaded soundtrack replaces base video audio on export.
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs font-bold uppercase text-slate-500 border-2 border-dashed border-slate-300 rounded-lg p-3 text-center">
+                  Add a soundtrack for pair mode or standard exports.
+                </div>
+              )}
             </div>
           </div>
 
@@ -2278,6 +3067,8 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                 </div>
               </div>
 
+              {soundtrack && <audio ref={soundtrackPreviewRef} src={soundtrack.url} preload="auto" className="hidden" />}
+
               <div
                 ref={previewRef}
                 onPointerDown={handlePreviewColorPick}
@@ -2304,6 +3095,10 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                   <div className="absolute inset-0 flex items-center justify-center text-white font-black uppercase tracking-wide text-sm">
                     Upload a base photo
                   </div>
+                )}
+
+                {editorMode === 'linked_pairs' && linkedPairOutputMode === 'thumbnail' && (
+                  <canvas ref={thumbnailPreviewCanvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
                 )}
 
                 {editorMode === 'linked_pairs' && previewLinkedPair && (
@@ -2333,33 +3128,37 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                       touchAction: 'none'
                     }}
                   >
-                    {[
-                      { key: 'puzzle', label: 'Puzzle', src: previewLinkedPair.puzzleUrl, style: linkedPairBounds.puzzle },
-                      { key: 'diff', label: 'Answer', src: previewLinkedPair.diffUrl, style: linkedPairBounds.diff }
-                    ].map((panel) => (
-                      <div
-                        key={panel.key}
-                        className="absolute overflow-hidden bg-[#F8FAFC]"
-                        style={{
-                          ...panel.style,
-                          borderStyle: 'solid',
-                          borderWidth: `${linkedPairStyle.outlineWidth}px`,
-                          borderColor: linkedPairStyle.outlineColor,
-                          borderRadius: `${linkedPairStyle.cornerRadius}px`,
-                          boxSizing: 'border-box'
-                        }}
-                      >
-                        <div className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded bg-black/80 text-white text-[9px] font-black uppercase tracking-wide">
-                          {panel.label}
+                    {linkedPairOutputMode === 'video' ? (
+                      [
+                        { key: 'puzzle', label: 'Puzzle', src: previewLinkedPair.puzzleUrl, style: linkedPairBounds.puzzle },
+                        { key: 'diff', label: 'Answer', src: previewLinkedPair.diffUrl, style: linkedPairBounds.diff }
+                      ].map((panel) => (
+                        <div
+                          key={panel.key}
+                          className="absolute overflow-hidden bg-[#F8FAFC]"
+                          style={{
+                            ...panel.style,
+                            borderStyle: 'solid',
+                            borderWidth: `${linkedPairStyle.outlineWidth}px`,
+                            borderColor: linkedPairStyle.outlineColor,
+                            borderRadius: `${linkedPairStyle.cornerRadius}px`,
+                            boxSizing: 'border-box'
+                          }}
+                        >
+                          <div className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded bg-black/80 text-white text-[9px] font-black uppercase tracking-wide">
+                            {panel.label}
+                          </div>
+                          <img
+                            src={panel.src}
+                            alt={`${previewLinkedPair.name} ${panel.label}`}
+                            className="absolute inset-0 w-full h-full object-contain pointer-events-none select-none"
+                            draggable={false}
+                          />
                         </div>
-                        <img
-                          src={panel.src}
-                          alt={`${previewLinkedPair.name} ${panel.label}`}
-                          className="absolute inset-0 w-full h-full object-contain pointer-events-none select-none"
-                          draggable={false}
-                        />
-                      </div>
-                    ))}
+                      ))
+                    ) : (
+                      <div className="absolute inset-0 rounded border border-dashed border-white/60" />
+                    )}
                     <button
                       type="button"
                       onPointerDown={(event) => {
@@ -2425,43 +3224,58 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                         touchAction: 'none'
                       }}
                     >
-                      <div className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded bg-black/80 text-white text-[9px] font-black uppercase tracking-wide">
-                        {source === 'batch' ? 'batch' : item.kind}
-                      </div>
+                      {(linkedPairOutputMode === 'video' || isActive) && (
+                        <div className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded bg-black/80 text-white text-[9px] font-black uppercase tracking-wide">
+                          {source === 'batch' ? 'batch' : item.kind}
+                        </div>
+                      )}
 
-                      {item.chromaKey.enabled ? (
-                        <PreviewChromaMedia
-                          item={item}
-                          previewTime={previewTime}
-                          registerVideoRef={
-                            item.kind === 'video'
-                              ? (node) => {
-                                  overlayVideoRefs.current[item.id] = node;
-                                }
-                              : undefined
-                          }
-                        />
-                      ) : item.kind === 'image' ? (
-                        <img
-                          src={item.url}
-                          alt={item.name}
-                          className="absolute top-0 left-0 pointer-events-none select-none"
-                          style={getCroppedStyle(item.crop)}
-                          draggable={false}
-                        />
-                      ) : (
+                      {linkedPairOutputMode === 'video' ? (
+                        item.chromaKey.enabled ? (
+                          <PreviewChromaMedia
+                            item={item}
+                            previewTime={previewTime}
+                            registerVideoRef={
+                              item.kind === 'video'
+                                ? (node) => {
+                                    overlayVideoRefs.current[item.id] = node;
+                                  }
+                                : undefined
+                            }
+                          />
+                        ) : item.kind === 'image' ? (
+                          <img
+                            src={item.url}
+                            alt={item.name}
+                            className="absolute top-0 left-0 pointer-events-none select-none"
+                            style={getCroppedStyle(item.crop)}
+                            draggable={false}
+                          />
+                        ) : (
+                          <video
+                            ref={(node) => {
+                              overlayVideoRefs.current[item.id] = node;
+                            }}
+                            src={item.url}
+                            className="absolute top-0 left-0 pointer-events-none select-none"
+                            style={getCroppedStyle(item.crop)}
+                            muted
+                            playsInline
+                            preload="metadata"
+                          />
+                        )
+                      ) : item.kind === 'video' ? (
                         <video
                           ref={(node) => {
                             overlayVideoRefs.current[item.id] = node;
                           }}
                           src={item.url}
-                          className="absolute top-0 left-0 pointer-events-none select-none"
-                          style={getCroppedStyle(item.crop)}
+                          className="absolute top-0 left-0 h-0 w-0 opacity-0 pointer-events-none select-none"
                           muted
                           playsInline
                           preload="metadata"
                         />
-                      )}
+                      ) : null}
 
                       {isActive && (
                         <button
@@ -3116,97 +3930,33 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
             )}
           </div>
 
-          <div className="space-y-3 p-4 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-black uppercase tracking-wide">Timeline</h3>
-              <span className="text-xs font-black uppercase text-slate-600">{timelineTracks.length} tracks</span>
-            </div>
-            <p className="text-[10px] font-black uppercase text-slate-600">
-              Drag clips to move. Drag clip edges to trim start/end. Click lane to seek playhead.
-            </p>
-            <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-              {timelineTracks.map((track) => {
-                const normalized = normalizeTimeline(track.item.timeline);
-                const startPct = (normalized.start / timelineDuration) * 100;
-                const widthPct = Math.max(0.8, ((normalized.end - normalized.start) / timelineDuration) * 100);
-                const playheadPct = (previewTime / timelineDuration) * 100;
-                const isActive = activeClip?.source === track.source && activeClip.id === track.item.id;
-                return (
-                  <div
-                    key={`${track.source}-${track.item.id}`}
-                    className={`w-full p-2 border-2 border-black rounded-lg text-left ${
-                      isActive ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setActiveClip({ source: track.source, id: track.item.id })}
-                      className="w-full text-left"
-                    >
-                      <div className="text-[10px] font-black uppercase truncate mb-1">{track.label}</div>
-                    </button>
-                    <div
-                      data-timeline-lane="true"
-                      className="relative h-10 rounded bg-slate-200 border border-black cursor-pointer"
-                      onPointerDown={(event) => {
-                        if (event.button !== 0) return;
-                        if (event.target !== event.currentTarget) return;
-                        const rect = event.currentTarget.getBoundingClientRect();
-                        const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-                        setActiveClip({ source: track.source, id: track.item.id });
-                        setPreviewTime(ratio * timelineDuration);
-                      }}
-                    >
-                      <div
-                        className={`absolute top-1 bottom-1 rounded border border-black ${
-                          isActive ? 'bg-[#FFD93D]' : 'bg-black/85'
-                        }`}
-                        style={{
-                          left: `${startPct}%`,
-                          width: `${widthPct}%`
-                        }}
-                        onPointerDown={(event) =>
-                          startTimelineDrag(event, track.source, track.item.id, 'move', normalized)
-                        }
-                      >
-                        <div
-                          className="absolute left-0 top-0 bottom-0 w-2 bg-white/80 border-r border-black cursor-ew-resize"
-                          onPointerDown={(event) =>
-                            startTimelineDrag(event, track.source, track.item.id, 'trimStart', normalized)
-                          }
-                        />
-                        <div
-                          className="absolute right-0 top-0 bottom-0 w-2 bg-white/80 border-l border-black cursor-ew-resize"
-                          onPointerDown={(event) =>
-                            startTimelineDrag(event, track.source, track.item.id, 'trimEnd', normalized)
-                          }
-                        />
-                        <div className="absolute inset-0 px-3 flex items-center justify-between pointer-events-none">
-                          <span className="text-[9px] font-black uppercase text-white mix-blend-difference">
-                            {normalized.start.toFixed(2)}s
-                          </span>
-                          <span className="text-[9px] font-black uppercase text-white mix-blend-difference">
-                            {normalized.end.toFixed(2)}s
-                          </span>
-                        </div>
-                      </div>
-                      <div
-                        className="absolute top-[-2px] bottom-[-2px] w-[2px] bg-red-600"
-                        style={{ left: `${playheadPct}%` }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-              {timelineTracks.length === 0 && (
-                <div className="text-xs font-bold uppercase text-slate-500 border-2 border-dashed border-slate-300 rounded-lg p-3 text-center">
-                  {editorMode === 'linked_pairs'
-                    ? 'Linked pairs render automatically. Add overlays if you want timed extra media.'
-                    : 'Add overlays, or add batch images to export multiple outputs.'}
+          <EditorTimeline
+            timeline={editorTimelineState}
+            playheadTime={previewTime}
+            selectedClipId={selectedTimelineClipId}
+            selectedTrackId={selectedTimelineTrackId}
+            className="mt-1"
+            onPlayheadChange={setPreviewTime}
+            onSelectClip={handleTimelineClipSelect}
+            onClipChange={handleTimelineClipChange}
+            onSelectTrack={(track) => {
+              if (shouldUseDemoTimeline) {
+                setDemoSelectedTrackId(track.id);
+              }
+            }}
+            emptyState={
+              <div className="max-w-2xl rounded-[24px] border border-dashed border-white/15 bg-white/4 px-6 py-8 text-center">
+                <div className="text-sm font-black uppercase tracking-[0.24em] text-white/50">Timeline Empty</div>
+                <div className="mt-2 text-2xl font-black uppercase tracking-tight text-white">
+                  Add clips or keep exploring the seeded studio layout
                 </div>
-              )}
-            </div>
-          </div>
+                <p className="mt-3 text-sm font-semibold text-white/62">
+                  The standalone editor stays usable without imports, but real clips will replace the demo timeline as soon as
+                  you load batch media, overlays, linked pairs, or audio.
+                </p>
+              </div>
+            }
+          />
 
           <div className="space-y-4 p-4 bg-[#EEF9FF] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
             <h3 className="text-lg font-black uppercase tracking-wide">Export Settings</h3>

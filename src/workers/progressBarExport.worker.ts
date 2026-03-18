@@ -6,8 +6,10 @@ import {
   WebMOutputFormat,
   canEncodeVideo
 } from 'mediabunny';
-import { VISUAL_THEMES } from '../constants/videoThemes';
+import { PROGRESS_BAR_THEMES, resolveProgressBarFillColors, type ProgressBarVisualStyle } from '../constants/progressBarThemes';
 import { VideoSettings } from '../types';
+import type { ProgressBarRenderMode } from '../services/progressBarExport';
+import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
 
 type ProgressBarExportSettings = Pick<
   VideoSettings,
@@ -17,8 +19,10 @@ type ProgressBarExportSettings = Pick<
 interface WorkerStartMessage {
   type: 'start';
   payload: {
-    style: VideoSettings['visualStyle'];
+    style: ProgressBarVisualStyle;
     durationSeconds: number;
+    renderMode: ProgressBarRenderMode;
+    progressLabel: string;
     settings: ProgressBarExportSettings;
   };
 }
@@ -176,6 +180,73 @@ const drawRoundedRect = (
   }
 };
 
+const resolveTextProgressFillColors = (
+  remainingPercent: number,
+  style: ProgressBarVisualStyle,
+  theme: (typeof PROGRESS_BAR_THEMES)[ProgressBarVisualStyle]
+) => {
+  return resolveSmoothTextProgressFillColors(
+    remainingPercent,
+    theme,
+    resolveProgressBarFillColors(style, remainingPercent / 100)
+  );
+};
+
+const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
+  const safeText = text.trim() || 'PROGRESS';
+  const widthBound = width / Math.max(4.8, safeText.length * 0.68);
+  const heightBound = height * 0.78;
+  return clamp(Math.min(preferred, widthBound, heightBound), 12, 160);
+};
+
+const drawTextFillProgress = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  label: string,
+  remainingPercent: number,
+  style: ProgressBarVisualStyle,
+  theme: (typeof PROGRESS_BAR_THEMES)[ProgressBarVisualStyle],
+  scale: number
+) => {
+  const safeLabel = label.trim() || 'PROGRESS';
+  const fontSize = resolveTextProgressFontSize(safeLabel, rect.width, rect.height, Math.max(22, 38 * scale));
+  const fillWidth = Math.max(0, Math.min(rect.width, (rect.width * clamp(remainingPercent, 0, 100)) / 100));
+  const textX = rect.x + rect.width / 2;
+  const textY = rect.y + rect.height * 0.68;
+  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08));
+  const fillColors = resolveTextProgressFillColors(remainingPercent, style, theme);
+  const textCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(rect.width)), Math.max(1, Math.ceil(rect.height)));
+  const textCtx = textCanvas.getContext('2d');
+
+  if (!textCtx) return;
+
+  textCtx.clearRect(0, 0, rect.width, rect.height);
+  textCtx.textAlign = 'center';
+  textCtx.textBaseline = 'alphabetic';
+  textCtx.font = `900 ${fontSize}px "Arial Black", "Segoe UI", sans-serif`;
+  textCtx.fillStyle = '#000000';
+  textCtx.fillText(safeLabel, rect.width / 2, rect.height * 0.68);
+  textCtx.globalCompositeOperation = 'source-in';
+  const gradient = textCtx.createLinearGradient(0, 0, rect.width, 0);
+  gradient.addColorStop(0, fillColors.start);
+  gradient.addColorStop(0.58, fillColors.middle);
+  gradient.addColorStop(1, fillColors.end);
+  textCtx.fillStyle = gradient;
+  textCtx.fillRect(0, 0, fillWidth, rect.height);
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `900 ${fontSize}px "Arial Black", "Segoe UI", sans-serif`;
+  ctx.lineWidth = strokeWidth;
+  ctx.strokeStyle = '#111827';
+  ctx.fillStyle = TEXT_PROGRESS_EMPTY_FILL;
+  ctx.strokeText(safeLabel, textX, textY);
+  ctx.fillText(safeLabel, textX, textY);
+  ctx.drawImage(textCanvas, rect.x, rect.y, rect.width, rect.height);
+  ctx.restore();
+};
+
 const getExportDimensions = (resolution: ProgressBarExportSettings['exportResolution']) => {
   const height = RESOLUTION_HEIGHT[resolution];
   const width = even((height * 16) / 9);
@@ -186,17 +257,22 @@ const drawFrame = (
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  style: VideoSettings['visualStyle'],
+  style: ProgressBarVisualStyle,
   durationSeconds: number,
-  timestamp: number
+  timestamp: number,
+  renderMode: ProgressBarRenderMode,
+  progressLabel: string
 ) => {
-  const theme = VISUAL_THEMES[style];
+  const theme = PROGRESS_BAR_THEMES[style];
   const progress = clamp(timestamp / Math.max(0.001, durationSeconds), 0, 1);
   const remaining = 1 - progress;
   ctx.clearRect(0, 0, width, height);
 
   const barWidth = Math.round(width * 0.82);
-  const barHeight = Math.max(26, Math.round(height * 0.11));
+  const barHeight =
+    renderMode === 'text_fill'
+      ? Math.max(42, Math.round(height * 0.16))
+      : Math.max(26, Math.round(height * 0.11));
   const trackRect: Rect = {
     x: Math.round((width - barWidth) / 2),
     y: Math.round((height - barHeight) / 2),
@@ -204,6 +280,11 @@ const drawFrame = (
     height: barHeight,
     radius: Math.max(8, Math.round(barHeight / 2))
   };
+
+  if (renderMode === 'text_fill') {
+    drawTextFillProgress(ctx, trackRect, progressLabel, remaining * 100, style, theme, width / 1280);
+    return;
+  }
 
   drawRoundedRect(ctx, trackRect, {
     fill: theme.progressTrackBg,
@@ -221,7 +302,16 @@ const drawFrame = (
 
   if (fillRect.width > 0 && fillRect.height > 0) {
     roundRectPath(ctx, fillRect);
-    ctx.fillStyle = resolveProgressFill(ctx, fillRect, theme.progressFill, theme.timerDot);
+    const dynamicFillColors = resolveProgressBarFillColors(style, remaining);
+    if (dynamicFillColors) {
+      const gradient = ctx.createLinearGradient(fillRect.x, fillRect.y, fillRect.x + fillRect.width, fillRect.y);
+      gradient.addColorStop(0, dynamicFillColors.start);
+      gradient.addColorStop(0.58, dynamicFillColors.middle);
+      gradient.addColorStop(1, dynamicFillColors.end);
+      ctx.fillStyle = gradient;
+    } else {
+      ctx.fillStyle = resolveProgressFill(ctx, fillRect, theme.progressFill, theme.timerDot);
+    }
     ctx.fill();
 
     const shimmerWidth = Math.max(8, fillRect.width * 0.2);
@@ -255,11 +345,15 @@ const throwIfCanceled = () => {
 const exportProgressBarInWorker = async ({
   style,
   durationSeconds,
+  renderMode,
+  progressLabel,
   settings,
   onProgress
 }: {
-  style: VideoSettings['visualStyle'];
+  style: ProgressBarVisualStyle;
   durationSeconds: number;
+  renderMode: ProgressBarRenderMode;
+  progressLabel: string;
   settings: ProgressBarExportSettings;
   onProgress?: (progress: number, status?: string) => void;
 }): Promise<{ buffer: ArrayBuffer; fileName: string; mimeType: string }> => {
@@ -305,7 +399,7 @@ const exportProgressBarInWorker = async ({
   const progressStep = Math.max(1, Math.floor(totalFrames / 120));
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
     const timestamp = frameIndex / FPS;
-    drawFrame(ctx as unknown as CanvasRenderingContext2D, width, height, style, duration, timestamp);
+    drawFrame(ctx as unknown as CanvasRenderingContext2D, width, height, style, duration, timestamp, renderMode, progressLabel);
     await videoSource.add(timestamp, 1 / FPS);
     throwIfCanceled();
 
@@ -330,7 +424,8 @@ const exportProgressBarInWorker = async ({
     '0'
   )}${String(now.getSeconds()).padStart(2, '0')}`;
 
-  const fileName = `spotitnow-progress-${style}-${duration.toFixed(1)}s-${settings.exportResolution}-${settings.exportCodec}-${stamp}.${codecConfig.extension}`;
+  const variantLabel = renderMode === 'text_fill' ? 'text-fill' : 'bar';
+  const fileName = `spotitnow-progress-${style}-${variantLabel}-${duration.toFixed(1)}s-${settings.exportResolution}-${settings.exportCodec}-${stamp}.${codecConfig.extension}`;
   return {
     buffer,
     fileName,
@@ -355,10 +450,12 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
   isCanceled = false;
 
   try {
-    const { style, durationSeconds, settings } = message.payload;
+    const { style, durationSeconds, renderMode, progressLabel, settings } = message.payload;
     const result = await exportProgressBarInWorker({
       style,
       durationSeconds,
+      renderMode,
+      progressLabel,
       settings,
       onProgress: (progress, status) => {
         postMessageToMain({ type: 'progress', progress, status });

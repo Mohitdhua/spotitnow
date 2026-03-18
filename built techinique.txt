@@ -1,0 +1,734 @@
+SpotDiff / Spotitnow – Build Technique & Full App Summary
+Generated: 2026-03-17
+Repository: j:\spotitnow\spotitnow
+
+================================================================
+1) BUILD TECHNIQUE (STACK + ARCHITECTURE)
+================================================================
+Frontend
+- React 19 + TypeScript (Vite 6) with component-driven UI.
+- Tailwind CSS (via @tailwindcss/vite) for styling.
+- Motion (motion/react) for transitions and UI animation.
+- Lucide icons for all button glyphs.
+
+Media + Graphics
+- HTML Canvas for drawing regions, previews, and diff overlays.
+- Web Workers for heavy media tasks (video export, overlay export, progress bar export, frame extraction, super image export).
+- WebCodecs for encoding (H.264/MP4 and AV1/WebM depending on export choice).
+- Audio mixing + decoding (custom utilities + asset stores).
+- JSZip for bulk image exports (zip download).
+
+AI + Automation
+- Serverless API: /api/detect-differences uses Google Gemini (model: gemini-3.1-pro-preview) for difference detection.
+- Client-side auto detection for fast diff detection (image processing + morphological operations + alignment checks).
+- Optional AI upscaling (ESRGAN models + MAXIM deblur) via UpscalerJS + TensorFlow.js.
+
+Storage & Persistence
+- Local settings and presets (localStorage-based services).
+- User package library, background packs, watermark presets, timestamp presets, saved layout snapshots.
+- File System Access API (when available) to export Super Image batches directly to a chosen folder.
+
+App Structure
+- Single-page app: App.tsx controls global mode state and persistent sub-modes.
+- Modes are component-based: Upload, Editor, Play, Video Setup/Preview, Overlay Editor, Splitter, Upscaler, Backgrounds, Timers, Progress Bars, Frame Extractor, Watermark Removal.
+- Navigation is state-driven and persisted to history via window.history.pushState for back/forward behavior.
+
+================================================================
+2) CORE DATA MODEL (WHAT THE APP STORES/USES)
+================================================================
+Puzzle
+- imageA: base image (data URL / URL)
+- imageB: modified image (data URL / URL)
+- regions: list of normalized rectangles (x, y, width, height)
+- title (optional)
+
+PuzzleSet
+- title, version, puzzles[]
+
+VideoSettings (shared across Video Mode, Timer Mode, Progress Bar Mode)
+- Aspect ratio, style stack, reveal behavior, durations, text templates, audio settings, export settings, logo settings, generated backgrounds, custom layout settings.
+
+Generated Background Packs
+- Named packs with 100 recipe entries, each recipe includes motif family, palette, seed, density, safe zone, motion speed, etc.
+
+Video Package Library
+- Named packages: each stores shared settings + per-aspect layout snapshots.
+
+================================================================
+3) GLOBAL UI / APP-WIDE BUTTONS AND FUNCTIONS
+================================================================
+Header (Desktop)
+- Logo/Home (SpotDiff): goes to Home mode.
+- Settings: opens App Settings modal.
+- Exit: closes current mode, returns to Home (disabled while exporting).
+- Download (in Upload mode with batch): saves puzzle batch JSON.
+- Export progress widget: shows current export progress.
+- Cancel export: cancels the currently active export job.
+- Quick Navigation buttons (always visible): Home, Upload, Video, Editor Mode, Splitter, Upscaler, Backgrounds, Timers, Progress, Frames, Watermark.
+
+Header (Mobile)
+- Settings button: open App Settings.
+- Menu button: open/close mobile menu.
+- Export progress and Cancel export (if exporting).
+- Save Batch JSON and Exit current mode (if available).
+- Quick Navigation grid identical to desktop.
+
+Global App Settings Modal
+- Export Settings (JSON backup).
+- Import Settings (JSON restore).
+- Reset Defaults.
+- Cancel / Save + Apply.
+- Many internal toggles and defaults described in section 11.
+
+================================================================
+4) ALL APP MODES (HIGH-LEVEL OVERVIEW)
+================================================================
+Home
+- Central launchpad for all tools.
+- Buttons: Create New Puzzle, Load Puzzle JSON, Video Mode (load puzzle JSON), Editor Mode (load puzzle JSON), Image Splitter, Background Generator, Image Upscaler, Timer Mode, Progress Bar Mode, Frame Extractor, Watermark Removal.
+
+Upload
+- Load single pairs or batch pairs, pick detection method (manual/auto/AI), review detected puzzles, edit or remove, export JSON/images/video, start game.
+
+Editor
+- Manually draw difference regions, auto-detect via AI, export JSON or video, add to batch, play puzzle.
+
+Play
+- Spot-the-difference game with timer, mistakes, sound, and win/lose flow.
+
+Video Setup
+- Full video styling, text, motion, layout, and export controls for puzzle videos.
+
+Video Preview
+- Live preview/playback for puzzle video sequences.
+
+Overlay Editor
+- Advanced compositing mode for base video + batch images + overlays + linked puzzle pairs + soundtrack.
+
+Image Splitter
+- Split combined images into separate puzzle/diff pairs with shared area or manual pair tools.
+
+Image Upscaler
+- Standalone upscaling workspace with fast or AI methods, exports as PNG/JPEG/WEBP.
+
+Background Generator
+- Build reusable animated background packs for video mode.
+
+Timer Mode
+- Browse and apply timer styles used in videos.
+
+Progress Bar Mode
+- Generate and export animated progress bars.
+
+Frame Extractor
+- Extract frames from multiple videos at shared timestamps, super aligner, super image export, and full “Super Export” video pipeline.
+
+Watermark Removal
+- Draw watermark regions on both images, swap pixel areas, save presets, export cleaned images.
+
+Media Diagnostics (Dev only)
+- Shows live worker pipelines, queue depth, jobs, performance statistics.
+
+================================================================
+5) MODE DETAIL – HOME (BUTTONS + ACTIONS)
+================================================================
+Buttons
+- Create New Puzzle: resets batch and opens Upload mode for new puzzle pair.
+- Load Puzzle JSON: loads exported puzzle batch JSON and opens Upload or relevant mode.
+- Video Mode: loads puzzle JSON to batch and opens Video Setup.
+- Editor Mode: loads puzzle JSON and opens Overlay Editor.
+- Image Splitter: opens Image Splitter tool.
+- Background Generator: opens Background Generator tool.
+- Image Upscaler: opens Upscaler tool.
+- Timer Mode: opens Timer preview tool.
+- Progress Bar Mode: opens Progress Bar tool.
+- Frame Extractor: opens frame extractor workflow.
+- Watermark Removal: opens watermark tool.
+
+================================================================
+6) MODE DETAIL – UPLOAD (ImageUploader)
+================================================================
+Primary Buttons
+- SELECT FILES: opens file picker for individual pairs or mixed batch.
+- BATCH SELECT: opens file picker for bulk batch selection.
+
+Incomplete Pairs Modal
+- Upload (missing file): attach the missing base/diff image.
+- Discard Puzzle: removes the incomplete pair.
+- DISCARD ALL: clears all incomplete pairs, then optionally continues to processing options.
+
+Detection Method Modal
+- Manual Selection: skips auto detection and opens manual Editor.
+- Auto Detection (Fast): uses client-side detection algorithm.
+- AI Analysis (Smart): sends images to /api/detect-differences (Gemini).
+- Cancel: closes modal and clears pending split queue.
+
+Review Puzzles Modal
+- Edit Puzzle (pencil): opens Editor Canvas for that puzzle.
+- Remove Puzzle (trash): removes from review list.
+- Cancel: closes review without submitting.
+- EXPORT JSON: downloads PuzzleSet JSON.
+- EXPORT IMAGES: downloads paired images as separate files.
+- EXPORT VIDEO: routes batch to Video Setup export flow.
+- START GAME: confirms batch and starts Play mode.
+
+Edit Puzzle Modal
+- Close (X): closes editor and returns to review list.
+
+Other Functional Behavior
+- Drag-and-drop supports batch with names like name.png + namediff.png.
+- Missing pairs are detected and fixed via modal.
+- Processing overlays show progress and status messages.
+
+================================================================
+7) MODE DETAIL – EDITOR (EditorCanvas)
+================================================================
+Buttons
+- Auto Detect: calls AI detection and adds new regions.
+- Undo: removes last region.
+- Clear All: removes all regions.
+- Add (batch count): adds current puzzle to batch list.
+- JSON: exports current puzzle as JSON.
+- Export Video: sends current puzzle into video pipeline.
+- Play: starts Play mode using current puzzle.
+- Save Changes (modal context): saves edited puzzle and returns to review.
+
+Core Functions
+- Click-drag on right image to draw diff rectangles.
+- Regions are normalized to image size for portable exports.
+- Auto detect uses /api/detect-differences (Gemini) when available.
+
+================================================================
+8) MODE DETAIL – PLAY (GameCanvas)
+================================================================
+Buttons
+- Back (arrow): exit to parent mode.
+- Sound On / Sound Off: toggle SFX.
+- Next Level: appears after win if batch has more puzzles.
+- Menu: exit after completion / game over.
+- Retry: resets the current puzzle.
+
+Gameplay Function
+- 90-second timer, 5 mistakes max.
+- Click detection against region rectangles.
+- Feedback pulses for hit/miss and confetti on success.
+
+================================================================
+9) MODE DETAIL – VIDEO SETUP (VideoSettingsPanel)
+================================================================
+Top-Level Buttons
+- Back (arrow): return to Home.
+- Start Video: opens Video Preview.
+- Tabs: Package, Theme, Text, Motion, Layout, Export.
+
+Package Tab – Buttons + Controls
+- Active Package dropdown: select video package.
+- New / Duplicate / Rename / Delete package.
+- Package preset buttons: Gameshow, Shorts Clean, Storybook Plus, Arcade, Editorial.
+- Progress visibility toggle: Show / Hide.
+- Progress style selection: package + custom styles (pill, segmented, blocks, glow, minimal, text fill).
+- Aspect ratio cards: 16:9, 9:16, 1:1, 4:3.
+
+Theme Tab – Buttons + Controls
+- Generate Whole Style (random theme + stack).
+- Reset to Package (revert style stack).
+- Visual Style tiles: Random, Classic, Pop, Neon, Sunset, Mint, Midnight, Mono, Retro, Cyber, Oceanic, Ember, Candy, Forest, Aurora, Slate, Arcade, Ivory, Storybook.
+- UI Style Stack generators: Text Style, Header Style, Timer Style, Progress Style.
+- Image Panel Outline: color picker + swatches + thickness slider.
+- Backgrounds: Enable/Disable generated backgrounds; pack dropdown; reroll mapping; motif focus; palette focus; new pack tools.
+- Reveal styling: Reveal behavior options (Marker Only, Pulse, Spotlight, Zoom to Diff, Freeze Ring, Cinematic Sequential).
+- Reveal style & variant buttons (Box/Circle/Highlight + variants).
+- Reveal/Outline colors swatches and thickness controls.
+
+Text Tab – Buttons + Controls
+- Copy + Package Text: text template editors for intro/play/transition/outro; “Generate Intro/Play/Transition/Outro” buttons; apply preset copy templates.
+- Create/duplicate package from current text defaults.
+
+Motion Tab – Buttons + Controls
+- Timer visibility On/Off.
+- Progress visibility On/Off.
+- Reveal timing sliders (show duration, reveal duration, sequential step).
+- Blink compare toggle + blink speed.
+- Transition style cards (Fade, Slide, Zoom, Pop, Wipe, None).
+- Scene card styles: Intro, Transition, Outro (Package, Standard, Scoreboard, Storybook, Spotlight, Celebration).
+- Reveal behavior selector.
+
+Layout Tab – Buttons + Controls
+- Use Custom Layout toggle.
+- Save / Load / Reset custom layout snapshot.
+- Panel visibility toggles (Frame, Image Panels, Logo, Title, Timer, Progress).
+- Sliders for layout positioning and sizing (header, content padding, panel gap, logo position, title alignment, timer placement, progress orientation, etc).
+- Custom layout text alignment buttons: left / center / right.
+
+Export Tab – Buttons + Controls
+- Export button (renders video).
+- Resolution: 480p, 720p, 1080p, 1440p, 2160p.
+- Codec: H.264 (MP4) or AV1 (WebM).
+- Bitrate slider.
+- Export progress + status label.
+
+================================================================
+10) MODE DETAIL – VIDEO PREVIEW (VideoPlayer)
+================================================================
+Buttons
+- Back (arrow): exits preview to Video Setup.
+- Send To Editor: passes raw frames to Overlay Editor.
+- Play/Pause: playback control.
+- Skip: jumps to next puzzle.
+- Exit (completion overlay): close preview.
+- Replay: restarts the video playback from start.
+
+Behavior
+- Renders staged intro, play, reveal, transition, outro phases.
+- Uses video styles, timer, progress bar, audio and reveal behavior settings.
+
+================================================================
+11) MODE DETAIL – OVERLAY EDITOR (OverlayVideoEditor)
+================================================================
+Core Purpose
+- Combine base video/photo/color background, batch overlays, linked puzzle pairs, extra overlays and soundtrack.
+- Drag, resize, crop, chroma key, and timeline control for layers.
+
+Buttons and Controls
+- Back (arrow): return to Home.
+- Creation Mode: Standard Overlay / Linked Puzzle Pairs.
+- Base Source: Video / Photo / Color buttons.
+- Upload Base Video / Upload Base Photo.
+- Base background color picker.
+- Batch Images (Standard): Upload Batch Photos, Clear Batch, Import Puzzles, Add BG, Reset Crop.
+- Linked Pairs: Upload Puzzle+Answer Images, Clear Pairs, Reset Pair Frame.
+- Linked Output Type: Video / Thumbnail.
+- Linked export style (Video): One Video Per Pair / All Pairs in One.
+- Extra Overlays: Add Photos/Videos, Clear Overlays.
+- Soundtrack: Upload/Replace Audio, Loop On/Off, Clear Audio.
+- Preview: Play/Pause, scrub timeline, drag/resize overlays, chroma key color pick.
+- Export Settings: resolution, codec, bitrate.
+- Export button: Export video(s) or thumbnail depending on mode.
+
+Behavior
+- Standard mode: exports one video per batch image (or single if no batch).
+- Linked mode: pairs base/diff files by filename; can export per-pair or a combined sequence, or a thumbnail using current preview frame.
+
+================================================================
+12) MODE DETAIL – IMAGE SPLITTER
+================================================================
+Primary Buttons
+- Select Combined Images (upload button).
+- Shared Area / Manual Pair mode buttons.
+- Clear shared selection.
+- Export Setup / Load Setup.
+
+Loaded Images Panel
+- Preview mode: Outputs / Compare Blink.
+- Add More, Download Images, Batch Process, Clear.
+- Set Area For All / Set Pair For All.
+- Download Pair / Remove pair.
+
+Manual Area Editor
+- Use Suggested Area.
+- Use Full Image.
+- Apply To All Images.
+- Cancel.
+
+Manual Pair Editor
+- Reset Pair.
+- Center Pair.
+- Assist Placement (auto nudge using comparison).
+- Apply To All Images.
+- Cancel.
+
+Behavior
+- Shared Area mode: draw a single rectangle that encloses both puzzle squares, then all images are split using that crop.
+- Manual Pair mode: draw two linked squares (puzzle + diff). Assist placement helps align by comparing the two halves.
+- Export Setup saves shared region, mode, naming sequence (re-usable later).
+
+================================================================
+13) MODE DETAIL – IMAGE UPSCALER
+================================================================
+Buttons
+- Back.
+- Select Images.
+- Engine: Fast Enhance / AI Super-Resolution.
+- Scale: x2 / x4.
+- Presets: Balanced / Crisp / Soft.
+- AI Model: Slim / Medium / Thick.
+- MAXIM Deblur toggle On/Off.
+- Output format: PNG / JPEG / WEBP.
+- Run Upscale / Run AI Upscale.
+- Download All.
+- Clear Results.
+- Clear Images.
+- Per-item: Download, Remove.
+
+Behavior
+- Processes images in-browser; stores per-item results with signature to mark stale outputs after settings change.
+- Exports as PNG/JPEG/WEBP with adjustable quality (JPEG/WEBP).
+
+================================================================
+14) MODE DETAIL – BACKGROUND GENERATOR
+================================================================
+Buttons
+- Back.
+- Generate Pack.
+- New Seed.
+- Export Pack.
+- Import Pack.
+- Rename / Delete selected pack.
+- Previous / Next preview.
+- Thumbnail preview selectors (first 8).
+- Pack list cards (click to select).
+
+Behavior
+- Creates background packs (100 recipes each) with motif + palette selections and deterministic seed.
+- Packs are stored locally and used in video setup.
+
+================================================================
+15) MODE DETAIL – TIMER MODE
+================================================================
+Buttons
+- Back.
+- Play/Pause preview.
+- Random Style.
+- Timer style tiles (all timer variants).
+- Designer Timer Pack tiles.
+
+Behavior
+- Timer style selection updates shared VideoSettings timer style.
+
+================================================================
+16) MODE DETAIL – PROGRESS BAR MODE
+================================================================
+Buttons
+- Back.
+- Play/Pause preview.
+- Bar Type: Standard Bar / Text Fill.
+- Duration controls (slider + number input).
+- Resolution buttons: 720p, 1080p, 1440p, 2160p.
+- Codec buttons: H.264 / AV1.
+- Download Selected.
+- Cancel Export.
+- Select All / Keep Preview Only.
+- Style tiles (all visual styles + heat).
+
+Behavior
+- Exports progress bar videos for selected themes; supports text-fill warning colors near end.
+
+================================================================
+17) MODE DETAIL – FRAME EXTRACTOR
+================================================================
+Buttons
+- Back.
+- Add Videos / Choose Videos.
+- Clear Queue.
+- Remove video (trash per item).
+- Image Format: PNG Lossless / JPEG Compressed.
+- Super Image Target: Zip Download / Folder Picker.
+- Refresh saved video setup.
+- Scene Copy toggle On/Off.
+- Saved Layout toggle On/Off.
+- Super Export Thumbnail toggle On/Off.
+- Quick Templates (thumbnail copy text presets).
+- Watermark Removal toggle On/Off.
+- Run buttons: Extract Frames, Super Image Aligner, Super Image Export, Super Export Videos.
+
+Behavior
+- Shared timestamps apply to all videos.
+- Super Image Aligner uses splitter shared region to prepare pairs.
+- Super Image Export exports exact 3-difference pairs (zip or folder).
+- Super Export renders full packaged videos per batch (with optional watermark removal + thumbnail).
+
+================================================================
+18) MODE DETAIL – WATERMARK REMOVAL
+================================================================
+Buttons
+- Back.
+- Upload image pair (click/drop).
+- Region Inspector: Delete Selected, Clear All.
+- Presets: Apply Preset, Save New, Update Selected, Delete Preset.
+- Export format: PNG/JPEG/WEBP.
+- Export Both Images.
+- Remove Watermark (process).
+- Clear Pair.
+
+Behavior
+- User draws rectangular watermark regions on both A and B, app swaps pixels across the pair to clean watermark areas.
+- Presets stored locally and can be applied across pairs.
+
+================================================================
+19) MODE DETAIL – APP SETTINGS MODAL
+================================================================
+Primary Buttons
+- Close (X).
+- Export Settings.
+- Import Settings.
+- Reset Defaults.
+- Cancel.
+- Save + Apply.
+
+Key Toggles/Controls
+- Video defaults: package preset, visual style, reveal variants, reveal behavior, timing, export defaults.
+- Intro/Outro On/Off.
+- Blink compare On/Off.
+- Layout default: use custom layout On/Off.
+- Apply Saved Layout / Use Package Layout.
+- Logo chroma key On/Off.
+- Game sounds On/Off.
+- Frame extractor defaults (format, JPEG quality, super export images per video, watermark removal defaults, thumbnail defaults).
+- Splitter defaults: naming pattern, padding digits, default mode, next split number.
+
+================================================================
+20) MODE DETAIL – MEDIA DIAGNOSTICS (DEV)
+================================================================
+Buttons
+- Task List: open/close diagnostics drawer.
+- Close (X) drawer.
+
+Behavior
+- Shows active jobs, worker pool stats, stage queues, and task history.
+
+================================================================
+21) CORE FUNCTIONAL PIPELINES (WHAT EACH MAJOR FUNCTION DOES)
+================================================================
+Difference Detection
+- Manual: user draws boxes in Editor.
+- Auto (client): computes image diff on canvas, handles alignment and morphology to detect regions.
+- AI: /api/detect-differences uses Gemini to output normalized bounding boxes.
+
+Batch Management
+- Upload mode can collect multiple puzzles into a batch.
+- Review modal allows editing/removal before starting game or export.
+
+Video Export
+- VideoSettingsPanel sets styles, text, timing, audio, layout, reveal behavior.
+- VideoPlayer preview uses same settings.
+- Export uses WebCodecs in worker, supports H.264 and AV1.
+
+Overlay Export
+- OverlayVideoEditor merges base media + overlays + batch images + audio.
+- Export builds timelines for each output and encodes via worker + WebCodecs.
+
+Progress Bar Export
+- ProgressBarMode renders animated bar or text-fill countdown per theme.
+- Export pipeline uses worker + WebCodecs.
+
+Frame Extraction
+- FrameExtractor uses shared timestamps for multiple clips.
+- Optional super aligner builds split pairs from those frames.
+
+Watermark Removal
+- Swaps identical pixel rectangles between puzzle and diff images.
+- Presets allow repeatable selections.
+
+Upscaling
+- Fast Enhance: heuristic post-processing (detail boost, contrast, edge threshold).
+- AI Super-Resolution: ESRGAN + optional MAXIM deblur.
+
+Background Generation
+- Procedural motifs + palettes stored as packs, seeded for deterministic output.
+
+================================================================
+22) COMPLETE BUTTON LIST (GROUPED BY MODE)
+================================================================
+Home
+- Create New Puzzle
+- Load Puzzle JSON
+- Video Mode (load JSON)
+- Editor Mode (load JSON)
+- Image Splitter
+- Background Generator
+- Image Upscaler
+- Timer Mode
+- Progress Bar Mode
+- Frame Extractor
+- Watermark Removal
+
+Upload
+- Select Files
+- Batch Select
+- Missing file upload
+- Discard Puzzle
+- Discard All
+- Manual Selection
+- Auto Detection (Fast)
+- AI Analysis (Smart)
+- Cancel (options modal)
+- Edit Puzzle
+- Remove Puzzle
+- Cancel (review modal)
+- Export JSON
+- Export Images
+- Export Video
+- Start Game
+- Close editor (X)
+
+Editor
+- Auto Detect
+- Undo
+- Clear All
+- Add (to batch)
+- JSON
+- Export Video
+- Play
+- Save Changes (modal)
+
+Play
+- Back
+- Sound On/Off
+- Next Level
+- Menu
+- Retry
+
+Video Setup (VideoSettingsPanel)
+- Back
+- Start Video
+- Tabs: Package, Theme, Text, Motion, Layout, Export
+- Package: New, Duplicate, Rename, Delete, Apply package presets, Show/Hide Progress
+- Theme: Generate Whole Style, Reset To Package
+- Layout: Save, Load, Reset custom layout
+- Export: Export video
+
+Video Preview (VideoPlayer)
+- Back
+- Send To Editor
+- Play/Pause
+- Skip
+- Exit
+- Replay
+
+Overlay Editor
+- Back
+- Standard Overlay / Linked Puzzle Pairs
+- Base Source: Video / Photo / Color
+- Upload Base Video
+- Upload Base Photo
+- Upload Batch Photos
+- Clear Batch
+- Import Puzzles
+- Add BG
+- Reset Crop
+- Upload Puzzle + Answer Images
+- Clear Pairs
+- Reset Pair Frame
+- Output Type: Video / Thumbnail
+- Export Style: One Per Pair / All In One
+- Add Photos/Videos (overlays)
+- Clear Overlays
+- Upload Audio / Replace Audio
+- Loop On/Off
+- Clear Audio
+- Play/Pause preview
+- Export
+
+Image Splitter
+- Select Combined Images
+- Shared Area / Manual Pair
+- Clear shared selection
+- Export Setup
+- Load Setup
+- Outputs / Compare Blink
+- Add More
+- Download Images
+- Batch Process
+- Clear
+- Set Area For All / Set Pair For All
+- Download Pair
+- Remove pair
+- Manual Area: Use Suggested Area, Use Full Image, Apply To All, Cancel
+- Manual Pair: Reset Pair, Center Pair, Assist Placement, Apply To All, Cancel
+
+Image Upscaler
+- Back
+- Select Images
+- Fast Enhance / AI Super-Resolution
+- x2 / x4
+- Presets: Balanced / Crisp / Soft
+- AI Model: Slim / Medium / Thick
+- MAXIM Deblur On/Off
+- Format: PNG / JPEG / WEBP
+- Run Upscale / Run AI Upscale
+- Download All
+- Clear Results
+- Clear Images
+- Per-item Download
+- Per-item Remove
+
+Background Generator
+- Back
+- Generate Pack
+- New Seed
+- Export Pack
+- Import Pack
+- Rename
+- Delete
+- Previous / Next
+- Pack cards / Thumbnail selectors
+
+Timer Mode
+- Back
+- Play / Pause preview
+- Random Style
+- Timer style tiles (all options)
+
+Progress Bar Mode
+- Back
+- Play / Pause preview
+- Standard Bar / Text Fill
+- Download Selected
+- Cancel Export
+- Select All
+- Keep Preview Only
+- Theme tiles
+
+Frame Extractor
+- Back
+- Add Videos / Choose Videos
+- Clear Queue
+- Remove video
+- PNG Lossless / JPEG Compressed
+- Zip Download / Folder Picker
+- Refresh saved video setup
+- Scene Copy toggle
+- Saved Layout toggle
+- Super Export Thumbnail toggle
+- Quick Template buttons
+- Watermark Removal toggle
+- Extract Frames
+- Super Image Aligner
+- Super Image Export
+- Super Export Videos
+
+Watermark Removal
+- Back
+- Apply Preset
+- Save New
+- Update Selected
+- Delete Preset
+- Export format: PNG / JPEG / WEBP
+- Export Both Images
+- Remove Watermark
+- Clear Pair
+- Delete Selected region
+- Clear All regions
+
+Settings
+- Close (X)
+- Export Settings
+- Import Settings
+- Reset Defaults
+- Cancel
+- Save + Apply
+
+Media Diagnostics
+- Task List toggle
+- Close (X)
+
+================================================================
+23) NOTES / EDGE CASES
+================================================================
+- Many actions are disabled while exports are running to avoid concurrent conflicts.
+- Modes that rely on a batch (Video Setup / Video Preview / Overlay Editor) remain disabled until a batch exists.
+- All generated outputs respect current mode settings (visual style, layout, audio toggles, etc.).
+
+================================================================
+END OF SUMMARY
+================================================================

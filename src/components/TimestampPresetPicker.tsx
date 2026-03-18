@@ -1,5 +1,6 @@
 import React from 'react';
 import { Pencil, Plus, Save, Trash2 } from 'lucide-react';
+import { ConfirmDialog } from '../app/components/ConfirmDialog';
 import {
   deleteFrameTimestampPreset,
   loadFrameTimestampPresets,
@@ -36,6 +37,7 @@ export function TimestampPresetPicker({
   const [presets, setPresets] = React.useState<FrameTimestampPreset[]>([]);
   const [presetTitle, setPresetTitle] = React.useState('');
   const [editingPresetId, setEditingPresetId] = React.useState('');
+  const [pendingDeletePreset, setPendingDeletePreset] = React.useState<FrameTimestampPreset | null>(null);
   const normalizedCurrentValue = normalizeTimestampText(value);
 
   const refreshPresets = React.useCallback(() => {
@@ -80,15 +82,18 @@ export function TimestampPresetPicker({
   };
 
   const handleDeletePreset = (preset: FrameTimestampPreset) => {
-    if (!window.confirm(`Delete timestamp preset "${preset.title}"?`)) {
-      return;
-    }
+    setPendingDeletePreset(preset);
+  };
 
+  const confirmDeletePreset = () => {
+    if (!pendingDeletePreset) return;
+    const preset = pendingDeletePreset;
     setPresets(deleteFrameTimestampPreset(preset.id));
     if (editingPresetId === preset.id) {
       setEditingPresetId('');
       setPresetTitle('');
     }
+    setPendingDeletePreset(null);
   };
 
   const handleEditPreset = (preset: FrameTimestampPreset) => {
@@ -234,6 +239,20 @@ export function TimestampPresetPicker({
           No presets saved yet.
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={Boolean(pendingDeletePreset)}
+        title="Delete Timestamp Preset?"
+        description={pendingDeletePreset ? `Delete timestamp preset "${pendingDeletePreset.title}"?` : ''}
+        confirmLabel="Delete"
+        tone="danger"
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingDeletePreset(null);
+          }
+        }}
+        onConfirm={confirmDeletePreset}
+      />
     </div>
   );
 }

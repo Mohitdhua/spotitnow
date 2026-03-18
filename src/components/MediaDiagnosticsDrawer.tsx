@@ -244,6 +244,12 @@ export function MediaDiagnosticsDrawer() {
   const [memoryLabel, setMemoryLabel] = useState<string | null>(null);
 
   useEffect(() => {
+    const handleOpen = () => setIsOpen(true);
+    window.addEventListener('spotdiff:open-diagnostics', handleOpen);
+    return () => window.removeEventListener('spotdiff:open-diagnostics', handleOpen);
+  }, []);
+
+  useEffect(() => {
     if (!isOpen) return;
     const readMemory = () => {
       const memory = (performance as Performance & {
@@ -277,15 +283,19 @@ export function MediaDiagnosticsDrawer() {
       <button
         type="button"
         onClick={() => setIsOpen((current) => !current)}
-        className="fixed bottom-4 right-4 z-[70] inline-flex items-center gap-2 rounded-2xl border-4 border-black bg-[#DBEAFE] px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-900 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5"
+        className="fixed bottom-3 right-3 z-[70] inline-flex h-12 w-12 items-center justify-center rounded-2xl border-4 border-black bg-[#DBEAFE] text-slate-900 shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 sm:bottom-4 sm:right-4 sm:h-auto sm:w-auto sm:gap-2 sm:px-4 sm:py-3"
+        aria-label="Toggle task list"
       >
         <Activity size={16} strokeWidth={3} />
-        <span>Task List</span>
+        <span className="hidden text-xs font-black uppercase tracking-wide sm:inline">Task List</span>
       </button>
 
       {isOpen ? (
         <div className="fixed inset-0 z-[69] bg-black/35 backdrop-blur-sm">
-          <div className="absolute inset-y-0 right-0 flex w-full max-w-3xl flex-col border-l-4 border-black bg-[radial-gradient(circle_at_top_right,#DBEAFE_0%,#FFFDF8_34%,#FFF7ED_100%)] shadow-[-12px_0px_0px_0px_rgba(0,0,0,1)]">
+          <div className="absolute inset-x-0 bottom-0 top-auto flex max-h-[84dvh] flex-col rounded-t-[28px] border-x-4 border-t-4 border-black bg-[radial-gradient(circle_at_top_right,#DBEAFE_0%,#FFFDF8_34%,#FFF7ED_100%)] shadow-[0px_-12px_0px_0px_rgba(0,0,0,1)] sm:inset-y-0 sm:right-0 sm:left-auto sm:max-h-none sm:w-full sm:max-w-3xl sm:rounded-none sm:border-t-0 sm:border-r-0 sm:border-l-4 sm:border-b-0 sm:shadow-[-12px_0px_0px_0px_rgba(0,0,0,1)]">
+            <div className="flex justify-center py-2.5 sm:hidden">
+              <div className="h-1.5 w-14 rounded-full border border-black/20 bg-slate-300" />
+            </div>
             <div className="flex items-start justify-between gap-3 border-b-4 border-black bg-white px-4 py-4">
               <div>
                 <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Developer Diagnostics</div>

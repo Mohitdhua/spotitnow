@@ -1,6 +1,10 @@
 import { VideoSettings } from '../types';
 import { buildDefaultCustomVideoLayout } from '../constants/videoLayoutCustom';
 import {
+  SUPER_EXPORT_THUMBNAIL_STYLE_PRESET_IDS,
+  type SuperExportThumbnailStylePresetId
+} from '../constants/superExportThumbnailStyles';
+import {
   DEFAULT_VIDEO_SCENE_SETTINGS,
   DEFAULT_VIDEO_TEXT_TEMPLATES,
   VIDEO_PACKAGE_PRESETS,
@@ -16,10 +20,22 @@ export interface FrameExtractorDefaults {
   superImageExportMode: SuperImageExportMode;
   superExportWatermarkRemoval: boolean;
   superExportWatermarkPresetId: string;
-  useSceneCopyPresetForSuperExport: boolean;
-  sceneCopyPresetId: string;
-  useSavedVideoLayoutForSuperExport: boolean;
+  superExportThumbnail: SuperExportThumbnailDefaults;
 }
+
+export interface SuperExportThumbnailDefaults {
+  enabled: boolean;
+  exportMode: SuperExportThumbnailExportMode;
+  stylePreset: SuperExportThumbnailStylePresetId;
+  title: string;
+  subtitle: string;
+  badgeLabel: string;
+  textScale: number;
+  textOffsetX: number;
+  textOffsetY: number;
+}
+
+export type SuperExportThumbnailExportMode = 'with_video' | 'thumbnail_only';
 
 export interface SplitterDefaults {
   filenamePrefix: string;
@@ -79,13 +95,33 @@ export const DEFAULT_SPLITTER_SETUP: SplitterSetupSnapshot = {
   sharedPair: null
 };
 
+const DEFAULT_AUDIO_PHASE_LEVELS: VideoSettings['musicPhaseLevels'] = {
+  intro: 1,
+  showing: 1,
+  revealing: 1,
+  transitioning: 1,
+  outro: 1
+};
+
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
   aspectRatio: '16:9',
   videoPackagePreset: 'gameshow',
   visualStyle: 'classic',
+  textStyle: 'package',
+  headerStyle: 'package',
+  timerStyle: 'package',
+  progressStyle: 'package',
+  showTimer: true,
+  showProgress: true,
+  introCardStyle: 'package',
+  transitionCardStyle: 'package',
+  outroCardStyle: 'package',
   sceneSettings: DEFAULT_VIDEO_SCENE_SETTINGS,
+  introVideoEnabled: false,
+  introVideoSrc: '',
+  introVideoDuration: 0,
   textTemplates: DEFAULT_VIDEO_TEXT_TEMPLATES,
   showDuration: 5,
   revealDuration: 6,
@@ -99,12 +135,48 @@ const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
   revealColor: '#FF6B6B',
   outlineColor: '#000000',
   outlineThickness: 2,
+  imagePanelOutlineColor: '#CEC3A5',
+  imagePanelOutlineThickness: 4,
   transitionStyle: 'fade',
   transitionDuration: 1,
   useCustomLayout: false,
   exportResolution: '1080p',
   exportBitrateMbps: 8,
   exportCodec: 'h264',
+  soundEffectsEnabled: false,
+  countdownSoundEnabled: true,
+  revealSoundEnabled: true,
+  markerSoundEnabled: false,
+  blinkSoundEnabled: false,
+  playSoundEnabled: false,
+  introSoundEnabled: false,
+  transitionSoundEnabled: false,
+  outroSoundEnabled: false,
+  previewSoundEnabled: false,
+  soundEffectsVolume: 0.7,
+  countdownSoundSrc: '',
+  revealSoundSrc: '',
+  markerSoundSrc: '',
+  blinkSoundSrc: '',
+  playSoundSrc: '',
+  introSoundSrc: '',
+  transitionSoundSrc: '',
+  outroSoundSrc: '',
+  revealSoundVariantSrcs: [],
+  revealSoundRandomize: false,
+  countdownSoundOffsetMs: 0,
+  revealSoundOffsetMs: 0,
+  backgroundMusicEnabled: false,
+  backgroundMusicSrc: '',
+  backgroundMusicVolume: 0.35,
+  backgroundMusicLoop: true,
+  backgroundMusicFadeIn: 0.3,
+  backgroundMusicFadeOut: 0.4,
+  backgroundMusicDuckingAmount: 0.5,
+  backgroundMusicOffsetSec: 0,
+  musicPhaseLevels: DEFAULT_AUDIO_PHASE_LEVELS,
+  sfxPhaseLevels: DEFAULT_AUDIO_PHASE_LEVELS,
+  audioLimiterEnabled: true,
   logoZoom: 1,
   logoChromaKeyEnabled: false,
   logoChromaKeyColor: '#00FF00',
@@ -124,9 +196,17 @@ export const DEFAULT_APP_GLOBAL_SETTINGS: AppGlobalSettings = {
     superImageExportMode: 'zip',
     superExportWatermarkRemoval: false,
     superExportWatermarkPresetId: '',
-    useSceneCopyPresetForSuperExport: false,
-    sceneCopyPresetId: '',
-    useSavedVideoLayoutForSuperExport: false
+    superExportThumbnail: {
+      enabled: false,
+      exportMode: 'with_video',
+      stylePreset: 'inherit',
+      title: DEFAULT_VIDEO_TEXT_TEMPLATES.playTitle,
+      subtitle: DEFAULT_VIDEO_TEXT_TEMPLATES.playSubtitle,
+      badgeLabel: DEFAULT_VIDEO_TEXT_TEMPLATES.puzzleBadgeLabel,
+      textScale: 1,
+      textOffsetX: 0,
+      textOffsetY: 0
+    }
   },
   splitterDefaults: {
     filenamePrefix: 'puzzle',
@@ -244,12 +324,95 @@ const REVEAL_VARIANT_VALUES: VideoSettings['revealVariant'][] = [
   'highlight_soft',
   'highlight_classic'
 ];
-const TRANSITION_STYLE_VALUES: VideoSettings['transitionStyle'][] = ['fade', 'slide', 'none'];
+const TEXT_STYLE_VALUES: VideoSettings['textStyle'][] = [
+  'package',
+  'poster',
+  'rounded',
+  'mono',
+  'storybook',
+  'editorial'
+];
+const HEADER_STYLE_VALUES: VideoSettings['headerStyle'][] = [
+  'package',
+  'plain',
+  'panel',
+  'ribbon',
+  'split',
+  'underline'
+];
+const TIMER_STYLE_VALUES: VideoSettings['timerStyle'][] = [
+  'package',
+  'pill',
+  'digital',
+  'chunky',
+  'ticket',
+  'minimal',
+  'capsule',
+  'scoreboard',
+  'beacon',
+  'retro_flip',
+  'neon_chip',
+  'sticker',
+  'jelly',
+  'marquee',
+  'glass',
+  'notched',
+  'orbital',
+  'bracelet',
+  'tab',
+  'soft_block',
+  'badge',
+  'micro',
+  'terminal',
+  'ticket_stub',
+  'chevron',
+  'burst',
+  'frame',
+  'lozenge',
+  'capsule_duo',
+  'racer',
+  'slab',
+  'countdown_ring',
+  'hollow_drain',
+  'pill_progress',
+  'magnify_timer',
+  'radar_sweep',
+  'fuse_burn',
+  'badge_pop',
+  'dual_ring_pro',
+  'segmented_timer',
+  'warning_mode'
+];
+const PROGRESS_STYLE_VALUES: VideoSettings['progressStyle'][] = [
+  'package',
+  'pill',
+  'segmented',
+  'blocks',
+  'glow',
+  'minimal',
+  'text_fill'
+];
+const SCENE_CARD_STYLE_VALUES: VideoSettings['introCardStyle'][] = [
+  'package',
+  'standard',
+  'scoreboard',
+  'storybook',
+  'spotlight',
+  'celebration'
+];
+const TRANSITION_STYLE_VALUES: VideoSettings['transitionStyle'][] = [
+  'fade',
+  'slide',
+  'zoom',
+  'pop',
+  'wipe',
+  'none'
+];
 const EXPORT_RESOLUTION_VALUES: VideoSettings['exportResolution'][] = ['480p', '720p', '1080p', '1440p', '2160p'];
 const EXPORT_CODEC_VALUES: VideoSettings['exportCodec'][] = ['h264', 'av1'];
 
 const sanitizeTemplateText = (value: unknown, fallback: string) =>
-  typeof value === 'string' ? value.trim() || fallback : fallback;
+  typeof value === 'string' ? value.trim() : fallback;
 
 const sanitizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
 
@@ -259,8 +422,23 @@ const sanitizeBoolean = (value: unknown, fallback: boolean) =>
 const sanitizeInteger = (value: unknown, fallback: number, min: number, max: number) =>
   clamp(Math.floor(Number(value) || fallback), min, max);
 
+const sanitizeNumber = (value: unknown, fallback: number, min: number, max: number) => {
+  const next = Number(value);
+  return Number.isFinite(next) ? clamp(next, min, max) : fallback;
+};
+
 const sanitizeSuperImageExportMode = (value: unknown): SuperImageExportMode =>
   value === 'folder' ? 'folder' : 'zip';
+
+const sanitizeSuperExportThumbnailStylePreset = (
+  value: unknown
+): SuperExportThumbnailStylePresetId =>
+  SUPER_EXPORT_THUMBNAIL_STYLE_PRESET_IDS.includes(value as SuperExportThumbnailStylePresetId)
+    ? (value as SuperExportThumbnailStylePresetId)
+    : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.stylePreset;
+
+const sanitizeSuperExportThumbnailExportMode = (value: unknown): SuperExportThumbnailExportMode =>
+  value === 'thumbnail_only' ? 'thumbnail_only' : 'with_video';
 
 const sanitizeHexColor = (value: unknown, fallback: string) => {
   if (typeof value !== 'string') return fallback;
@@ -316,18 +494,58 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
       visualStyle: VISUAL_STYLE_VALUES.includes(mergedVideo.visualStyle)
         ? mergedVideo.visualStyle
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.visualStyle,
+      textStyle: TEXT_STYLE_VALUES.includes(mergedVideo.textStyle)
+        ? mergedVideo.textStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.textStyle,
+      headerStyle: HEADER_STYLE_VALUES.includes(mergedVideo.headerStyle)
+        ? mergedVideo.headerStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.headerStyle,
+      timerStyle: TIMER_STYLE_VALUES.includes(mergedVideo.timerStyle)
+        ? mergedVideo.timerStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.timerStyle,
+      progressStyle: PROGRESS_STYLE_VALUES.includes(mergedVideo.progressStyle)
+        ? mergedVideo.progressStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.progressStyle,
+      showTimer: sanitizeBoolean(
+        mergedVideo.showTimer,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.showTimer
+      ),
+      showProgress: sanitizeBoolean(
+        mergedVideo.showProgress,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.showProgress
+      ),
+      introCardStyle: SCENE_CARD_STYLE_VALUES.includes(mergedVideo.introCardStyle)
+        ? mergedVideo.introCardStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.introCardStyle,
+      transitionCardStyle: SCENE_CARD_STYLE_VALUES.includes(mergedVideo.transitionCardStyle)
+        ? mergedVideo.transitionCardStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.transitionCardStyle,
+      outroCardStyle: SCENE_CARD_STYLE_VALUES.includes(mergedVideo.outroCardStyle)
+        ? mergedVideo.outroCardStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.outroCardStyle,
       sceneSettings: {
         introEnabled:
           typeof mergedVideo.sceneSettings?.introEnabled === 'boolean'
             ? mergedVideo.sceneSettings.introEnabled
             : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.sceneSettings.introEnabled,
-        introDuration: clamp(Number(mergedVideo.sceneSettings?.introDuration) || 1.5, 0.5, 10),
+        introDuration: clamp(Number(mergedVideo.sceneSettings?.introDuration) || 1.5, 0.5, 180),
         outroEnabled:
           typeof mergedVideo.sceneSettings?.outroEnabled === 'boolean'
             ? mergedVideo.sceneSettings.outroEnabled
             : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.sceneSettings.outroEnabled,
-        outroDuration: clamp(Number(mergedVideo.sceneSettings?.outroDuration) || 1.5, 0.5, 10)
+        outroDuration: clamp(Number(mergedVideo.sceneSettings?.outroDuration) || 1.5, 0.5, 180)
       },
+      introVideoEnabled:
+        typeof mergedVideo.introVideoEnabled === 'boolean'
+          ? mergedVideo.introVideoEnabled
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.introVideoEnabled,
+      introVideoSrc:
+        typeof mergedVideo.introVideoSrc === 'string'
+          ? mergedVideo.introVideoSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.introVideoSrc,
+      introVideoDuration: Number.isFinite(Number(mergedVideo.introVideoDuration))
+        ? Number(mergedVideo.introVideoDuration)
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.introVideoDuration,
       textTemplates: {
         introEyebrow: sanitizeTemplateText(
           mergedVideo.textTemplates?.introEyebrow,
@@ -348,6 +566,10 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
         playSubtitle: sanitizeTemplateText(
           mergedVideo.textTemplates?.playSubtitle,
           DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.textTemplates.playSubtitle
+        ),
+        progressLabel: sanitizeTemplateText(
+          mergedVideo.textTemplates?.progressLabel,
+          mergedVideo.textTemplates?.playTitle || DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.textTemplates.progressLabel
         ),
         revealTitle: sanitizeTemplateText(
           mergedVideo.textTemplates?.revealTitle,
@@ -405,6 +627,15 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
         DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.outlineColor
       ),
       outlineThickness: clamp(Number(mergedVideo.outlineThickness) || 0, 0, 20),
+      imagePanelOutlineColor: sanitizeHexColor(
+        mergedVideo.imagePanelOutlineColor,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.imagePanelOutlineColor
+      ),
+      imagePanelOutlineThickness: clamp(
+        Number(mergedVideo.imagePanelOutlineThickness) || 0,
+        0,
+        24
+      ),
       transitionStyle: TRANSITION_STYLE_VALUES.includes(mergedVideo.transitionStyle)
         ? mergedVideo.transitionStyle
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.transitionStyle,
@@ -421,6 +652,231 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
       exportCodec: EXPORT_CODEC_VALUES.includes(mergedVideo.exportCodec)
         ? mergedVideo.exportCodec
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.exportCodec,
+      soundEffectsEnabled: sanitizeBoolean(
+        mergedVideo.soundEffectsEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.soundEffectsEnabled
+      ),
+      countdownSoundEnabled: sanitizeBoolean(
+        mergedVideo.countdownSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.countdownSoundEnabled
+      ),
+      revealSoundEnabled: sanitizeBoolean(
+        mergedVideo.revealSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.revealSoundEnabled
+      ),
+      markerSoundEnabled: sanitizeBoolean(
+        mergedVideo.markerSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.markerSoundEnabled
+      ),
+      blinkSoundEnabled: sanitizeBoolean(
+        mergedVideo.blinkSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.blinkSoundEnabled
+      ),
+      playSoundEnabled: sanitizeBoolean(
+        mergedVideo.playSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.playSoundEnabled
+      ),
+      introSoundEnabled: sanitizeBoolean(
+        mergedVideo.introSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.introSoundEnabled
+      ),
+      transitionSoundEnabled: sanitizeBoolean(
+        mergedVideo.transitionSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.transitionSoundEnabled
+      ),
+      outroSoundEnabled: sanitizeBoolean(
+        mergedVideo.outroSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.outroSoundEnabled
+      ),
+      previewSoundEnabled: sanitizeBoolean(
+        mergedVideo.previewSoundEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.previewSoundEnabled
+      ),
+      soundEffectsVolume: clamp(
+        Number.isFinite(Number(mergedVideo.soundEffectsVolume))
+          ? Number(mergedVideo.soundEffectsVolume)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.soundEffectsVolume,
+        0,
+        1
+      ),
+      countdownSoundSrc:
+        typeof mergedVideo.countdownSoundSrc === 'string'
+          ? mergedVideo.countdownSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.countdownSoundSrc,
+      revealSoundSrc:
+        typeof mergedVideo.revealSoundSrc === 'string'
+          ? mergedVideo.revealSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.revealSoundSrc,
+      markerSoundSrc:
+        typeof mergedVideo.markerSoundSrc === 'string'
+          ? mergedVideo.markerSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.markerSoundSrc,
+      blinkSoundSrc:
+        typeof mergedVideo.blinkSoundSrc === 'string'
+          ? mergedVideo.blinkSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.blinkSoundSrc,
+      playSoundSrc:
+        typeof mergedVideo.playSoundSrc === 'string'
+          ? mergedVideo.playSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.playSoundSrc,
+      introSoundSrc:
+        typeof mergedVideo.introSoundSrc === 'string'
+          ? mergedVideo.introSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.introSoundSrc,
+      transitionSoundSrc:
+        typeof mergedVideo.transitionSoundSrc === 'string'
+          ? mergedVideo.transitionSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.transitionSoundSrc,
+      outroSoundSrc:
+        typeof mergedVideo.outroSoundSrc === 'string'
+          ? mergedVideo.outroSoundSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.outroSoundSrc,
+      revealSoundVariantSrcs: Array.isArray(mergedVideo.revealSoundVariantSrcs)
+        ? mergedVideo.revealSoundVariantSrcs.filter((value) => typeof value === 'string')
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.revealSoundVariantSrcs,
+      revealSoundRandomize: sanitizeBoolean(
+        mergedVideo.revealSoundRandomize,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.revealSoundRandomize
+      ),
+      countdownSoundOffsetMs: clamp(
+        Number.isFinite(Number(mergedVideo.countdownSoundOffsetMs))
+          ? Number(mergedVideo.countdownSoundOffsetMs)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.countdownSoundOffsetMs,
+        -2000,
+        2000
+      ),
+      revealSoundOffsetMs: clamp(
+        Number.isFinite(Number(mergedVideo.revealSoundOffsetMs))
+          ? Number(mergedVideo.revealSoundOffsetMs)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.revealSoundOffsetMs,
+        -2000,
+        2000
+      ),
+      backgroundMusicEnabled: sanitizeBoolean(
+        mergedVideo.backgroundMusicEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicEnabled
+      ),
+      backgroundMusicSrc:
+        typeof mergedVideo.backgroundMusicSrc === 'string'
+          ? mergedVideo.backgroundMusicSrc
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicSrc,
+      backgroundMusicVolume: clamp(
+        Number.isFinite(Number(mergedVideo.backgroundMusicVolume))
+          ? Number(mergedVideo.backgroundMusicVolume)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicVolume,
+        0,
+        1
+      ),
+      backgroundMusicLoop: sanitizeBoolean(
+        mergedVideo.backgroundMusicLoop,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicLoop
+      ),
+      backgroundMusicFadeIn: clamp(
+        Number.isFinite(Number(mergedVideo.backgroundMusicFadeIn))
+          ? Number(mergedVideo.backgroundMusicFadeIn)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicFadeIn,
+        0,
+        10
+      ),
+      backgroundMusicFadeOut: clamp(
+        Number.isFinite(Number(mergedVideo.backgroundMusicFadeOut))
+          ? Number(mergedVideo.backgroundMusicFadeOut)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicFadeOut,
+        0,
+        10
+      ),
+      backgroundMusicDuckingAmount: clamp(
+        Number.isFinite(Number(mergedVideo.backgroundMusicDuckingAmount))
+          ? Number(mergedVideo.backgroundMusicDuckingAmount)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicDuckingAmount,
+        0,
+        1
+      ),
+      backgroundMusicOffsetSec: clamp(
+        Number.isFinite(Number(mergedVideo.backgroundMusicOffsetSec))
+          ? Number(mergedVideo.backgroundMusicOffsetSec)
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.backgroundMusicOffsetSec,
+        0,
+        60
+      ),
+      musicPhaseLevels: {
+        intro: clamp(
+          Number.isFinite(Number(mergedVideo.musicPhaseLevels?.intro))
+            ? Number(mergedVideo.musicPhaseLevels?.intro)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.musicPhaseLevels.intro,
+          0,
+          1
+        ),
+        showing: clamp(
+          Number.isFinite(Number(mergedVideo.musicPhaseLevels?.showing))
+            ? Number(mergedVideo.musicPhaseLevels?.showing)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.musicPhaseLevels.showing,
+          0,
+          1
+        ),
+        revealing: clamp(
+          Number.isFinite(Number(mergedVideo.musicPhaseLevels?.revealing))
+            ? Number(mergedVideo.musicPhaseLevels?.revealing)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.musicPhaseLevels.revealing,
+          0,
+          1
+        ),
+        transitioning: clamp(
+          Number.isFinite(Number(mergedVideo.musicPhaseLevels?.transitioning))
+            ? Number(mergedVideo.musicPhaseLevels?.transitioning)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.musicPhaseLevels.transitioning,
+          0,
+          1
+        ),
+        outro: clamp(
+          Number.isFinite(Number(mergedVideo.musicPhaseLevels?.outro))
+            ? Number(mergedVideo.musicPhaseLevels?.outro)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.musicPhaseLevels.outro,
+          0,
+          1
+        )
+      },
+      sfxPhaseLevels: {
+        intro: clamp(
+          Number.isFinite(Number(mergedVideo.sfxPhaseLevels?.intro))
+            ? Number(mergedVideo.sfxPhaseLevels?.intro)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.sfxPhaseLevels.intro,
+          0,
+          1
+        ),
+        showing: clamp(
+          Number.isFinite(Number(mergedVideo.sfxPhaseLevels?.showing))
+            ? Number(mergedVideo.sfxPhaseLevels?.showing)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.sfxPhaseLevels.showing,
+          0,
+          1
+        ),
+        revealing: clamp(
+          Number.isFinite(Number(mergedVideo.sfxPhaseLevels?.revealing))
+            ? Number(mergedVideo.sfxPhaseLevels?.revealing)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.sfxPhaseLevels.revealing,
+          0,
+          1
+        ),
+        transitioning: clamp(
+          Number.isFinite(Number(mergedVideo.sfxPhaseLevels?.transitioning))
+            ? Number(mergedVideo.sfxPhaseLevels?.transitioning)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.sfxPhaseLevels.transitioning,
+          0,
+          1
+        ),
+        outro: clamp(
+          Number.isFinite(Number(mergedVideo.sfxPhaseLevels?.outro))
+            ? Number(mergedVideo.sfxPhaseLevels?.outro)
+            : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.sfxPhaseLevels.outro,
+          0,
+          1
+        )
+      },
+      audioLimiterEnabled: sanitizeBoolean(
+        mergedVideo.audioLimiterEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioLimiterEnabled
+      ),
       logo:
         typeof mergedVideo.logo === 'string' && mergedVideo.logo.trim()
           ? mergedVideo.logo
@@ -465,15 +921,48 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
         DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportWatermarkRemoval
       ),
       superExportWatermarkPresetId: sanitizeOptionalText(mergedFrame.superExportWatermarkPresetId),
-      useSceneCopyPresetForSuperExport: sanitizeBoolean(
-        mergedFrame.useSceneCopyPresetForSuperExport,
-        DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.useSceneCopyPresetForSuperExport
-      ),
-      sceneCopyPresetId: sanitizeOptionalText(mergedFrame.sceneCopyPresetId),
-      useSavedVideoLayoutForSuperExport: sanitizeBoolean(
-        mergedFrame.useSavedVideoLayoutForSuperExport,
-        DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.useSavedVideoLayoutForSuperExport
-      )
+      superExportThumbnail: {
+        enabled: sanitizeBoolean(
+          mergedFrame.superExportThumbnail?.enabled,
+          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.enabled
+        ),
+        exportMode: sanitizeSuperExportThumbnailExportMode(
+          mergedFrame.superExportThumbnail?.exportMode
+        ),
+        stylePreset: sanitizeSuperExportThumbnailStylePreset(
+          mergedFrame.superExportThumbnail?.stylePreset
+        ),
+        title:
+          typeof mergedFrame.superExportThumbnail?.title === 'string'
+            ? mergedFrame.superExportThumbnail.title
+            : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.title,
+        subtitle:
+          typeof mergedFrame.superExportThumbnail?.subtitle === 'string'
+            ? mergedFrame.superExportThumbnail.subtitle
+            : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.subtitle,
+        badgeLabel:
+          typeof mergedFrame.superExportThumbnail?.badgeLabel === 'string'
+            ? mergedFrame.superExportThumbnail.badgeLabel
+            : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.badgeLabel,
+        textScale: sanitizeNumber(
+          mergedFrame.superExportThumbnail?.textScale,
+          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.textScale,
+          0.6,
+          2.4
+        ),
+        textOffsetX: sanitizeInteger(
+          mergedFrame.superExportThumbnail?.textOffsetX,
+          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.textOffsetX,
+          -640,
+          640
+        ),
+        textOffsetY: sanitizeInteger(
+          mergedFrame.superExportThumbnail?.textOffsetY,
+          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.textOffsetY,
+          -360,
+          360
+        )
+      }
     },
     splitterDefaults: {
       filenamePrefix: sanitizePrefix(mergedSplitter.filenamePrefix),

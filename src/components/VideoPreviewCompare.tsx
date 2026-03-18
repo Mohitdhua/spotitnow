@@ -22,6 +22,19 @@ const PREVIEW_MOMENT_OPTIONS: Array<{ value: ExportPreviewMoment; label: string 
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const resolveIntroDuration = (settings: VideoSettings) => {
+  if (settings.introVideoEnabled && settings.introVideoSrc) {
+    const clipDuration = Number(settings.introVideoDuration);
+    if (Number.isFinite(clipDuration) && clipDuration > 0) {
+      return clipDuration;
+    }
+    const fallbackDuration = Number(settings.sceneSettings.introDuration);
+    return Number.isFinite(fallbackDuration) ? Math.max(0, fallbackDuration) : 0;
+  }
+
+  return settings.sceneSettings.introEnabled ? Math.max(0, settings.sceneSettings.introDuration) : 0;
+};
+
 const isMomentAvailable = (
   moment: ExportPreviewMoment,
   puzzleIndex: number,
@@ -29,7 +42,7 @@ const isMomentAvailable = (
   settings: VideoSettings
 ) => {
   if (moment === 'intro') {
-    return settings.sceneSettings.introEnabled && settings.sceneSettings.introDuration > 0;
+    return resolveIntroDuration(settings) > 0;
   }
   if (moment === 'outro') {
     return settings.sceneSettings.outroEnabled && settings.sceneSettings.outroDuration > 0;
@@ -65,7 +78,7 @@ const getPreviewTimestamp = (
   puzzleIndex: number,
   moment: ExportPreviewMoment
 ) => {
-  const introDuration = settings.sceneSettings.introEnabled ? Math.max(0, settings.sceneSettings.introDuration) : 0;
+  const introDuration = resolveIntroDuration(settings);
   const outroDuration = settings.sceneSettings.outroEnabled ? Math.max(0, settings.sceneSettings.outroDuration) : 0;
   const showDuration = Math.max(0.1, settings.showDuration);
   const revealDuration = Math.max(0.5, settings.revealDuration);
@@ -105,7 +118,7 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
   heightStyle
 }) => {
   const [previewMoment, setPreviewMoment] = useState<ExportPreviewMoment>(() =>
-    settings.sceneSettings.introEnabled ? 'intro' : 'showing'
+    resolveIntroDuration(settings) > 0 ? 'intro' : 'showing'
   );
   const [previewPuzzleIndex, setPreviewPuzzleIndex] = useState(0);
   const [previewStatus, setPreviewStatus] = useState<PreviewStatus>('idle');

@@ -21,10 +21,17 @@ import {
   sanitizeVideoCustomLayout
 } from './videoLayoutStorage';
 import {
-  loadVideoSceneCopyPresets,
   replaceVideoSceneCopyPresets,
-  type VideoSceneCopyPreset
 } from './videoSceneCopyPresets';
+import {
+  loadVideoStyleLabPresets,
+  replaceVideoStyleLabPresets
+} from './videoStyleLabPresets';
+import {
+  loadVideoUserPackageLibrary,
+  replaceVideoUserPackageLibrary
+} from './videoUserPackages';
+import type { VideoUserPackage } from '../types';
 import {
   loadGeneratedBackgroundPacks,
   replaceGeneratedBackgroundPacks
@@ -32,14 +39,15 @@ import {
 import { loadWatermarkPresets, replaceWatermarkPresets } from './watermarkPresets';
 
 export interface AppSettingsTransferBundle {
-  kind: 'spotitnow-settings-transfer@v2';
-  version: 2;
+  kind: 'spotitnow-settings-transfer@v4';
+  version: 4;
   exportedAt: string;
   appSettings: AppGlobalSettings;
   splitterSetup: SplitterSetupSnapshot;
   timestampPresets: FrameTimestampPreset[];
   watermarkPresets: WatermarkSelectionPreset[];
-  sceneCopyPresets: VideoSceneCopyPreset[];
+  videoPackages: VideoUserPackage[];
+  lastSelectedVideoPackageId: string;
   backgroundPacks: GeneratedBackgroundPack[];
   savedVideoLayout: CustomVideoLayout | null;
   gameAudioMuted: boolean;
@@ -50,10 +58,13 @@ export interface ApplyAppSettingsTransferResult {
   splitterSetup: SplitterSetupSnapshot;
   timestampPresetCount: number;
   watermarkPresetCount: number;
-  sceneCopyPresetCount: number;
+  videoPackageCount: number;
+  migratedLegacyStyleLabPresetCount: number;
   backgroundPackCount: number;
   hasSavedVideoLayout: boolean;
   gameAudioMuted: boolean;
+  videoPackages: VideoUserPackage[];
+  lastSelectedVideoPackageId: string;
 }
 
 interface CreateBundleOverrides {
@@ -61,8 +72,12 @@ interface CreateBundleOverrides {
   gameAudioMuted?: boolean;
 }
 
-const TRANSFER_KIND = 'spotitnow-settings-transfer@v2';
-const TRANSFER_VERSION = 2;
+const TRANSFER_KIND = 'spotitnow-settings-transfer@v4';
+const TRANSFER_VERSION = 4;
+const LEGACY_TRANSFER_KIND_V3 = 'spotitnow-settings-transfer@v3';
+const LEGACY_TRANSFER_VERSION_V3 = 3;
+const LEGACY_TRANSFER_KIND_V2 = 'spotitnow-settings-transfer@v2';
+const LEGACY_TRANSFER_VERSION_V2 = 2;
 const LEGACY_TRANSFER_KIND = 'spotitnow-settings-transfer';
 const LEGACY_TRANSFER_VERSION = 1;
 
@@ -75,6 +90,9 @@ const hasKnownTransferField = (value: Record<string, unknown>) =>
   'timestampPresets' in value ||
   'watermarkPresets' in value ||
   'sceneCopyPresets' in value ||
+  'videoPackages' in value ||
+  'lastSelectedVideoPackageId' in value ||
+  'styleLabPresets' in value ||
   'backgroundPacks' in value ||
   'savedVideoLayout' in value ||
   'gameAudioMuted' in value;
@@ -87,6 +105,8 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
   if (
     'kind' in value &&
     value.kind !== TRANSFER_KIND &&
+    value.kind !== LEGACY_TRANSFER_KIND_V3 &&
+    value.kind !== LEGACY_TRANSFER_KIND_V2 &&
     value.kind !== LEGACY_TRANSFER_KIND
   ) {
     return null;
@@ -95,6 +115,8 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
   if (
     'version' in value &&
     value.version !== TRANSFER_VERSION &&
+    value.version !== LEGACY_TRANSFER_VERSION_V3 &&
+    value.version !== LEGACY_TRANSFER_VERSION_V2 &&
     value.version !== LEGACY_TRANSFER_VERSION
   ) {
     return null;
@@ -105,19 +127,29 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
 
 export const createAppSettingsTransferBundle = (
   overrides: CreateBundleOverrides = {}
-): AppSettingsTransferBundle => ({
-  kind: TRANSFER_KIND,
-  version: TRANSFER_VERSION,
-  exportedAt: new Date().toISOString(),
-  appSettings: sanitizeAppGlobalSettings(overrides.appSettings ?? loadAppGlobalSettings()),
-  splitterSetup: readCurrentSplitterSetupSnapshot(),
-  timestampPresets: loadFrameTimestampPresets(),
-  watermarkPresets: loadWatermarkPresets(),
-  sceneCopyPresets: loadVideoSceneCopyPresets(),
-  backgroundPacks: loadGeneratedBackgroundPacks(),
-  savedVideoLayout: loadSavedVideoCustomLayout(),
-  gameAudioMuted: overrides.gameAudioMuted ?? loadGameAudioMuted()
-});
+): AppSettingsTransferBundle => {
+  const appSettings = sanitizeAppGlobalSettings(
+    overrides.appSettings ?? loadAppGlobalSettings()
+  );
+  const videoPackageLibrary = loadVideoUserPackageLibrary(
+    appSettings.videoDefaults
+  );
+
+  return {
+    kind: TRANSFER_KIND,
+    version: TRANSFER_VERSION,
+    exportedAt: new Date().toISOString(),
+    appSettings,
+    splitterSetup: readCurrentSplitterSetupSnapshot(),
+    timestampPresets: loadFrameTimestampPresets(),
+    watermarkPresets: loadWatermarkPresets(),
+    videoPackages: videoPackageLibrary.packages,
+    lastSelectedVideoPackageId: videoPackageLibrary.activePackageId,
+    backgroundPacks: loadGeneratedBackgroundPacks(),
+    savedVideoLayout: loadSavedVideoCustomLayout(),
+    gameAudioMuted: overrides.gameAudioMuted ?? loadGameAudioMuted()
+  };
+};
 
 export const applyAppSettingsTransferBundle = (
   raw: string
@@ -152,10 +184,28 @@ export const applyAppSettingsTransferBundle = (
     'watermarkPresets' in candidate
       ? replaceWatermarkPresets(candidate.watermarkPresets)
       : currentBundle.watermarkPresets;
-  const sceneCopyPresets =
-    'sceneCopyPresets' in candidate
-      ? replaceVideoSceneCopyPresets(candidate.sceneCopyPresets)
-      : currentBundle.sceneCopyPresets;
+  if ('sceneCopyPresets' in candidate) {
+    replaceVideoSceneCopyPresets(candidate.sceneCopyPresets);
+  }
+  const legacyStyleLabPresets =
+    'styleLabPresets' in candidate
+      ? replaceVideoStyleLabPresets(candidate.styleLabPresets)
+      : loadVideoStyleLabPresets();
+  const videoPackageLibrary =
+    'videoPackages' in candidate
+      ? replaceVideoUserPackageLibrary(
+          {
+            packages: candidate.videoPackages,
+            activePackageId: candidate.lastSelectedVideoPackageId
+          },
+          appSettings.videoDefaults
+        )
+      : replaceVideoUserPackageLibrary(
+          {
+            legacyStyleLabPresets
+          },
+          appSettings.videoDefaults
+        );
   const backgroundPacks =
     'backgroundPacks' in candidate
       ? replaceGeneratedBackgroundPacks(candidate.backgroundPacks)
@@ -177,9 +227,13 @@ export const applyAppSettingsTransferBundle = (
     splitterSetup,
     timestampPresetCount: timestampPresets.length,
     watermarkPresetCount: watermarkPresets.length,
-    sceneCopyPresetCount: sceneCopyPresets.length,
+    videoPackageCount: videoPackageLibrary.packages.length,
+    migratedLegacyStyleLabPresetCount:
+      'videoPackages' in candidate ? 0 : legacyStyleLabPresets.length,
     backgroundPackCount: backgroundPacks.length,
     hasSavedVideoLayout: Boolean(savedVideoLayout),
-    gameAudioMuted
+    gameAudioMuted,
+    videoPackages: videoPackageLibrary.packages,
+    lastSelectedVideoPackageId: videoPackageLibrary.activePackageId
   };
 };

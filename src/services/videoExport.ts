@@ -2,7 +2,14 @@ import { Puzzle, VideoSettings } from '../types';
 import { loadGeneratedBackgroundPacks } from './backgroundPacks';
 import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from './mediaTelemetry';
-import type { BinaryRenderablePuzzle, VideoExportWorkerStartPayload } from './videoRenderSource';
+import type {
+  BinaryRenderablePuzzle,
+  VideoExportAudioAssets,
+  VideoExportWorkerStartPayload
+} from './videoRenderSource';
+import { decodeAudioAssetFromSource } from '../utils/audioDecode';
+import { loadVideoAssetBlob } from './videoAssetStore';
+import { isStoredVideoAssetSource } from './videoAssetStore';
 
 interface ExportVideoBaseOptions {
   settings: VideoSettings;
@@ -32,17 +39,52 @@ interface RenderedVideoFramePreview {
   mimeType: string;
 }
 
-interface RenderVideoFramePreviewOptions {
-  puzzles: Puzzle[];
-  settings: VideoSettings;
-  timestamp: number;
-  signal?: AbortSignal;
-}
+type RenderVideoFramePreviewOptions =
+  | {
+      source?: 'legacy';
+      puzzles: Puzzle[];
+      settings: VideoSettings;
+      timestamp: number;
+      signal?: AbortSignal;
+    }
+  | {
+      source: 'binary';
+      puzzles: BinaryRenderablePuzzle[];
+      settings: VideoSettings;
+      timestamp: number;
+      signal?: AbortSignal;
+    };
 
 const resolveGeneratedBackgroundPack = (settings: VideoSettings) =>
   settings.generatedBackgroundsEnabled
     ? loadGeneratedBackgroundPacks().find((pack) => pack.id === settings.generatedBackgroundPackId) ?? null
     : null;
+
+let cachedIntroVideoSource = '';
+let cachedIntroVideoFile: File | null = null;
+
+const resolveIntroVideoFile = async (settings: VideoSettings): Promise<File | null> => {
+  if (!settings.introVideoEnabled || !settings.introVideoSrc) {
+    cachedIntroVideoSource = '';
+    cachedIntroVideoFile = null;
+    return null;
+  }
+  if (cachedIntroVideoSource === settings.introVideoSrc && cachedIntroVideoFile) {
+    return cachedIntroVideoFile;
+  }
+
+  try {
+    const blob = await loadVideoAssetBlob(settings.introVideoSrc);
+    if (!blob) return null;
+    const file = new File([blob], 'intro-video', { type: blob.type || 'video/mp4' });
+    cachedIntroVideoSource = settings.introVideoSrc;
+    cachedIntroVideoFile = file;
+    return file;
+  } catch (error) {
+    console.error('Failed to load intro video asset', error);
+    return null;
+  }
+};
 
 type WorkerResponse =
   | { type: 'progress'; progress: number; status?: string }
@@ -131,6 +173,108 @@ const resolveDiagnosticsContext = (options: ExportVideoOptions): DiagnosticsCont
   };
 };
 
+const collectAudioTransferables = (audioAssets?: VideoExportAudioAssets | null): Transferable[] => {
+  if (!audioAssets) return [];
+  const transferables: Transferable[] = [];
+  if (audioAssets.countdown?.data?.buffer) transferables.push(audioAssets.countdown.data.buffer);
+  if (audioAssets.reveal?.data?.buffer) transferables.push(audioAssets.reveal.data.buffer);
+  if (audioAssets.revealVariants) {
+    audioAssets.revealVariants.forEach((variant) => {
+      if (variant?.data?.buffer) transferables.push(variant.data.buffer);
+    });
+  }
+  if (audioAssets.marker?.data?.buffer) transferables.push(audioAssets.marker.data.buffer);
+  if (audioAssets.blink?.data?.buffer) transferables.push(audioAssets.blink.data.buffer);
+  if (audioAssets.play?.data?.buffer) transferables.push(audioAssets.play.data.buffer);
+  if (audioAssets.intro?.data?.buffer) transferables.push(audioAssets.intro.data.buffer);
+  if (audioAssets.introClip?.data?.buffer) transferables.push(audioAssets.introClip.data.buffer);
+  if (audioAssets.transition?.data?.buffer) transferables.push(audioAssets.transition.data.buffer);
+  if (audioAssets.outro?.data?.buffer) transferables.push(audioAssets.outro.data.buffer);
+  if (audioAssets.music?.data?.buffer) transferables.push(audioAssets.music.data.buffer);
+  return transferables;
+};
+
+const decodeIntroClipAudio = async (settings: VideoSettings) => {
+  if (!settings.introVideoEnabled || !settings.introVideoSrc) return null;
+  let objectUrl: string | null = null;
+  let source = settings.introVideoSrc;
+  try {
+    if (isStoredVideoAssetSource(source)) {
+      const blob = await loadVideoAssetBlob(source);
+      if (!blob) return null;
+      objectUrl = URL.createObjectURL(blob);
+      source = objectUrl;
+    }
+    return await decodeAudioAssetFromSource(source);
+  } finally {
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+};
+
+const resolveAudioAssetsForExport = async (
+  settings: VideoSettings,
+  onProgress?: (progress: number, status?: string) => void
+): Promise<VideoExportAudioAssets | null> => {
+  const needsSfx =
+    settings.soundEffectsEnabled &&
+    (settings.countdownSoundSrc ||
+      settings.revealSoundSrc ||
+      (settings.revealSoundVariantSrcs?.length ?? 0) > 0 ||
+      settings.markerSoundSrc ||
+      settings.blinkSoundSrc ||
+      settings.playSoundSrc ||
+      settings.introSoundSrc ||
+      settings.transitionSoundSrc ||
+      settings.outroSoundSrc);
+  const needsMusic = settings.backgroundMusicEnabled && settings.backgroundMusicSrc;
+  const needsIntroClipAudio = settings.introVideoEnabled && settings.introVideoSrc;
+
+  if (!needsSfx && !needsMusic && !needsIntroClipAudio) return null;
+  onProgress?.(0.02, 'Decoding audio assets...');
+
+  const assets: VideoExportAudioAssets = {};
+  if (needsSfx && settings.countdownSoundSrc) {
+    assets.countdown = (await decodeAudioAssetFromSource(settings.countdownSoundSrc)) ?? undefined;
+  }
+  if (needsSfx && settings.revealSoundSrc) {
+    assets.reveal = (await decodeAudioAssetFromSource(settings.revealSoundSrc)) ?? undefined;
+  }
+  if (needsSfx && settings.revealSoundVariantSrcs?.length) {
+    const decoded = await Promise.all(
+      settings.revealSoundVariantSrcs.map((src) => decodeAudioAssetFromSource(src))
+    );
+    assets.revealVariants = decoded.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+  }
+  if (needsSfx && settings.markerSoundSrc) {
+    assets.marker = (await decodeAudioAssetFromSource(settings.markerSoundSrc)) ?? undefined;
+  }
+  if (needsSfx && settings.blinkSoundSrc) {
+    assets.blink = (await decodeAudioAssetFromSource(settings.blinkSoundSrc)) ?? undefined;
+  }
+  if (needsSfx && settings.playSoundSrc) {
+    assets.play = (await decodeAudioAssetFromSource(settings.playSoundSrc)) ?? undefined;
+  }
+  if (needsSfx && settings.introSoundSrc) {
+    assets.intro = (await decodeAudioAssetFromSource(settings.introSoundSrc)) ?? undefined;
+  }
+  if (needsIntroClipAudio) {
+    assets.introClip = (await decodeIntroClipAudio(settings)) ?? undefined;
+  }
+  if (needsSfx && settings.transitionSoundSrc) {
+    assets.transition = (await decodeAudioAssetFromSource(settings.transitionSoundSrc)) ?? undefined;
+  }
+  if (needsSfx && settings.outroSoundSrc) {
+    assets.outro = (await decodeAudioAssetFromSource(settings.outroSoundSrc)) ?? undefined;
+  }
+  if (needsMusic && settings.backgroundMusicSrc) {
+    assets.music = (await decodeAudioAssetFromSource(settings.backgroundMusicSrc)) ?? undefined;
+  }
+
+  return assets;
+};
+
 const handleWorkerDiagnostics = (job: MediaJobController | null, message: WorkerResponse) => {
   if (!job) return false;
   if (message.type === 'task-event') {
@@ -147,32 +291,51 @@ const handleWorkerDiagnostics = (job: MediaJobController | null, message: Worker
 const buildWorkerStartPayload = (
   options: ExportVideoOptions,
   sessionId: string,
-  jobId?: string
+  jobId?: string,
+  audioAssets?: VideoExportAudioAssets | null,
+  introVideoFile?: File | null
 ): { payload: VideoExportWorkerStartPayload; transferables: Transferable[] } => {
+  const audioTransferables = collectAudioTransferables(audioAssets);
   if (options.source === 'binary') {
+    // Binary Super Export batches can be rendered more than once
+    // (thumbnail preview first, then full video export). Clone the buffers
+    // before transferring so the originals stay usable for later passes.
+    const clonedPuzzles = options.puzzles.map((puzzle) => ({
+      ...puzzle,
+      imageABuffer: puzzle.imageABuffer.slice(0),
+      imageBBuffer: puzzle.imageBBuffer.slice(0)
+    }));
+    const puzzleTransferables: Transferable[] = clonedPuzzles.flatMap((puzzle) => [
+      puzzle.imageABuffer,
+      puzzle.imageBBuffer
+    ]);
     return {
       payload: {
         source: 'binary',
-        puzzles: options.puzzles,
+        puzzles: clonedPuzzles,
         settings: options.settings,
         generatedBackgroundPack: resolveGeneratedBackgroundPack(options.settings),
+        audioAssets: audioAssets ?? undefined,
+        introVideoFile: introVideoFile ?? undefined,
         jobId,
         workerSessionId: sessionId
       },
-      transferables: options.puzzles.flatMap((puzzle) => [puzzle.imageABuffer, puzzle.imageBBuffer])
+      transferables: [...puzzleTransferables, ...audioTransferables]
     };
   }
 
   return {
-      payload: {
-        source: 'legacy',
-        puzzles: options.puzzles,
-        settings: options.settings,
-        generatedBackgroundPack: resolveGeneratedBackgroundPack(options.settings),
-        jobId,
-        workerSessionId: sessionId
-      },
-    transferables: []
+    payload: {
+      source: 'legacy',
+      puzzles: options.puzzles,
+      settings: options.settings,
+      generatedBackgroundPack: resolveGeneratedBackgroundPack(options.settings),
+      audioAssets: audioAssets ?? undefined,
+      introVideoFile: introVideoFile ?? undefined,
+      jobId,
+      workerSessionId: sessionId
+    },
+    transferables: audioTransferables
   };
 };
 
@@ -198,6 +361,8 @@ const streamVideoWithWebCodecs = async (
   options: ExportVideoOptions & { writable: FileSystemWritableFileStream }
 ): Promise<void> => {
   const { onProgress, writable } = options;
+  const audioAssets = await resolveAudioAssetsForExport(options.settings, onProgress);
+  const introVideoFile = await resolveIntroVideoFile(options.settings);
 
   return await new Promise<void>((resolve, reject) => {
     const diagnostics = resolveDiagnosticsContext(options);
@@ -312,7 +477,13 @@ const streamVideoWithWebCodecs = async (
       void fail(new Error(`Video export worker crashed.${detail}`));
     };
 
-    const { payload, transferables } = buildWorkerStartPayload(options, sessionId, job?.jobId);
+    const { payload, transferables } = buildWorkerStartPayload(
+      options,
+      sessionId,
+      job?.jobId,
+      audioAssets,
+      introVideoFile
+    );
     session.worker.postMessage(
       {
         type: 'start',
@@ -334,6 +505,8 @@ export const streamVideoToWritableWithWebCodecs = async (
 
 export const renderVideoWithWebCodecs = async (options: ExportVideoOptions): Promise<RenderedVideoResult> => {
   const { onProgress } = options;
+  const audioAssets = await resolveAudioAssetsForExport(options.settings, onProgress);
+  const introVideoFile = await resolveIntroVideoFile(options.settings);
 
   return await new Promise<RenderedVideoResult>((resolve, reject) => {
     const diagnostics = resolveDiagnosticsContext(options);
@@ -414,7 +587,13 @@ export const renderVideoWithWebCodecs = async (options: ExportVideoOptions): Pro
       reject(new Error(`Video export worker crashed.${detail}`));
     };
 
-    const { payload, transferables } = buildWorkerStartPayload(options, sessionId, job?.jobId);
+    const { payload, transferables } = buildWorkerStartPayload(
+      options,
+      sessionId,
+      job?.jobId,
+      audioAssets,
+      introVideoFile
+    );
     session.worker.postMessage(
       {
         type: 'start',
@@ -426,11 +605,17 @@ export const renderVideoWithWebCodecs = async (options: ExportVideoOptions): Pro
 };
 
 export const renderVideoFramePreview = async ({
+  source = 'legacy',
   puzzles,
   settings,
   timestamp,
   signal
 }: RenderVideoFramePreviewOptions): Promise<RenderedVideoFramePreview> => {
+  const introVideoFile = await resolveIntroVideoFile(settings);
+  if (signal?.aborted) {
+    throw new DOMException('Preview canceled', 'AbortError');
+  }
+
   return await new Promise<RenderedVideoFramePreview>((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException('Preview canceled', 'AbortError'));
@@ -501,10 +686,12 @@ export const renderVideoFramePreview = async ({
     worker.postMessage({
       type: 'preview-frame',
       payload: {
+        source,
         puzzles,
         settings,
         timestamp,
-        generatedBackgroundPack: resolveGeneratedBackgroundPack(settings)
+        generatedBackgroundPack: resolveGeneratedBackgroundPack(settings),
+        introVideoFile: introVideoFile ?? undefined
       }
     });
   });

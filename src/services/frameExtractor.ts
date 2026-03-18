@@ -188,6 +188,46 @@ const createVideoElement = (url: string): HTMLVideoElement => {
   return video;
 };
 
+const formatMediaErrorMessage = (video: HTMLVideoElement, fallback: string): string => {
+  const mediaError = video.error;
+  if (!mediaError) {
+    return fallback;
+  }
+
+  const detail = mediaError.message?.trim();
+  switch (mediaError.code) {
+    case 1:
+      return detail ? `Video loading was aborted. ${detail}` : 'Video loading was aborted.';
+    case 2:
+      return detail
+        ? `The video file could not be loaded because of a network or file-read error. ${detail}`
+        : 'The video file could not be loaded because of a network or file-read error.';
+    case 3:
+      return detail
+        ? `The browser could read the video but failed to decode its frames. Try re-saving it as MP4 (H.264/AAC). ${detail}`
+        : 'The browser could read the video but failed to decode its frames. Try re-saving it as MP4 (H.264/AAC).';
+    case 4:
+      return detail
+        ? `This video format is not supported by the current browser. Try MP4 (H.264/AAC). ${detail}`
+        : 'This video format is not supported by the current browser. Try MP4 (H.264/AAC).';
+    default:
+      return detail ? `${fallback} ${detail}` : fallback;
+  }
+};
+
+const normalizeFrameExtractionErrorMessage = (error: unknown): string => {
+  const fallback = error instanceof Error ? error.message : 'Frame extraction failed.';
+  if (!fallback.trim()) {
+    return 'Frame extraction failed.';
+  }
+
+  if (/decode|codec|unsupported|media_err_decode|source image could not be decoded/i.test(fallback)) {
+    return `${fallback} Try re-saving the source as MP4 (H.264/AAC) or loading a different browser-compatible file.`;
+  }
+
+  return fallback;
+};
+
 const waitForLoadedMetadata = (video: HTMLVideoElement) =>
   new Promise<void>((resolve, reject) => {
     if (video.readyState >= 1) {
@@ -207,7 +247,7 @@ const waitForLoadedMetadata = (video: HTMLVideoElement) =>
 
     const handleError = () => {
       cleanup();
-      reject(new Error('Failed to read video metadata.'));
+      reject(new Error(formatMediaErrorMessage(video, 'Failed to read video metadata.')));
     };
 
     video.addEventListener('loadedmetadata', handleLoaded);
@@ -275,7 +315,7 @@ const seekVideo = (video: HTMLVideoElement, targetSeconds: number) =>
 
     const handleError = () => {
       cleanup();
-      reject(new Error('Failed while seeking video.'));
+      reject(new Error(formatMediaErrorMessage(video, 'Failed while seeking video.')));
     };
 
     video.addEventListener('seeked', handleSeeked);
@@ -678,7 +718,7 @@ export const extractFrames = async (options: ExtractFramesOptions): Promise<Extr
       if (isCancellationError(error)) {
         diagnosticsJob?.cancel('Frame extraction canceled');
       } else {
-        diagnosticsJob?.fail(error instanceof Error ? error.message : 'Frame extraction failed.', 'Frame extraction failed');
+        diagnosticsJob?.fail(normalizeFrameExtractionErrorMessage(error), 'Frame extraction failed');
       }
       throw error;
     }
@@ -709,11 +749,11 @@ export const extractFrames = async (options: ExtractFramesOptions): Promise<Extr
         diagnosticsJob?.cancel('Frame extraction canceled');
       } else {
         diagnosticsJob?.fail(
-          fallbackError instanceof Error ? fallbackError.message : 'Frame extraction failed.',
+          normalizeFrameExtractionErrorMessage(fallbackError),
           'Frame extraction failed'
         );
       }
-      throw fallbackError;
+      throw new Error(normalizeFrameExtractionErrorMessage(fallbackError));
     }
   }
 };
@@ -746,12 +786,16 @@ export const extractFramesStream = async ({
       throw error;
     }
     console.warn('Falling back to main-thread streamed frame extraction.', error);
-    const result = await extractFramesOnMainThread({
-      ...options,
-      onFrame,
-      collectFiles: false,
-      diagnosticsJob
-    });
-    return result.summary;
+    try {
+      const result = await extractFramesOnMainThread({
+        ...options,
+        onFrame,
+        collectFiles: false,
+        diagnosticsJob
+      });
+      return result.summary;
+    } catch (fallbackError) {
+      throw new Error(normalizeFrameExtractionErrorMessage(fallbackError));
+    }
   }
 };

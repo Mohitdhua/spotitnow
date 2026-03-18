@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useId, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowLeft, Pause, Play, SkipForward, RotateCcw, CheckCircle, Send } from 'lucide-react';
 import { Puzzle, VideoSettings } from '../types';
@@ -6,12 +6,23 @@ import { BASE_STAGE_SIZE, CLASSIC_HUD_SPEC, TRANSITION_TUNING } from '../constan
 import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
 import { resolveVideoLayoutSettings } from '../constants/videoLayoutCustom';
 import { VIDEO_PACKAGE_PRESETS, resolvePackageImageArrangement } from '../constants/videoPackages';
+import {
+  applyTextTransform,
+  buildProgressFillDefinition,
+  radiusTokenToPx,
+  resolveVideoStyleModules
+} from '../constants/videoStyleModules';
 import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
+import { VideoTimerDisplay } from './VideoTimerDisplay';
 import { loadGeneratedBackgroundPacks } from '../services/backgroundPacks';
 import { resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
 import { resolveVisualThemeStyle } from '../constants/videoThemes';
 import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import { clampLogoZoom } from '../utils/logoProcessing';
+import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import { buildCueTones, type AudioCueKind } from '../utils/audioCueTones';
+import { decodeAudioBufferFromSource } from '../utils/audioDecode';
+import { loadVideoAssetBlob } from '../services/videoAssetStore';
 
 interface VideoPlayerProps {
   puzzles: Puzzle[];
@@ -582,10 +593,135 @@ const anchorToCss = (anchor: HudAnchorSpec): React.CSSProperties => {
 const fillTemplate = (template: string, values: Record<string, string | number>) =>
   template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => String(values[key] ?? ''));
 
+const resolveTextProgressFillColors = (remainingPercent: number, visualTheme: VisualTheme) => {
+  return resolveSmoothTextProgressFillColors(remainingPercent, visualTheme);
+};
+
+const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
+  const safeText = text.trim() || 'PROGRESS';
+  const widthBound = width / Math.max(4.8, safeText.length * 0.68);
+  const heightBound = height * 0.78;
+  return Math.max(12, Math.min(preferred, widthBound, heightBound));
+};
+
+let textProgressMeasureCanvas: HTMLCanvasElement | null = null;
+
+const measureTextProgressSpan = (
+  text: string,
+  width: number,
+  fontSize: number,
+  fontFamily: string,
+  fontWeight: number | string
+) => {
+  if (typeof document === 'undefined') {
+    return { left: 0, width };
+  }
+  textProgressMeasureCanvas ??= document.createElement('canvas');
+  const ctx = textProgressMeasureCanvas.getContext('2d');
+  if (!ctx) {
+    return { left: 0, width };
+  }
+  ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  const metrics = ctx.measureText(text.trim() || 'PROGRESS');
+  const measuredWidth = Math.max(
+    metrics.width,
+    (metrics.actualBoundingBoxLeft || 0) + (metrics.actualBoundingBoxRight || 0)
+  );
+  const boundedWidth = Math.max(1, Math.min(width, measuredWidth));
+  return {
+    left: (width - boundedWidth) / 2,
+    width: boundedWidth
+  };
+};
+
+const resolveIntroDuration = (settings: VideoSettings) => {
+  if (settings.introVideoEnabled && settings.introVideoSrc) {
+    const clipDuration = Number(settings.introVideoDuration);
+    if (Number.isFinite(clipDuration) && clipDuration > 0) {
+      return clipDuration;
+    }
+    const fallbackDuration = Number(settings.sceneSettings.introDuration);
+    return Number.isFinite(fallbackDuration) ? Math.max(0, fallbackDuration) : 0;
+  }
+
+  return settings.sceneSettings.introEnabled ? Math.max(0, settings.sceneSettings.introDuration) : 0;
+};
+
 const getInitialPhase = (hasPuzzles: boolean, settings: VideoSettings): Phase => {
   if (!hasPuzzles) return 'finished';
-  return settings.sceneSettings.introEnabled ? 'intro' : 'showing';
+  return resolveIntroDuration(settings) > 0 ? 'intro' : 'showing';
 };
+
+const resolveGeneratedBackgroundPlaybackTime = ({
+  phase,
+  puzzleIndex,
+  puzzleCount,
+  timeLeft,
+  settings,
+  revealPhaseDuration
+}: {
+  phase: Phase;
+  puzzleIndex: number;
+  puzzleCount: number;
+  timeLeft: number;
+  settings: VideoSettings;
+  revealPhaseDuration: number;
+}) => {
+  const safePuzzleCount = Math.max(0, puzzleCount);
+  const safeIndex = Math.min(Math.max(puzzleIndex, 0), Math.max(0, safePuzzleCount - 1));
+  const introDuration = resolveIntroDuration(settings);
+  const outroDuration = settings.sceneSettings.outroEnabled ? settings.sceneSettings.outroDuration : 0;
+  const showingDuration = settings.showDuration;
+  const transitionDuration = settings.transitionDuration;
+
+  let elapsed = 0;
+
+  if (introDuration > 0) {
+    if (phase === 'intro') {
+      return Math.max(0, introDuration - timeLeft);
+    }
+    elapsed += introDuration;
+  }
+
+  for (let index = 0; index < safeIndex; index += 1) {
+    elapsed += showingDuration + revealPhaseDuration;
+    if (index < safePuzzleCount - 1) {
+      elapsed += transitionDuration;
+    }
+  }
+
+  if (phase === 'showing') {
+    return elapsed + Math.max(0, showingDuration - timeLeft);
+  }
+  if (phase === 'revealing') {
+    return elapsed + showingDuration + Math.max(0, revealPhaseDuration - timeLeft);
+  }
+  if (phase === 'transitioning') {
+    return elapsed + showingDuration + revealPhaseDuration + Math.max(0, transitionDuration - timeLeft);
+  }
+  if (phase === 'outro') {
+    return elapsed + showingDuration + revealPhaseDuration + Math.max(0, outroDuration - timeLeft);
+  }
+  if (phase === 'finished') {
+    return elapsed + showingDuration + revealPhaseDuration + outroDuration;
+  }
+  return elapsed;
+};
+
+const resolvePhaseAudioLevel = (
+  levels: VideoSettings['musicPhaseLevels'] | VideoSettings['sfxPhaseLevels'] | undefined,
+  phase: Phase
+) => {
+  if (!levels) return phase === 'finished' ? 0 : 1;
+  if (phase === 'intro') return levels.intro ?? 1;
+  if (phase === 'showing') return levels.showing ?? 1;
+  if (phase === 'revealing') return levels.revealing ?? 1;
+  if (phase === 'transitioning') return levels.transitioning ?? 1;
+  if (phase === 'outro') return levels.outro ?? 1;
+  return 0;
+};
+
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 
 const HUD_PRESETS = {
   rightStack: {
@@ -848,11 +984,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 }) => {
   const initialHasPuzzles = puzzles.length > 0;
   const initialPhase = getInitialPhase(initialHasPuzzles, settings);
+  const initialIntroDuration = resolveIntroDuration(settings);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>(initialPhase);
   const [timeLeft, setTimeLeft] = useState(
     initialPhase === 'intro'
-      ? settings.sceneSettings.introDuration
+      ? initialIntroDuration
+      : initialPhase === 'finished'
+      ? 0
+      : settings.showDuration
+  );
+  const [smoothedTimeLeft, setSmoothedTimeLeft] = useState(
+    initialPhase === 'intro'
+      ? initialIntroDuration
       : initialPhase === 'finished'
       ? 0
       : settings.showDuration
@@ -861,6 +1005,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isBlinkOverlayVisible, setIsBlinkOverlayVisible] = useState(false);
   const [imageViewportSize, setImageViewportSize] = useState({ width: 0, height: 0 });
   const [imageBNaturalSize, setImageBNaturalSize] = useState({ width: 0, height: 0 });
+  const [audioAssetVersion, setAudioAssetVersion] = useState(0);
+  const [introVideoUrl, setIntroVideoUrl] = useState<string | null>(null);
+  const [introVideoReady, setIntroVideoReady] = useState(false);
+  const [introVideoError, setIntroVideoError] = useState(false);
+  const introVideoRef = useRef<HTMLVideoElement | null>(null);
+  const introVideoEnabled = settings.introVideoEnabled;
+  const introVideoSrc = settings.introVideoSrc;
+  const introClipActive = introVideoEnabled && Boolean(introVideoSrc);
   const [viewportSize, setViewportSize] = useState(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 1600,
     height: typeof window !== 'undefined' ? window.innerHeight : 900
@@ -880,9 +1032,537 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   });
   const logoZoom = clampLogoZoom(settings.logoZoom);
   const renderedLogoSrc = processedLogoSrc ?? settings.logo;
+  const renderLogoImage = (baseSize: number) => {
+    if (!renderedLogoSrc) return null;
+    const scaledSize = Math.max(1, Math.round(baseSize * logoZoom));
+    return (
+      <div
+        className="absolute left-1/2 top-1/2 pointer-events-none -translate-x-1/2 -translate-y-1/2"
+        style={{ width: `${scaledSize}px`, height: `${scaledSize}px` }}
+      >
+        <img
+          src={renderedLogoSrc}
+          alt="Logo"
+          className="block h-full w-full max-w-none object-contain"
+          style={{
+            filter: 'drop-shadow(0 2px 3px rgba(0,0,0,0.35))'
+          }}
+        />
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    let isActive = true;
+    if (!introVideoEnabled || !introVideoSrc) {
+      setIntroVideoUrl((current) => {
+        if (current && current.startsWith('blob:')) {
+          URL.revokeObjectURL(current);
+        }
+        return null;
+      });
+      setIntroVideoReady(false);
+      setIntroVideoError(false);
+      return;
+    }
+
+    const loadIntroVideo = async () => {
+      try {
+        if (introVideoSrc.startsWith('blob:') || introVideoSrc.startsWith('data:') || introVideoSrc.startsWith('http')) {
+          setIntroVideoUrl(introVideoSrc);
+          setIntroVideoReady(false);
+          setIntroVideoError(false);
+          return;
+        }
+        const blob = await loadVideoAssetBlob(introVideoSrc);
+        if (!blob || !isActive) {
+          setIntroVideoError(true);
+          return;
+        }
+        const nextUrl = URL.createObjectURL(blob);
+        setIntroVideoUrl((current) => {
+          if (current && current.startsWith('blob:')) {
+            URL.revokeObjectURL(current);
+          }
+          return nextUrl;
+        });
+        setIntroVideoReady(false);
+        setIntroVideoError(false);
+      } catch (error) {
+        console.error('Failed to load intro clip for preview', error);
+        setIntroVideoReady(false);
+        setIntroVideoError(true);
+      }
+    };
+
+    void loadIntroVideo();
+    return () => {
+      isActive = false;
+    };
+  }, [introVideoEnabled, introVideoSrc]);
+
+  useEffect(() => {
+    return () => {
+      if (introVideoUrl && introVideoUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(introVideoUrl);
+      }
+    };
+  }, [introVideoUrl]);
+
+  useEffect(() => {
+    if (phase === 'intro' && introVideoUrl) {
+      const video = introVideoRef.current;
+      if (video && video.readyState >= 2) {
+        setIntroVideoReady(true);
+        setIntroVideoError(false);
+      } else {
+        setIntroVideoReady(false);
+        setIntroVideoError(false);
+      }
+    }
+  }, [phase, introVideoUrl]);
+  const textProgressId = useId().replace(/:/g, '');
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const interactiveViewportRef = useRef<HTMLDivElement>(null);
+  const phaseTransitionLockRef = useRef<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioUnlockedRef = useRef(false);
+  const lastCountdownKeyRef = useRef<string | null>(null);
+  const lastRevealKeyRef = useRef<string | null>(null);
+  const lastPlayKeyRef = useRef<string | null>(null);
+  const lastMarkerKeyRef = useRef<string | null>(null);
+  const lastBlinkVisibleRef = useRef(false);
+  const lastIntroKeyRef = useRef<string | null>(null);
+  const lastTransitionKeyRef = useRef<string | null>(null);
+  const lastOutroKeyRef = useRef<string | null>(null);
+  const audioBuffersRef = useRef<{
+    countdown: AudioBuffer | null;
+    reveal: AudioBuffer | null;
+    revealVariants: AudioBuffer[];
+    marker: AudioBuffer | null;
+    blink: AudioBuffer | null;
+    play: AudioBuffer | null;
+    intro: AudioBuffer | null;
+    transition: AudioBuffer | null;
+    outro: AudioBuffer | null;
+    music: AudioBuffer | null;
+  }>({
+    countdown: null,
+    reveal: null,
+    revealVariants: [],
+    marker: null,
+    blink: null,
+    play: null,
+    intro: null,
+    transition: null,
+    outro: null,
+    music: null
+  });
+  const audioNodesRef = useRef<{
+    masterGain: GainNode;
+    sfxGain: GainNode;
+    musicGain: GainNode;
+    musicDucker: GainNode;
+    limiter: DynamicsCompressorNode;
+    limiterEnabled: boolean;
+  } | null>(null);
+  const musicSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const musicStateRef = useRef<{
+    source: AudioBufferSourceNode;
+    startedAt: number;
+    offset: number;
+    duration: number;
+    loop: boolean;
+  } | null>(null);
+
+  const ensureAudioContext = useCallback(() => {
+    if (!audioUnlockedRef.current) {
+      return null;
+    }
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext();
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume();
+    }
+    return audioContextRef.current;
+  }, []);
+
+  const ensureAudioGraph = useCallback(
+    (ctx: AudioContext) => {
+      let nodes = audioNodesRef.current;
+      if (!nodes) {
+        const masterGain = ctx.createGain();
+        const sfxGain = ctx.createGain();
+        const musicGain = ctx.createGain();
+        const musicDucker = ctx.createGain();
+        const limiter = ctx.createDynamicsCompressor();
+
+        masterGain.gain.value = 1;
+        sfxGain.gain.value = 1;
+        musicGain.gain.value = 1;
+        musicDucker.gain.value = 1;
+
+        sfxGain.connect(masterGain);
+        musicGain.connect(musicDucker);
+        musicDucker.connect(masterGain);
+
+        nodes = {
+          masterGain,
+          sfxGain,
+          musicGain,
+          musicDucker,
+          limiter,
+          limiterEnabled: settings.audioLimiterEnabled
+        };
+        audioNodesRef.current = nodes;
+      }
+
+      if (nodes.limiterEnabled !== settings.audioLimiterEnabled) {
+        nodes.limiterEnabled = settings.audioLimiterEnabled;
+      }
+
+      nodes.masterGain.disconnect();
+      nodes.limiter.disconnect();
+      if (nodes.limiterEnabled) {
+        nodes.masterGain.connect(nodes.limiter);
+        nodes.limiter.connect(ctx.destination);
+      } else {
+        nodes.masterGain.connect(ctx.destination);
+      }
+
+      return nodes;
+    },
+    [settings.audioLimiterEnabled]
+  );
+
+  const unlockAudio = useCallback(() => {
+    audioUnlockedRef.current = true;
+    ensureAudioContext();
+  }, [ensureAudioContext]);
+
+  const stopPreviewMusic = useCallback(() => {
+    const current = musicStateRef.current;
+    if (current?.source) {
+      try {
+        current.source.stop();
+      } catch {
+        // ignore stop errors during rapid toggles
+      }
+      current.source.disconnect();
+    }
+    musicSourceRef.current = null;
+    musicStateRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCountdown = async () => {
+      if (!settings.countdownSoundSrc) {
+        audioBuffersRef.current.countdown = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.countdownSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.countdown = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadCountdown();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.countdownSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadReveal = async () => {
+      if (!settings.revealSoundSrc) {
+        audioBuffersRef.current.reveal = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.revealSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.reveal = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadReveal();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.revealSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRevealVariants = async () => {
+      if (!settings.revealSoundVariantSrcs?.length) {
+        audioBuffersRef.current.revealVariants = [];
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffers = await Promise.all(
+        settings.revealSoundVariantSrcs.map((src) => decodeAudioBufferFromSource(src))
+      );
+      if (cancelled) return;
+      audioBuffersRef.current.revealVariants = buffers.filter(
+        (buffer): buffer is AudioBuffer => Boolean(buffer)
+      );
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadRevealVariants();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.revealSoundVariantSrcs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadMarker = async () => {
+      if (!settings.markerSoundSrc) {
+        audioBuffersRef.current.marker = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.markerSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.marker = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadMarker();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.markerSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadBlink = async () => {
+      if (!settings.blinkSoundSrc) {
+        audioBuffersRef.current.blink = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.blinkSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.blink = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadBlink();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.blinkSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadPlay = async () => {
+      if (!settings.playSoundSrc) {
+        audioBuffersRef.current.play = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.playSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.play = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadPlay();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.playSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadIntro = async () => {
+      if (!settings.introSoundSrc) {
+        audioBuffersRef.current.intro = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.introSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.intro = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadIntro();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.introSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadTransition = async () => {
+      if (!settings.transitionSoundSrc) {
+        audioBuffersRef.current.transition = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.transitionSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.transition = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadTransition();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.transitionSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadOutro = async () => {
+      if (!settings.outroSoundSrc) {
+        audioBuffersRef.current.outro = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.outroSoundSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.outro = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadOutro();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.outroSoundSrc]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadMusic = async () => {
+      if (!settings.backgroundMusicSrc) {
+        audioBuffersRef.current.music = null;
+        setAudioAssetVersion((version) => version + 1);
+        return;
+      }
+      const buffer = await decodeAudioBufferFromSource(settings.backgroundMusicSrc);
+      if (cancelled) return;
+      audioBuffersRef.current.music = buffer;
+      setAudioAssetVersion((version) => version + 1);
+    };
+    void loadMusic();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.backgroundMusicSrc]);
+
+  const playAudioCue = useCallback(
+    (kind: AudioCueKind, phase: Phase, puzzleIndex: number) => {
+      if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+      const ctx = ensureAudioContext();
+      if (!ctx || ctx.state === 'suspended') return;
+
+      const nodes = ensureAudioGraph(ctx);
+      const phaseGain = resolvePhaseAudioLevel(settings.sfxPhaseLevels, phase);
+      const masterVolume = clamp01(settings.soundEffectsVolume) * phaseGain;
+      if (masterVolume <= 0) return;
+
+      const offset =
+        kind === 'countdown' ? settings.countdownSoundOffsetMs / 1000 : settings.revealSoundOffsetMs / 1000;
+      const baseTime = ctx.currentTime + 0.02;
+      const scheduledTime = baseTime + offset;
+
+      const revealVariants = audioBuffersRef.current.revealVariants;
+      const customBuffer =
+        kind === 'countdown'
+          ? audioBuffersRef.current.countdown
+          : kind === 'reveal'
+          ? settings.revealSoundRandomize && revealVariants.length > 0
+            ? revealVariants[Math.abs(puzzleIndex) % revealVariants.length]
+            : audioBuffersRef.current.reveal
+          : kind === 'marker'
+          ? audioBuffersRef.current.marker
+          : kind === 'blink'
+          ? audioBuffersRef.current.blink
+          : kind === 'play'
+          ? audioBuffersRef.current.play
+          : kind === 'intro'
+          ? audioBuffersRef.current.intro
+          : kind === 'transition'
+          ? audioBuffersRef.current.transition
+          : kind === 'outro'
+          ? audioBuffersRef.current.outro
+          : null;
+
+      if (customBuffer) {
+        const source = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        source.buffer = customBuffer;
+        gain.gain.setValueAtTime(masterVolume, ctx.currentTime);
+        source.connect(gain);
+        gain.connect(nodes.sfxGain);
+
+        if (scheduledTime < ctx.currentTime) {
+          const offsetIntoBuffer = ctx.currentTime - scheduledTime;
+          if (offsetIntoBuffer < customBuffer.duration) {
+            source.start(ctx.currentTime, offsetIntoBuffer);
+          }
+        } else {
+          source.start(scheduledTime);
+        }
+      } else {
+        const tones = buildCueTones(kind);
+        tones.forEach((tone) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const startTime = scheduledTime + tone.startOffset;
+          const endTime = startTime + tone.duration;
+          const attack = tone.attack ?? 0.012;
+          const release = tone.release ?? Math.max(0.03, tone.duration * 0.62);
+          const peak = masterVolume * tone.volume;
+
+          osc.type = tone.type;
+          osc.frequency.setValueAtTime(Math.max(1, tone.frequency), startTime);
+          if (tone.endFrequency && tone.endFrequency !== tone.frequency) {
+            osc.frequency.exponentialRampToValueAtTime(Math.max(1, tone.endFrequency), endTime);
+          }
+          if (tone.detune) {
+            osc.detune.setValueAtTime(tone.detune, startTime);
+          }
+
+          gain.gain.setValueAtTime(0.0001, startTime);
+          gain.gain.linearRampToValueAtTime(peak, Math.min(startTime + attack, endTime));
+          gain.gain.linearRampToValueAtTime(0.0001, Math.max(startTime, endTime - release));
+
+          osc.connect(gain);
+          gain.connect(nodes.sfxGain);
+          osc.start(startTime);
+          osc.stop(endTime + 0.02);
+        });
+      }
+
+      if (settings.backgroundMusicEnabled && settings.backgroundMusicDuckingAmount > 0) {
+        const duckAmount = clamp01(settings.backgroundMusicDuckingAmount);
+        if (duckAmount > 0) {
+          const duckGain = nodes.musicDucker.gain;
+          const now = ctx.currentTime;
+          const minGain = 1 - duckAmount;
+          duckGain.cancelScheduledValues(now);
+          duckGain.setValueAtTime(duckGain.value, now);
+          duckGain.linearRampToValueAtTime(minGain, now + 0.04);
+          duckGain.linearRampToValueAtTime(minGain, now + 0.12);
+          duckGain.linearRampToValueAtTime(1, now + 0.32);
+        }
+      }
+    },
+    [
+      ensureAudioContext,
+      ensureAudioGraph,
+      settings.backgroundMusicDuckingAmount,
+      settings.backgroundMusicEnabled,
+      settings.countdownSoundOffsetMs,
+      settings.previewSoundEnabled,
+      settings.revealSoundOffsetMs,
+      settings.revealSoundRandomize,
+      settings.sfxPhaseLevels,
+      settings.soundEffectsEnabled,
+      settings.soundEffectsVolume
+    ]
+  );
 
   useEffect(() => {
     if (!hasPuzzles) return;
@@ -890,24 +1570,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setCurrentIndex(safeCurrentIndex);
   }, [hasPuzzles, currentIndex, puzzles.length, safeCurrentIndex]);
 
-  // Timer Logic
   useEffect(() => {
-    if (!isPlaying || phase === 'finished') return;
+    setSmoothedTimeLeft(timeLeft);
+    if (!isPlaying || phase === 'finished') {
+      return;
+    }
 
-    const timer = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 0.1) {
-          handlePhaseComplete();
-          return 0;
-        }
-        return prev - 0.1;
-      });
-    }, 100);
+    let animationFrameId = 0;
+    const startedAt = performance.now();
+    const baseTimeLeft = timeLeft;
 
-    return () => clearInterval(timer);
-  }, [isPlaying, phase, currentIndex]);
+    const tick = (now: number) => {
+      setSmoothedTimeLeft(Math.max(0, baseTimeLeft - (now - startedAt) / 1000));
+      animationFrameId = window.requestAnimationFrame(tick);
+    };
 
-  const handlePhaseComplete = () => {
+    animationFrameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(animationFrameId);
+  }, [isPlaying, phase, timeLeft]);
+
+  const handlePhaseComplete = useCallback(() => {
     if (!hasPuzzles) {
       setPhase('finished');
       setTimeLeft(0);
@@ -939,9 +1621,56 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setPhase('finished');
       setTimeLeft(0);
     }
-  };
+  }, [
+    hasPuzzles,
+    phase,
+    puzzles.length,
+    safeCurrentIndex,
+    settings.revealDuration,
+    settings.sceneSettings.outroDuration,
+    settings.sceneSettings.outroEnabled,
+    settings.showDuration,
+    settings.transitionDuration
+  ]);
+
+  // Timer Logic
+  useEffect(() => {
+    if (!isPlaying || phase === 'finished') return;
+
+    const timer = window.setInterval(() => {
+      setTimeLeft((prev) => Math.max(0, prev - 0.1));
+    }, 100);
+
+    return () => window.clearInterval(timer);
+  }, [isPlaying, phase]);
+
+  useEffect(() => {
+    if (!isPlaying || phase === 'finished' || timeLeft > 0.001) {
+      return;
+    }
+
+    const transitionKey = `${phase}:${safeCurrentIndex}`;
+    if (phaseTransitionLockRef.current === transitionKey) {
+      return;
+    }
+    phaseTransitionLockRef.current = transitionKey;
+    handlePhaseComplete();
+  }, [handlePhaseComplete, isPlaying, phase, safeCurrentIndex, timeLeft]);
+
+  useEffect(() => {
+    phaseTransitionLockRef.current = null;
+  }, [phase, safeCurrentIndex]);
+
+  useEffect(() => {
+    return () => {
+      stopPreviewMusic();
+      audioContextRef.current?.close();
+      audioContextRef.current = null;
+    };
+  }, [stopPreviewMusic]);
 
   const handleSkip = () => {
+    unlockAudio();
     if (phase === 'intro') {
       setPhase('showing');
       setTimeLeft(settings.showDuration);
@@ -956,13 +1685,185 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
-  const handleReplay = () => {
+  const handleReplay = useCallback(() => {
+    unlockAudio();
     const replayPhase = getInitialPhase(hasPuzzles, settings);
     setCurrentIndex(0);
     setPhase(replayPhase);
-    setTimeLeft(replayPhase === 'intro' ? settings.sceneSettings.introDuration : settings.showDuration);
+    setTimeLeft(replayPhase === 'intro' ? introDuration : settings.showDuration);
     setIsPlaying(true);
-  };
+  }, [hasPuzzles, settings, unlockAudio]);
+
+  const handleTogglePlayback = useCallback(() => {
+    unlockAudio();
+    setIsPlaying((prev) => !prev);
+  }, [unlockAudio]);
+
+  useEffect(() => {
+    if (phase !== 'showing') {
+      lastCountdownKeyRef.current = null;
+    }
+  }, [phase, safeCurrentIndex]);
+
+  useEffect(() => {
+    if (phase !== 'revealing') {
+      lastRevealKeyRef.current = null;
+    }
+  }, [phase, safeCurrentIndex]);
+
+  useEffect(() => {
+    if (phase !== 'showing') {
+      lastPlayKeyRef.current = null;
+    }
+  }, [phase, safeCurrentIndex]);
+
+  useEffect(() => {
+    if (phase !== 'revealing') {
+      lastMarkerKeyRef.current = null;
+      lastBlinkVisibleRef.current = false;
+    }
+  }, [phase, safeCurrentIndex]);
+
+  useEffect(() => {
+    if (phase !== 'intro') {
+      lastIntroKeyRef.current = null;
+    }
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase !== 'transitioning') {
+      lastTransitionKeyRef.current = null;
+    }
+  }, [phase, safeCurrentIndex]);
+
+  useEffect(() => {
+    if (phase !== 'outro') {
+      lastOutroKeyRef.current = null;
+    }
+  }, [phase]);
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'showing') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.countdownSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+
+    const secondsLeft = Math.ceil(timeLeft);
+    if (secondsLeft < 1 || secondsLeft > 3) return;
+    const key = `${safeCurrentIndex}:${secondsLeft}`;
+    if (lastCountdownKeyRef.current === key) return;
+    lastCountdownKeyRef.current = key;
+    playAudioCue('countdown', phase, safeCurrentIndex);
+  }, [
+    isPlaying,
+    phase,
+    timeLeft,
+    safeCurrentIndex,
+    settings.countdownSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'showing') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.playSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+
+    const key = `${safeCurrentIndex}:play`;
+    if (lastPlayKeyRef.current === key) return;
+    lastPlayKeyRef.current = key;
+    playAudioCue('play', phase, safeCurrentIndex);
+  }, [
+    isPlaying,
+    phase,
+    safeCurrentIndex,
+    settings.playSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'intro') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.introSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+
+    const key = `intro`;
+    if (lastIntroKeyRef.current === key) return;
+    lastIntroKeyRef.current = key;
+    playAudioCue('intro', phase, safeCurrentIndex);
+  }, [
+    isPlaying,
+    phase,
+    safeCurrentIndex,
+    settings.introSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'transitioning') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.transitionSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+
+    const key = `${safeCurrentIndex}:transition`;
+    if (lastTransitionKeyRef.current === key) return;
+    lastTransitionKeyRef.current = key;
+    playAudioCue('transition', phase, safeCurrentIndex);
+  }, [
+    isPlaying,
+    phase,
+    safeCurrentIndex,
+    settings.transitionSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'outro') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.outroSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+
+    const key = `outro`;
+    if (lastOutroKeyRef.current === key) return;
+    lastOutroKeyRef.current = key;
+    playAudioCue('outro', phase, safeCurrentIndex);
+  }, [
+    isPlaying,
+    phase,
+    safeCurrentIndex,
+    settings.outroSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'revealing') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.revealSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+
+    const key = `${safeCurrentIndex}:reveal`;
+    if (lastRevealKeyRef.current === key) return;
+    lastRevealKeyRef.current = key;
+    playAudioCue('reveal', phase, safeCurrentIndex);
+  }, [
+    isPlaying,
+    phase,
+    safeCurrentIndex,
+    settings.revealSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
 
   useEffect(() => {
     if (!embedded || phase !== 'finished' || !hasPuzzles) {
@@ -988,6 +1889,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     packagePreset.surfaceStyle === 'storybook' && settings.aspectRatio === '16:9' && !customLayoutEnabled;
   const isWidePuzzleDisplay = isStorybookStyle;
   const visualTheme = VISUAL_THEMES[effectiveVisualStyle];
+  const styleModules = useMemo(
+    () => resolveVideoStyleModules(settings, packagePreset),
+    [packagePreset, settings]
+  );
   const selectedBackgroundPack = useMemo(
     () =>
       settings.generatedBackgroundsEnabled
@@ -1041,9 +1946,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       titleFontSize: shared.title.fontSize,
       subtitleFontSize: shared.title.subtitleSize,
       subtitleGap: shared.title.subtitleGap,
-      subtitleLetterSpacingEm: chrome.subtitleLetterSpacingEm,
-      titleFontClass: chrome.titleFontClass,
-      subtitleFontClass: chrome.subtitleFontClass,
+      subtitleLetterSpacingEm: styleModules.text.subtitleLetterSpacingEm,
+      titleFontClass: styleModules.text.titleFontClass,
+      subtitleFontClass: styleModules.text.subtitleFontClass,
       logoSize: resolvedLayout.logo.size,
       timerPosition: anchorToCss(shared.timer),
       timerPadX: shared.timer.padX,
@@ -1059,17 +1964,158 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       progressRadius: shared.progress.radius,
       progressOrientation: shared.progress.orientation
     };
-  }, [packagePreset, resolvedLayout]);
+  }, [packagePreset, resolvedLayout, styleModules.text]);
   const frameLayout = resolvedLayout.frame;
   const isBlinkingEnabled = settings.enableBlinking !== false;
   const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
+  const introDuration = resolveIntroDuration(settings);
   const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
   const revealRegionCount = currentPuzzle.regions.length;
   const revealStepSeconds = Math.min(
     Math.max(0.5, settings.sequentialRevealStep),
     revealPhaseDuration / Math.max(1, revealRegionCount + 1)
   );
-  const revealBlinkStartTime = revealRegionCount * revealStepSeconds;
+  const revealBlinkStartTime =
+    revealRegionCount > 0
+      ? Math.max(0, (revealRegionCount - 1) * revealStepSeconds + blinkCycleDuration)
+      : 0;
+  const generatedBackgroundPlaybackTime = useMemo(
+    () =>
+      resolveGeneratedBackgroundPlaybackTime({
+        phase,
+        puzzleIndex: safeCurrentIndex,
+        puzzleCount: puzzles.length,
+        timeLeft: smoothedTimeLeft,
+        settings,
+        revealPhaseDuration
+      }),
+    [phase, puzzles.length, revealPhaseDuration, safeCurrentIndex, settings, smoothedTimeLeft]
+  );
+  const totalPlaybackDuration = useMemo(() => {
+    const introDuration = resolveIntroDuration(settings);
+    const outroDuration = settings.sceneSettings.outroEnabled ? settings.sceneSettings.outroDuration : 0;
+    const puzzleCount = Math.max(0, puzzles.length);
+    const showingDuration = settings.showDuration;
+    const transitionDuration = settings.transitionDuration;
+
+    if (puzzleCount <= 0) {
+      return introDuration + outroDuration;
+    }
+
+    return (
+      introDuration +
+      puzzleCount * (showingDuration + revealPhaseDuration) +
+      Math.max(0, puzzleCount - 1) * transitionDuration +
+      outroDuration
+    );
+  }, [
+    puzzles.length,
+    introDuration,
+    revealPhaseDuration,
+    settings.sceneSettings.outroDuration,
+    settings.sceneSettings.outroEnabled,
+    settings.showDuration,
+    settings.transitionDuration
+  ]);
+
+  useEffect(() => {
+    if (!settings.previewSoundEnabled || !settings.backgroundMusicEnabled) {
+      stopPreviewMusic();
+      return;
+    }
+    if (!isPlaying || phase === 'finished') {
+      stopPreviewMusic();
+      return;
+    }
+    if (!audioUnlockedRef.current) {
+      return;
+    }
+
+    const ctx = ensureAudioContext();
+    if (!ctx || ctx.state === 'suspended') {
+      return;
+    }
+
+    const buffer = audioBuffersRef.current.music;
+    if (!buffer) {
+      stopPreviewMusic();
+      return;
+    }
+
+    const duration = buffer.duration || 0;
+    if (duration <= 0.01) {
+      stopPreviewMusic();
+      return;
+    }
+
+    const nodes = ensureAudioGraph(ctx);
+    const phaseLevel = resolvePhaseAudioLevel(settings.musicPhaseLevels, phase);
+    let targetGain = clamp01(settings.backgroundMusicVolume) * phaseLevel;
+    if (settings.backgroundMusicFadeIn > 0) {
+      targetGain *= Math.min(1, generatedBackgroundPlaybackTime / settings.backgroundMusicFadeIn);
+    }
+    if (settings.backgroundMusicFadeOut > 0 && totalPlaybackDuration > 0) {
+      const timeToEnd = Math.max(0, totalPlaybackDuration - generatedBackgroundPlaybackTime);
+      targetGain *= Math.min(1, timeToEnd / settings.backgroundMusicFadeOut);
+    }
+    nodes.musicGain.gain.setTargetAtTime(targetGain, ctx.currentTime, 0.08);
+
+    const desiredOffsetBase = Math.max(0, settings.backgroundMusicOffsetSec) + generatedBackgroundPlaybackTime;
+    if (!settings.backgroundMusicLoop && desiredOffsetBase >= duration) {
+      stopPreviewMusic();
+      return;
+    }
+    const desiredOffset = settings.backgroundMusicLoop
+      ? desiredOffsetBase % duration
+      : Math.min(desiredOffsetBase, Math.max(0, duration - 0.01));
+
+    const currentState = musicStateRef.current;
+    const currentOffset =
+      currentState?.source && currentState.loop === settings.backgroundMusicLoop
+        ? (ctx.currentTime - currentState.startedAt) + currentState.offset
+        : null;
+    const drift = currentOffset === null ? Infinity : Math.abs(currentOffset - desiredOffset);
+    if (!currentState?.source || drift > 0.25) {
+      stopPreviewMusic();
+      const source = ctx.createBufferSource();
+      const startAt = ctx.currentTime + 0.02;
+      source.buffer = buffer;
+      source.loop = settings.backgroundMusicLoop;
+      source.connect(nodes.musicGain);
+      source.start(startAt, desiredOffset);
+      source.onended = () => {
+        if (musicSourceRef.current === source) {
+          musicSourceRef.current = null;
+          musicStateRef.current = null;
+        }
+      };
+      musicSourceRef.current = source;
+      musicStateRef.current = {
+        source,
+        startedAt: startAt,
+        offset: desiredOffset,
+        duration,
+        loop: settings.backgroundMusicLoop
+      };
+    }
+  }, [
+    audioAssetVersion,
+    ensureAudioContext,
+    ensureAudioGraph,
+    generatedBackgroundPlaybackTime,
+    isPlaying,
+    phase,
+    settings.backgroundMusicEnabled,
+    settings.backgroundMusicFadeIn,
+    settings.backgroundMusicFadeOut,
+    settings.backgroundMusicLoop,
+    settings.backgroundMusicOffsetSec,
+    settings.backgroundMusicVolume,
+    settings.musicPhaseLevels,
+    settings.previewSoundEnabled,
+    stopPreviewMusic,
+    totalPlaybackDuration
+  ]);
   const revealElapsed = phase === 'revealing' ? Math.max(0, revealPhaseDuration - timeLeft) : 0;
   const revealedRegionCount =
     phase === 'revealing' && revealRegionCount > 0
@@ -1080,6 +2126,54 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     phase === 'revealing' &&
     revealRegionCount > 0 &&
     revealElapsed >= revealBlinkStartTime;
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'revealing') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.markerSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+    if (revealedRegionCount <= 0) return;
+
+    const key = `${safeCurrentIndex}:marker:${revealedRegionCount}`;
+    if (lastMarkerKeyRef.current === key) return;
+    lastMarkerKeyRef.current = key;
+    playAudioCue('marker', phase, safeCurrentIndex);
+  }, [
+    isPlaying,
+    phase,
+    revealedRegionCount,
+    safeCurrentIndex,
+    settings.markerSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!settings.blinkSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+    if (!isBlinkOverlayActive) {
+      lastBlinkVisibleRef.current = false;
+      return;
+    }
+
+    if (isBlinkOverlayVisible && !lastBlinkVisibleRef.current) {
+      playAudioCue('blink', phase, safeCurrentIndex);
+    }
+    lastBlinkVisibleRef.current = isBlinkOverlayVisible;
+  }, [
+    isBlinkOverlayActive,
+    isBlinkOverlayVisible,
+    isPlaying,
+    phase,
+    safeCurrentIndex,
+    settings.blinkSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
   const currentPuzzleNumber = hasPuzzles ? safeCurrentIndex + 1 : 0;
   const nextPuzzleNumber = Math.min(puzzles.length, safeCurrentIndex + 2);
   const templateValues = {
@@ -1095,6 +2189,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const introSubtitle = fillTemplate(settings.textTemplates.introSubtitle, templateValues);
   const playModeTitle = fillTemplate(settings.textTemplates.playTitle, templateValues);
   const playModeSubtitle = fillTemplate(settings.textTemplates.playSubtitle, templateValues);
+  const progressLabel = fillTemplate(
+    settings.textTemplates.progressLabel || settings.textTemplates.playTitle,
+    templateValues
+  );
   const revealModeTitle = fillTemplate(settings.textTemplates.revealTitle, templateValues);
   const transitionEyebrow = fillTemplate(settings.textTemplates.transitionEyebrow, templateValues);
   const transitionTitle = fillTemplate(settings.textTemplates.transitionTitle, templateValues);
@@ -1121,9 +2219,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : phase === 'outro'
       ? completionSubtitle
       : playModeSubtitle;
+  const styledHeaderTitle = applyTextTransform(headerTitle, styleModules.text.titleTransform);
+  const styledHeaderSubtitle = applyTextTransform(
+    headerSubtitle,
+    styleModules.text.subtitleTransform
+  );
+  const styledProgressLabel = applyTextTransform(progressLabel, styleModules.text.titleTransform);
   const shouldRenderHeaderText = phase !== 'intro' && phase !== 'outro';
-  const shouldShowHeaderTimer = phase !== 'revealing';
-  const shouldShowHeaderProgress = phase === 'showing';
+  const shouldShowHeaderTimer = settings.showTimer !== false && phase !== 'revealing';
+  const shouldShowHeaderProgress = settings.showProgress !== false && phase === 'showing';
   const shouldRenderCustomLogo = Boolean(settings.logo) && customLayoutEnabled;
   const shouldRenderInlineLogo =
     Boolean(settings.logo) && !customLayoutEnabled && !isClassicStyle && !isStorybookStyle && shouldRenderHeaderText;
@@ -1146,7 +2250,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const phaseDuration =
     phase === 'intro'
-      ? settings.sceneSettings.introDuration
+      ? introDuration
       : phase === 'showing'
       ? settings.showDuration
       : phase === 'revealing'
@@ -1156,6 +2260,46 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : phase === 'outro'
       ? settings.sceneSettings.outroDuration
       : 0;
+  const phaseElapsed = Math.max(0, phaseDuration - timeLeft);
+  const showIntroClip = phase === 'intro' && Boolean(introVideoUrl) && introVideoReady;
+  const introClipAudioEnabled = settings.previewSoundEnabled;
+
+  useEffect(() => {
+    if (!showIntroClip || !introVideoUrl) return;
+    const video = introVideoRef.current;
+    if (!video || !introVideoReady) return;
+    const safeDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : introDuration;
+    const targetTime = Math.min(Math.max(0, phaseElapsed), Math.max(0, safeDuration - 0.04));
+    if (!Number.isFinite(targetTime)) return;
+    if (Math.abs(video.currentTime - targetTime) > 0.03) {
+      try {
+        video.currentTime = targetTime;
+      } catch {
+        // Ignore sync errors while metadata is still loading.
+      }
+    }
+  }, [showIntroClip, introVideoUrl, introVideoReady, phaseElapsed, introDuration]);
+
+  useEffect(() => {
+    const video = introVideoRef.current;
+    if (!video) return;
+    const shouldPlay = showIntroClip && Boolean(introVideoUrl) && introClipAudioEnabled && isPlaying;
+    video.muted = !introClipAudioEnabled;
+    if (shouldPlay) {
+      const playPromise = video.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {
+          // Ignore autoplay restrictions or transient play errors.
+        });
+      }
+    } else {
+      try {
+        video.pause();
+      } catch {
+        // Ignore pause errors for partially loaded clips.
+      }
+    }
+  }, [showIntroClip, introVideoUrl, introClipAudioEnabled, isPlaying]);
 
   const progressPercent =
     phaseDuration <= 0
@@ -1177,7 +2321,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ? Math.min(
           1,
           Math.max(
-            0,
+            styleModules.transition.activeOpacityFloor,
             TRANSITION_TUNING.cardOpacityBase +
               transitionSmooth * (TRANSITION_TUNING.cardOpacityPulse - 0.3) -
               transitionProgress * TRANSITION_TUNING.cardOpacityDecay
@@ -1185,44 +2329,50 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         )
       : 0;
   const transitionCardTranslateY = Math.round(
-    (1 - transitionSmooth) * (TRANSITION_TUNING.cardTranslateY + 8)
+    (1 - transitionSmooth) *
+      (TRANSITION_TUNING.cardTranslateY + 8) *
+      styleModules.transition.cardTranslateMultiplier
   );
   const transitionCardScale =
-    TRANSITION_TUNING.cardScaleBase + transitionSmooth * (TRANSITION_TUNING.cardScalePulse + 0.04);
-  const transitionCardGlowOpacity = 0.18 + transitionSmooth * 0.34;
+    TRANSITION_TUNING.cardScaleBase +
+    transitionSmooth * (TRANSITION_TUNING.cardScalePulse + 0.04 + styleModules.transition.cardScaleBoost);
+  const transitionCardGlowOpacity =
+    0.18 + transitionSmooth * (0.34 + styleModules.transition.cardGlowBoost);
   const puzzleTransitionDuration =
     settings.transitionStyle === 'none' ? 0 : Math.max(0, settings.transitionDuration);
-  const puzzleMotionInitial =
-    settings.transitionStyle === 'slide'
-      ? { x: '100%', opacity: 0 }
-      : settings.transitionStyle === 'fade'
-      ? { opacity: 0 }
-      : { x: 0, opacity: 1 };
-  const puzzleMotionExit =
-    settings.transitionStyle === 'slide'
-      ? { x: '-100%', opacity: 0 }
-      : settings.transitionStyle === 'fade'
-      ? { opacity: 0 }
-      : { x: 0, opacity: 1 };
+  const puzzleMotionInitial = styleModules.transition.previewInitial;
+  const puzzleMotionExit = styleModules.transition.previewExit;
+  const resolvedProgressFillDefinition =
+    isClassicStyle && styleModules.progress.id === 'package'
+      ? CLASSIC_HUD_SPEC.progress.fillGradient
+      : buildProgressFillDefinition(styleModules.progress, visualTheme);
+  const resolvedProgressGlow =
+    styleModules.progress.variant === 'glow'
+      ? visualTheme.progressFillGlow ?? `0 0 12px ${visualTheme.timerDot}`
+      : isClassicStyle
+      ? CLASSIC_HUD_SPEC.progress.fillGlowCss
+      : undefined;
 
   const progressFillStyle =
     hudLayout.progressOrientation === 'horizontal'
       ? {
           width: `${countdownPercent}%`,
           height: '100%',
-          background: isClassicStyle
-            ? CLASSIC_HUD_SPEC.progress.fillGradient
-            : visualTheme.progressFill,
-          boxShadow: isClassicStyle
-            ? CLASSIC_HUD_SPEC.progress.fillGlowCss
-            : visualTheme.progressFillGlow
+          background: resolvedProgressFillDefinition,
+          boxShadow: resolvedProgressGlow
         }
       : {
           width: '100%',
           height: `${countdownPercent}%`,
-          background: visualTheme.progressFill,
-          boxShadow: visualTheme.progressFillGlow
+          background: resolvedProgressFillDefinition,
+          boxShadow: resolvedProgressGlow
         };
+  const classicCenterTitleFontSize = isVerticalLayout
+    ? CLASSIC_HUD_SPEC.centerTitle.fontSizeNarrow
+    : CLASSIC_HUD_SPEC.centerTitle.fontSize;
+  const classicBadgeValueFontSize = isVerticalLayout
+    ? CLASSIC_HUD_SPEC.puzzleBadge.valueSizeNarrow
+    : CLASSIC_HUD_SPEC.puzzleBadge.valueSize;
   const progressTrackPosition = isClassicStyle
     ? ({
         left: '50%',
@@ -1230,28 +2380,60 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         bottom: CLASSIC_HUD_SPEC.progress.bottom
       } as React.CSSProperties)
     : hudLayout.progressPosition;
-  const progressTrackWidth = isClassicStyle
-    ? `${Math.round(BASE_STAGE_SIZE[settings.aspectRatio].width * CLASSIC_HUD_SPEC.progress.widthRatio)}px`
-    : `${hudLayout.progressWidth}px`;
-  const progressTrackHeight = isClassicStyle
-    ? `${CLASSIC_HUD_SPEC.progress.height}px`
-    : `${hudLayout.progressHeight}px`;
-  const progressTrackRadius = isClassicStyle ? '999px' : `${hudLayout.progressRadius}px`;
+  const isTextFillProgress = styleModules.progress.variant === 'text_fill';
+  const progressTrackWidthPx = isClassicStyle
+    ? Math.round(BASE_STAGE_SIZE[settings.aspectRatio].width * CLASSIC_HUD_SPEC.progress.widthRatio)
+    : hudLayout.progressWidth;
+  const progressTrackHeightPx = isClassicStyle
+    ? CLASSIC_HUD_SPEC.progress.height
+    : hudLayout.progressHeight;
+  const progressTextWidthPx = progressTrackWidthPx;
+  const progressTextHeightPx = progressTrackHeightPx;
+  const progressTrackWidth = `${progressTrackWidthPx}px`;
+  const progressTrackHeight = `${progressTrackHeightPx}px`;
+  const progressTrackRadius = isClassicStyle
+    ? `${radiusTokenToPx(styleModules.progress.radiusToken, CLASSIC_HUD_SPEC.progress.height)}px`
+    : `${radiusTokenToPx(styleModules.progress.radiusToken, hudLayout.progressHeight)}px`;
   const progressTrackBorderWidth = isClassicStyle
     ? `${CLASSIC_HUD_SPEC.progress.borderWidth}px`
-    : '2px';
+    : `${Math.max(1, Math.round(2 * styleModules.progress.borderWidthScale))}px`;
   const progressTrackShadow = isClassicStyle
     ? 'inset 0 1px 0 rgba(255,255,255,0.24), 0 2px 4px rgba(0,0,0,0.32)'
+    : styleModules.progress.variant === 'glow'
+    ? `0 0 0 2px rgba(0,0,0,0.9), 0 0 16px ${visualTheme.timerDot}`
     : '2px 2px 0px 0px rgba(0,0,0,1)';
   const progressTrackBackground = isClassicStyle
-    ? CLASSIC_HUD_SPEC.progress.trackBackground
+    ? styleModules.progress.id === 'package'
+      ? CLASSIC_HUD_SPEC.progress.trackBackground
+      : visualTheme.progressTrackBg
     : visualTheme.progressTrackBg;
-  const classicCenterTitleFontSize = isVerticalLayout
-    ? CLASSIC_HUD_SPEC.centerTitle.fontSizeNarrow
-    : CLASSIC_HUD_SPEC.centerTitle.fontSize;
-  const classicBadgeValueFontSize = isVerticalLayout
-    ? CLASSIC_HUD_SPEC.puzzleBadge.valueSizeNarrow
-    : CLASSIC_HUD_SPEC.puzzleBadge.valueSize;
+  const textProgressFillColors = useMemo(
+    () => resolveTextProgressFillColors(countdownPercent, visualTheme),
+    [countdownPercent, visualTheme]
+  );
+  const textProgressFontSize = useMemo(
+    () =>
+      resolveTextProgressFontSize(
+        styledProgressLabel,
+        progressTextWidthPx,
+        progressTextHeightPx,
+        Math.max(
+          20,
+          progressTextHeightPx * 1.24,
+          progressTextWidthPx,
+          (isClassicStyle ? classicCenterTitleFontSize : hudLayout.titleFontSize) * 1.08
+        )
+      ),
+    [
+      classicCenterTitleFontSize,
+      hudLayout.titleFontSize,
+      isClassicStyle,
+      progressTextHeightPx,
+      progressTextWidthPx,
+      styledProgressLabel
+    ]
+  );
+  const textProgressStrokeWidth = Math.max(2, Math.round(textProgressFontSize * 0.08));
 
   const stageMetrics = useMemo(() => {
     const baseSize = BASE_STAGE_SIZE[settings.aspectRatio];
@@ -1401,6 +2583,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : 'highlight_soft';
   const circleStroke = Math.max(2, settings.circleThickness);
   const outlineStroke = Math.max(0, settings.outlineThickness);
+  const imagePanelOutlineThickness = Math.max(0, settings.imagePanelOutlineThickness ?? 0);
+  const usesImagePanelOutline = imagePanelOutlineThickness > 0;
+  const effectiveGamePadding = !isStorybookStyle && usesImagePanelOutline ? 0 : frameLayout.gamePadding;
+  const imagePanelOutlineShadow =
+    imagePanelOutlineThickness > 0
+      ? `inset 0 0 0 ${imagePanelOutlineThickness}px ${settings.imagePanelOutlineColor}`
+      : '';
+  const storybookPanelShadow = [
+    imagePanelOutlineShadow,
+    '4px 4px 0px 0px rgba(38,30,18,0.55)'
+  ]
+    .filter(Boolean)
+    .join(', ');
+  const standardPanelStyle = {
+    borderRadius: `${frameLayout.panelRadius}px`,
+    boxShadow: imagePanelOutlineShadow || undefined,
+    backgroundColor: visualTheme.imagePanelBg
+  } as const;
+  const storybookPanelStyle = {
+    backgroundColor: visualTheme.imagePanelBg,
+    boxShadow: storybookPanelShadow
+  } as const;
   const renderBlinkOverlay = () => {
     if (!isBlinkOverlayActive || !isBlinkOverlayVisible) return null;
 
@@ -1408,7 +2612,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       <img
         src={currentPuzzle.imageA}
         alt="Blink compare"
-        className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
+        className="absolute pointer-events-none select-none z-10"
+        style={{
+          left: `${imageBCoverFrame.x}px`,
+          top: `${imageBCoverFrame.y}px`,
+          width: `${imageBCoverFrame.width}px`,
+          height: `${imageBCoverFrame.height}px`
+        }}
       />
     );
   };
@@ -1913,47 +3123,243 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!shouldRenderCustomLogo || !renderedLogoSrc) return null;
     return (
       <div
-        className="absolute flex items-center justify-center shrink-0"
+        className="absolute flex items-center justify-center shrink-0 overflow-visible"
         style={{
           ...(hudLayout.logoPosition ?? {}),
           width: `${hudLayout.logoSize}px`,
           height: `${hudLayout.logoSize}px`
         }}
       >
-        <img
-          src={renderedLogoSrc}
-          alt="Logo"
-          className="w-full h-full object-contain"
-          style={{
-            transform: `scale(${logoZoom})`,
-            transformOrigin: 'center',
-            filter: 'drop-shadow(0 2px 3px rgba(0,0,0,0.35))'
-          }}
-        />
+        {renderLogoImage(hudLayout.logoSize)}
+      </div>
+    );
+  };
+  const renderStyledHeaderBlock = () => {
+    if (!shouldRenderHeaderText && !shouldRenderInlineLogo) {
+      return null;
+    }
+
+    const wrapperVariant = styleModules.header.variant;
+    const needsPanel = wrapperVariant === 'panel' || wrapperVariant === 'ribbon';
+    const wrapperStyle: React.CSSProperties = {
+      alignItems: hudLayout.titleAlignItems
+    };
+
+    if (needsPanel) {
+      wrapperStyle.padding = wrapperVariant === 'ribbon' ? '9px 14px 8px 18px' : '8px 14px';
+      wrapperStyle.border = '2px solid #000000';
+      wrapperStyle.borderRadius = '18px';
+      wrapperStyle.background = 'rgba(255,255,255,0.22)';
+      wrapperStyle.boxShadow = '2px 2px 0px 0px rgba(0,0,0,1)';
+      wrapperStyle.backdropFilter = 'blur(5px)';
+      wrapperStyle.position = 'relative';
+    }
+
+    const subtitleBadgeStyle: React.CSSProperties = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      marginTop: `${hudLayout.subtitleGap ?? 0}px`,
+      alignSelf:
+        hudLayout.titleAlignItems === 'center'
+          ? 'center'
+          : hudLayout.titleAlignItems === 'flex-end'
+          ? 'flex-end'
+          : 'flex-start',
+      padding: '4px 10px',
+      border: '2px solid #000000',
+      borderRadius: '999px',
+      backgroundColor: 'rgba(255,255,255,0.7)',
+      color: visualTheme.headerSubText,
+      fontSize: `${Math.max(10, hudLayout.subtitleFontSize - 1)}px`,
+      letterSpacing: `${hudLayout.subtitleLetterSpacingEm}em`
+    };
+
+    return (
+      <div
+        className="absolute flex items-center"
+        style={{ ...hudLayout.titlePosition, gap: `${hudLayout.titleGap}px`, zIndex: 20 }}
+      >
+        {shouldRenderInlineLogo && renderedLogoSrc && (
+          <div
+            className="relative flex items-center justify-center shrink-0 overflow-visible"
+            style={{ width: `${hudLayout.logoSize}px`, height: `${hudLayout.logoSize}px` }}
+          >
+            {renderLogoImage(hudLayout.logoSize)}
+          </div>
+        )}
+
+        {shouldRenderHeaderText && (
+          <div className="flex flex-col" style={wrapperStyle}>
+            {wrapperVariant === 'ribbon' && (
+              <div
+                className="absolute inset-y-2 left-0 w-[6px] rounded-full"
+                style={{ backgroundColor: visualTheme.timerDot }}
+              />
+            )}
+            <h2
+              className={`font-black leading-none ${hudLayout.titleFontClass}`}
+              style={{
+                color: visualTheme.headerText,
+                fontSize: `${hudLayout.titleFontSize}px`,
+                letterSpacing: `${styleModules.text.titleLetterSpacingEm}em`,
+                textTransform: styleModules.text.titleTransform === 'upper' ? 'uppercase' : undefined
+              }}
+            >
+              {styledHeaderTitle}
+            </h2>
+            {wrapperVariant === 'split' ? (
+              <span className={hudLayout.subtitleFontClass} style={subtitleBadgeStyle}>
+                {styledHeaderSubtitle}
+              </span>
+            ) : (
+              <span
+                className={`font-bold leading-none ${hudLayout.subtitleFontClass}`}
+                style={{
+                  color: visualTheme.headerSubText,
+                  fontSize: `${hudLayout.subtitleFontSize}px`,
+                  letterSpacing: `${hudLayout.subtitleLetterSpacingEm}em`,
+                  marginTop: `${hudLayout.subtitleGap ?? 0}px`,
+                  textTransform:
+                    styleModules.text.subtitleTransform === 'upper' ? 'uppercase' : undefined
+                }}
+              >
+                {styledHeaderSubtitle}
+              </span>
+            )}
+            {wrapperVariant === 'underline' && (
+              <div
+                className="mt-2 h-[4px] rounded-full"
+                style={{
+                  width: `${Math.max(42, Math.round(hudLayout.titleFontSize * 2.35))}px`,
+                  backgroundColor: visualTheme.timerDot,
+                  alignSelf:
+                    hudLayout.titleAlignItems === 'center'
+                      ? 'center'
+                      : hudLayout.titleAlignItems === 'flex-end'
+                      ? 'flex-end'
+                      : 'flex-start'
+                }}
+              />
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+  const renderTextProgressDisplay = () => {
+    if (!shouldShowHeaderProgress || !isTextFillProgress) {
+      return null;
+    }
+
+    const gradientId = `${textProgressId}-gradient`;
+    const clipId = `${textProgressId}-clip`;
+    const width = progressTextWidthPx;
+    const height = progressTextHeightPx;
+    const fontSize = textProgressFontSize;
+    const strokeWidth = textProgressStrokeWidth;
+    const textY = Math.round(height * 0.68);
+    const shellFill = TEXT_PROGRESS_EMPTY_FILL;
+    const shellStroke = '#111827';
+    const textSpan = measureTextProgressSpan(
+      styledProgressLabel,
+      width,
+      fontSize,
+      styleModules.text.titleCanvasFamily,
+      styleModules.text.titleCanvasWeight
+    );
+    const fillX = Math.max(0, Math.min(width, textSpan.left));
+    const fillWidth = Math.max(0, Math.min(textSpan.width, (textSpan.width * countdownPercent) / 100));
+
+    return (
+      <div
+        className="absolute pointer-events-none z-10"
+        style={{ ...progressTrackPosition, width: `${width}px`, height: `${height}px`, overflow: 'visible' }}
+      >
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          className="block h-full w-full overflow-visible"
+          preserveAspectRatio="none"
+        >
+          <defs>
+            <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor={textProgressFillColors.start} />
+              <stop offset="58%" stopColor={textProgressFillColors.middle} />
+              <stop offset="100%" stopColor={textProgressFillColors.end} />
+            </linearGradient>
+            <clipPath id={clipId}>
+              <text
+                x={width / 2}
+                y={textY}
+                textAnchor="middle"
+                fontFamily={styleModules.text.titleCanvasFamily}
+                fontWeight={styleModules.text.titleCanvasWeight}
+                fontSize={fontSize}
+              >
+                {styledProgressLabel}
+              </text>
+            </clipPath>
+          </defs>
+          <text
+            x={width / 2}
+            y={textY}
+            textAnchor="middle"
+            fontFamily={styleModules.text.titleCanvasFamily}
+            fontWeight={styleModules.text.titleCanvasWeight}
+            fontSize={fontSize}
+            fill={shellFill}
+            stroke={shellStroke}
+            strokeWidth={strokeWidth}
+            paintOrder="stroke fill"
+          >
+            {styledProgressLabel}
+          </text>
+          <g clipPath={`url(#${clipId})`}>
+            <rect x={fillX} y="0" width={fillWidth} height={height} fill={`url(#${gradientId})`} />
+          </g>
+        </svg>
       </div>
     );
   };
   const renderSceneCard = (kind: 'intro' | 'transition' | 'outro') => {
     const variant =
       kind === 'intro'
-        ? packagePreset.introCardVariant
+        ? styleModules.sceneCards.intro
         : kind === 'outro'
-        ? packagePreset.outroCardVariant
-        : packagePreset.transitionCardVariant;
-    const eyebrow = kind === 'intro' ? introEyebrow : kind === 'outro' ? completionEyebrow : transitionEyebrow;
-    const title = kind === 'intro' ? introTitle : kind === 'outro' ? completionTitle : transitionTitle;
+        ? styleModules.sceneCards.outro
+        : styleModules.sceneCards.transition;
+    const eyebrow = applyTextTransform(
+      kind === 'intro' ? introEyebrow : kind === 'outro' ? completionEyebrow : transitionEyebrow,
+      styleModules.text.subtitleTransform
+    );
+    const title = applyTextTransform(
+      kind === 'intro' ? introTitle : kind === 'outro' ? completionTitle : transitionTitle,
+      styleModules.text.titleTransform
+    );
     const subtitle =
-      kind === 'intro'
-        ? introSubtitle
-        : kind === 'outro'
-        ? completionSubtitle
-        : transitionSubtitle;
+      applyTextTransform(
+        kind === 'intro'
+          ? introSubtitle
+          : kind === 'outro'
+          ? completionSubtitle
+          : transitionSubtitle,
+        styleModules.text.subtitleTransform
+      );
     const Icon = kind === 'intro' ? Play : kind === 'outro' ? CheckCircle : SkipForward;
     const overlayStyle =
       variant === 'storybook'
         ? {
             background: `linear-gradient(180deg, rgba(52,35,14,${kind === 'transition' ? (0.24 + transitionSmooth * 0.44).toFixed(3) : '0.48'}) 0%, rgba(19,11,4,0.74) 100%)`,
             backdropFilter: `blur(${kind === 'transition' ? (1.4 + transitionSmooth * 2.2).toFixed(2) : '4.2'}px)`
+          }
+        : variant === 'spotlight'
+        ? {
+            background: `radial-gradient(circle at center, rgba(15,23,42,${kind === 'transition' ? (0.18 + transitionSmooth * 0.2).toFixed(3) : '0.12'}) 0%, rgba(2,6,23,0.88) 72%, rgba(1,4,14,0.96) 100%)`,
+            backdropFilter: `blur(${kind === 'transition' ? (1.6 + transitionSmooth * 2.6).toFixed(2) : '4.4'}px)`
+          }
+        : variant === 'celebration'
+        ? {
+            background: `radial-gradient(circle at top, rgba(255,255,255,${kind === 'transition' ? (0.22 + transitionSmooth * 0.12).toFixed(3) : '0.26'}) 0%, rgba(17,24,39,0.2) 100%)`,
+            backdropFilter: `blur(${kind === 'transition' ? (1 + transitionSmooth * 2).toFixed(2) : '3.4'}px)`
           }
         : variant === 'scoreboard'
         ? {
@@ -1972,6 +3378,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             color: '#2E2414',
             boxShadow: `0 0 0 1px rgba(255,236,188,0.45), 0 24px 72px rgba(57,39,14,0.42), 0 0 36px rgba(229,191,115,${
               kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.22'
+            })`
+          }
+        : variant === 'spotlight'
+        ? {
+            borderColor: visualTheme.timerDot,
+            background: 'linear-gradient(180deg, rgba(15,23,42,0.96) 0%, rgba(2,6,23,0.98) 100%)',
+            color: '#F8FAFC',
+            boxShadow: `0 0 0 1px rgba(255,255,255,0.12), 0 26px 80px rgba(0,0,0,0.56), 0 0 36px rgba(255,255,255,${
+              kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.12'
+            })`
+          }
+        : variant === 'celebration'
+        ? {
+            borderColor: '#111827',
+            background: `linear-gradient(180deg, ${visualTheme.headerBg} 0%, ${visualTheme.completionBg} 100%)`,
+            color: '#111827',
+            boxShadow: `0 24px 72px rgba(15,23,42,0.22), 0 0 0 1px rgba(17,24,39,0.08), 0 0 32px rgba(255,255,255,${
+              kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.18'
             })`
           }
         : variant === 'scoreboard'
@@ -1995,6 +3419,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             backgroundColor: hexToRgba(visualTheme.headerBg, 0.16),
             color: visualTheme.headerBg,
             borderColor: hexToRgba(visualTheme.headerBg, 0.7)
+          }
+        : variant === 'spotlight'
+        ? {
+            backgroundColor: 'rgba(255,255,255,0.08)',
+            color: '#F8FAFC',
+            borderColor: 'rgba(255,255,255,0.18)'
+          }
+        : variant === 'celebration'
+        ? {
+            backgroundColor: 'rgba(255,255,255,0.62)',
+            color: '#111827',
+            borderColor: 'rgba(17,24,39,0.18)'
           }
         : variant === 'storybook'
         ? {
@@ -2047,14 +3483,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span>{eyebrow}</span>
             </div>
             <p
-              className={`text-4xl ${isVerticalLayout ? 'sm:text-5xl' : 'sm:text-6xl'} font-black uppercase leading-none`}
-              style={{ letterSpacing: variant === 'storybook' ? '0.04em' : '0.06em' }}
+              className={`text-4xl ${isVerticalLayout ? 'sm:text-5xl' : 'sm:text-6xl'} font-black leading-none ${styleModules.text.titleFontClass}`}
+              style={{
+                letterSpacing:
+                  variant === 'storybook'
+                    ? `${Math.max(0, styleModules.text.titleLetterSpacingEm)}em`
+                    : `${Math.max(0.02, styleModules.text.titleLetterSpacingEm)}em`
+              }}
             >
               {title}
             </p>
             <p
-              className="mt-3 text-sm sm:text-base font-bold uppercase tracking-[0.18em] opacity-80"
-              style={{ color: variant === 'scoreboard' ? '#CBD5E1' : undefined }}
+              className={`mt-3 text-sm sm:text-base font-bold tracking-[0.18em] opacity-80 ${styleModules.text.subtitleFontClass}`}
+              style={{
+                color: variant === 'scoreboard' || variant === 'spotlight' ? '#CBD5E1' : undefined,
+                letterSpacing: `${styleModules.text.subtitleLetterSpacingEm}em`
+              }}
             >
               {subtitle}
             </p>
@@ -2067,19 +3511,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     );
   };
   const completionCardStyle =
-    packagePreset.outroCardVariant === 'storybook'
+    styleModules.sceneCards.outro === 'storybook'
       ? {
           backgroundColor: '#F3E6C4',
           borderColor: '#4D3E26',
           textColor: '#2E2414',
           shadow: '16px 16px 0px 0px rgba(77,62,38,0.92)'
         }
-      : packagePreset.outroCardVariant === 'scoreboard'
+      : styleModules.sceneCards.outro === 'scoreboard'
       ? {
           backgroundColor: '#09111F',
           borderColor: visualTheme.headerBg,
           textColor: '#F8FAFC',
           shadow: '16px 16px 0px 0px rgba(34,211,238,0.24)'
+        }
+      : styleModules.sceneCards.outro === 'spotlight'
+      ? {
+          backgroundColor: '#08111F',
+          borderColor: visualTheme.timerDot,
+          textColor: '#F8FAFC',
+          shadow: '16px 16px 0px 0px rgba(255,255,255,0.12)'
+        }
+      : styleModules.sceneCards.outro === 'celebration'
+      ? {
+          backgroundColor: visualTheme.completionBg,
+          borderColor: '#111827',
+          textColor: '#111827',
+          shadow: '16px 16px 0px 0px rgba(15,23,42,0.2)'
         }
       : {
           backgroundColor: '#FFFFFF',
@@ -2156,7 +3614,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {playbackControlsVisible && (
         <div className={controlsContainerClass}>
           <button 
-            onClick={() => setIsPlaying(!isPlaying)} 
+            onClick={handleTogglePlayback} 
             className={controlButtonClass}
             style={{ '--hover-bg': visualTheme.playHoverBg } as React.CSSProperties}
           >
@@ -2186,18 +3644,54 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       >
         <div
           ref={containerRef}
-          className="absolute top-0 left-0 bg-white border-4 border-black rounded-none overflow-hidden flex flex-col"
+          className={`absolute top-0 left-0 rounded-none overflow-hidden flex flex-col ${
+            showIntroClip ? 'bg-black border-0' : 'bg-white border-4 border-black'
+          }`}
           style={{
             width: `${stageMetrics.baseWidth}px`,
             height: `${stageMetrics.baseHeight}px`,
             transform: `scale(${stageMetrics.scale})`,
             transformOrigin: 'top left',
-            backgroundColor: isStorybookStyle ? '#E5D19A' : visualTheme.gameBg,
-            borderColor: isStorybookStyle ? '#3F301A' : '#000000',
+            backgroundColor: showIntroClip ? '#000000' : isStorybookStyle ? '#E5D19A' : visualTheme.gameBg,
+            borderColor: showIntroClip ? 'transparent' : isStorybookStyle ? '#3F301A' : '#000000',
             boxShadow: 'none'
           }}
         >
-        
+        {phase === 'intro' && introVideoUrl && (
+          <video
+            ref={introVideoRef}
+            key={introVideoUrl}
+            src={introVideoUrl}
+            muted={!introClipAudioEnabled}
+            playsInline
+            preload="auto"
+            className={`absolute inset-0 h-full w-full object-cover pointer-events-none z-0 ${
+              introVideoReady ? 'opacity-100' : 'opacity-0'
+            }`}
+            onLoadedData={() => {
+              setIntroVideoReady(true);
+              setIntroVideoError(false);
+              const video = introVideoRef.current;
+              if (video) {
+                try {
+                  video.currentTime = 0;
+                } catch {
+                  // Ignore seek issues until metadata is ready.
+                }
+              }
+            }}
+            onCanPlay={() => {
+              setIntroVideoReady(true);
+              setIntroVideoError(false);
+            }}
+            onError={() => {
+              setIntroVideoReady(false);
+              setIntroVideoError(true);
+            }}
+          />
+        )}
+        {!showIntroClip && (
+        <>
         {/* HUD Header */}
         {isStorybookStyle ? (
           <div
@@ -2211,7 +3705,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             }}
           >
             {shouldRenderHeaderText && (
-              <div className="absolute left-4 top-1/2 -translate-y-1/2">
+              <div className="absolute left-4 top-1/2 z-20 -translate-y-1/2">
                 <h2
                   className="leading-none lowercase"
                   style={{
@@ -2231,7 +3725,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             {renderHeaderLogo()}
 
             {shouldShowHeaderProgress && (
-              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[33%]">
+              <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 w-[33%]">
                 <div
                   className="relative h-[26px] rounded-[14px] border-[3px]"
                   style={{
@@ -2307,20 +3801,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   }}
                 >
                   <span
-                    className="font-black uppercase leading-none"
+                    className="font-black leading-none"
                     style={{
                       color: '#111827',
                       fontSize: `${CLASSIC_HUD_SPEC.puzzleBadge.labelSize}px`,
-                      letterSpacing: '0.22em'
+                      letterSpacing: `${Math.max(0.18, styleModules.text.subtitleLetterSpacingEm)}em`,
+                      fontFamily: styleModules.text.subtitleCanvasFamily,
+                      textTransform:
+                        styleModules.text.subtitleTransform === 'upper' ? 'uppercase' : undefined
                     }}
                   >
-                    {puzzleBadgeLabel}
+                    {applyTextTransform(puzzleBadgeLabel, styleModules.text.subtitleTransform)}
                   </span>
                   <span
                     className="font-black leading-none"
                     style={{
                       color: '#020617',
-                      fontFamily: '"Arial Black", "Segoe UI", sans-serif',
+                      fontFamily: styleModules.text.titleCanvasFamily,
                       fontSize: `${classicBadgeValueFontSize}px`,
                       textShadow: '0 1px 0 rgba(255,255,255,0.35)'
                     }}
@@ -2330,129 +3827,82 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 </div>
 
                 {shouldRenderHeaderText && (
-                  <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+                  <div className="absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
                     <h2
-                      className="font-black uppercase leading-none"
+                      className="font-black leading-none"
                       style={{
-                        fontFamily: '"Arial Black", "Segoe UI", sans-serif',
+                        fontFamily: styleModules.text.titleCanvasFamily,
                         fontSize: `${classicCenterTitleFontSize}px`,
-                        letterSpacing: `${CLASSIC_HUD_SPEC.centerTitle.letterSpacingEm}em`,
+                        letterSpacing: `${Math.max(
+                          CLASSIC_HUD_SPEC.centerTitle.letterSpacingEm,
+                          styleModules.text.titleLetterSpacingEm
+                        )}em`,
                         background: CLASSIC_HUD_SPEC.centerTitle.fillGradient,
                         WebkitBackgroundClip: 'text',
                         WebkitTextFillColor: 'transparent',
                         WebkitTextStroke: `1px ${CLASSIC_HUD_SPEC.centerTitle.strokeColor}`,
                         filter: CLASSIC_HUD_SPEC.centerTitle.glowCss,
-                        whiteSpace: 'nowrap'
+                        whiteSpace: 'nowrap',
+                        textTransform:
+                          styleModules.text.titleTransform === 'upper' ? 'uppercase' : undefined
                       }}
                     >
-                      {headerTitle}
+                      {applyTextTransform(headerTitle, styleModules.text.titleTransform)}
                     </h2>
                   </div>
                 )}
               </>
             ) : shouldRenderHeaderText || shouldRenderInlineLogo ? (
-              <div
-                className="absolute flex items-center"
-                style={{ ...hudLayout.titlePosition, gap: `${hudLayout.titleGap}px` }}
-              >
-                {shouldRenderInlineLogo && renderedLogoSrc && (
-                  <div
-                    className="flex items-center justify-center shrink-0"
-                    style={{ width: `${hudLayout.logoSize}px`, height: `${hudLayout.logoSize}px` }}
-                  >
-                    <img
-                      src={renderedLogoSrc}
-                      alt="Logo"
-                      className="w-full h-full object-contain"
-                      style={{
-                        transform: `scale(${logoZoom})`,
-                        transformOrigin: 'center',
-                        filter: 'drop-shadow(0 2px 3px rgba(0,0,0,0.35))'
-                      }}
-                    />
-                  </div>
-                )}
-
-                {shouldRenderHeaderText && (
-                  <div className="flex flex-col" style={{ alignItems: hudLayout.titleAlignItems }}>
-                    <h2
-                      className={`font-black uppercase leading-none tracking-tight ${hudLayout.titleFontClass}`}
-                      style={{ color: visualTheme.headerText, fontSize: `${hudLayout.titleFontSize}px` }}
-                    >
-                      {headerTitle}
-                    </h2>
-                    <span
-                      className={`font-bold uppercase opacity-80 leading-none ${hudLayout.subtitleFontClass}`}
-                      style={{
-                        color: visualTheme.headerSubText,
-                        fontSize: `${hudLayout.subtitleFontSize}px`,
-                        letterSpacing: `${hudLayout.subtitleLetterSpacingEm}em`,
-                        marginTop: `${hudLayout.subtitleGap ?? 0}px`
-                      }}
-                    >
-                      {headerSubtitle}
-                    </span>
-                  </div>
-                )}
-              </div>
+              renderStyledHeaderBlock()
             ) : null}
 
             {shouldShowHeaderTimer && (
               <div className="absolute" style={hudLayout.timerPosition}>
-                <div
-                  className={`flex items-center border-2 ${packagePreset.chrome.timerShapeClass}`}
-                  style={{
-                    gap: `${hudLayout.timerGap}px`,
-                    padding: `${hudLayout.timerPadY}px ${hudLayout.timerPadX}px`,
-                    minWidth: `${hudLayout.timerMinWidth}px`,
-                    justifyContent: hudLayout.timerJustify,
-                    backgroundColor: visualTheme.timerBg,
-                    borderColor: visualTheme.timerBorder
-                  }}
-                >
-                  <div
-                    className={`rounded-full ${timeLeft <= 2 ? 'animate-pulse' : ''}`}
-                    style={{
-                      width: `${hudLayout.timerDotSize}px`,
-                      height: `${hudLayout.timerDotSize}px`,
-                      backgroundColor: timeLeft <= 2 ? '#FF6B6B' : visualTheme.timerDot
-                    }}
-                  />
-                  <span
-                    className={`${packagePreset.chrome.timerTextClass} leading-none`}
-                    style={{
-                      color: timeLeft <= 2 ? '#FF6B6B' : visualTheme.timerText,
-                      fontSize: `${hudLayout.timerFontSize}px`
-                    }}
-                  >
-                    {formatTime(timeLeft)}s
-                  </span>
-                </div>
+                <VideoTimerDisplay
+                  style={styleModules.timer}
+                  visualTheme={visualTheme}
+                  valueText={`${formatTime(timeLeft)}s`}
+                  fontSize={hudLayout.timerFontSize}
+                  padX={hudLayout.timerPadX}
+                  padY={hudLayout.timerPadY}
+                  dotSize={hudLayout.timerDotSize}
+                  gap={hudLayout.timerGap}
+                  minWidth={hudLayout.timerMinWidth}
+                  justifyContent={hudLayout.timerJustify}
+                  isAlert={timeLeft <= 2}
+                  durationSeconds={phaseDuration}
+                  remainingSeconds={timeLeft}
+                  progress={countdownPercent / 100}
+                />
               </div>
             )}
 
             {shouldShowHeaderProgress && (
-              <>
-                <div className="absolute" style={progressTrackPosition}>
-                  <div
-                    className={`overflow-hidden ${packagePreset.chrome.progressTrackClass} ${
-                      hudLayout.progressOrientation === 'vertical' ? 'flex items-end' : ''
-                    }`}
-                    style={{
-                      width: progressTrackWidth,
-                      height: progressTrackHeight,
-                      borderRadius: progressTrackRadius,
-                      background: progressTrackBackground,
-                      borderColor: visualTheme.progressTrackBorder,
-                      borderStyle: 'solid',
-                      borderWidth: progressTrackBorderWidth,
-                      boxShadow: progressTrackShadow
-                    }}
-                  >
-                    <motion.div className={packagePreset.chrome.progressFillClass} style={progressFillStyle} />
+              isTextFillProgress ? (
+                renderTextProgressDisplay()
+              ) : (
+                <>
+                  <div className="absolute z-10" style={progressTrackPosition}>
+                    <div
+                      className={`overflow-hidden ${styleModules.progress.trackClass} ${
+                        hudLayout.progressOrientation === 'vertical' ? 'flex items-end' : ''
+                      }`}
+                      style={{
+                        width: progressTrackWidth,
+                        height: progressTrackHeight,
+                        borderRadius: progressTrackRadius,
+                        background: progressTrackBackground,
+                        borderColor: visualTheme.progressTrackBorder,
+                        borderStyle: 'solid',
+                        borderWidth: progressTrackBorderWidth,
+                        boxShadow: progressTrackShadow
+                      }}
+                    >
+                      <motion.div className={styleModules.progress.variant === 'glow' ? 'animate-pulse' : ''} style={progressFillStyle} />
+                    </div>
                   </div>
-                </div>
-              </>
+                </>
+              )
             )}
           </div>
         )}
@@ -2467,7 +3917,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         >
           {currentGeneratedBackground && (
             <div className="absolute inset-0">
-              <GeneratedBackgroundCanvas spec={currentGeneratedBackground} className="h-full w-full" />
+              <GeneratedBackgroundCanvas
+                spec={currentGeneratedBackground}
+                className="h-full w-full"
+                timeSeconds={generatedBackgroundPlaybackTime}
+              />
             </div>
           )}
 
@@ -2495,9 +3949,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 animate={{
                   x: 0,
                   y: 0,
-                  opacity: 1,
-                  scale: phase === 'transitioning' ? 0.992 : 1,
-                  rotate: 0
+                  opacity:
+                    phase === 'transitioning'
+                      ? Math.max(styleModules.transition.activeOpacityFloor, 1 - transitionProgress * 0.16)
+                      : 1,
+                  scale: phase === 'transitioning' ? styleModules.transition.activeScale : 1,
+                  rotate:
+                    phase === 'transitioning' && styleModules.transition.id === 'pop'
+                      ? 0.8
+                      : 0
                 }}
                 exit={puzzleMotionExit}
                 transition={{ duration: puzzleTransitionDuration, ease: [0.22, 1, 0.36, 1] }}
@@ -2509,8 +3969,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       <div className="absolute inset-y-3 left-1/2 -translate-x-1/2 w-[3px] bg-[#5A4A2B]/50 pointer-events-none" />
                       <div className="relative grid h-full grid-cols-[minmax(0,1fr)_28px_minmax(0,1fr)] gap-2">
                         <div
-                          className="relative border-[4px] border-[#CEC3A5] rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(38,30,18,0.55)] h-full"
-                          style={{ backgroundColor: visualTheme.imagePanelBg }}
+                          className="relative rounded-xl overflow-hidden h-full"
+                          style={storybookPanelStyle}
                         >
                           <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#F3E6C4] text-[#3B2E1A] text-[10px] font-black uppercase tracking-wide">
                             Original
@@ -2529,8 +3989,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         </div>
 
                         <div
-                          className="relative border-[4px] border-[#CEC3A5] rounded-xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(38,30,18,0.55)] h-full"
-                          style={{ backgroundColor: visualTheme.imagePanelBg }}
+                          className="relative rounded-xl overflow-hidden h-full"
+                          style={storybookPanelStyle}
                         >
                           <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#D37872] text-[#23180D] text-[10px] font-black uppercase tracking-wide">
                             Modified
@@ -2550,7 +4010,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                             />
                             {renderBlinkOverlay()}
                             <div
-                              className="absolute pointer-events-none"
+                              className="absolute pointer-events-none z-20"
                               style={{
                                 left: `${imageBCoverFrame.x}px`,
                                 top: `${imageBCoverFrame.y}px`,
@@ -2570,13 +4030,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     className={`relative w-full h-full flex gap-2 items-center justify-center ${
                       isVerticalLayout ? 'flex-col' : 'flex-row'
                     }`}
-                    style={{ padding: `${frameLayout.gamePadding}px`, gap: `${frameLayout.panelGap}px` }}
+                    style={{ padding: `${effectiveGamePadding}px`, gap: `${frameLayout.panelGap}px` }}
                   >
                     <div
                       className="relative flex-1 overflow-hidden w-full h-full"
-                      style={{
-                        borderRadius: `${frameLayout.panelRadius}px`
-                      }}
+                      style={standardPanelStyle}
                     >
                       <img
                         src={currentPuzzle.imageA}
@@ -2587,9 +4045,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
                     <div
                       className="relative flex-1 overflow-hidden w-full h-full"
-                      style={{
-                        borderRadius: `${frameLayout.panelRadius}px`
-                      }}
+                      style={standardPanelStyle}
                     >
                       <div ref={interactiveViewportRef} className="relative w-full h-full">
                         <img
@@ -2606,7 +4062,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         />
                         {renderBlinkOverlay()}
                         <div
-                          className="absolute pointer-events-none"
+                          className="absolute pointer-events-none z-20"
                           style={{
                             left: `${imageBCoverFrame.x}px`,
                             top: `${imageBCoverFrame.y}px`,
@@ -2624,11 +4080,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             )}
           </AnimatePresence>
 
-          {phase === 'intro' && renderSceneCard('intro')}
+          {phase === 'intro' && !showIntroClip && renderSceneCard('intro')}
+          {phase === 'intro' && !showIntroClip && introClipActive && (
+            <div className="absolute top-4 right-4 z-40 rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase">
+              {introVideoError ? 'Intro Clip Failed' : 'Intro Clip Loading'}
+            </div>
+          )}
           {phase === 'transitioning' && renderSceneCard('transition')}
           {phase === 'outro' && renderSceneCard('outro')}
 
         </div>
+        </>
+        )}
         </div>
       </div>
 

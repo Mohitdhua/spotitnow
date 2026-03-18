@@ -1,9 +1,10 @@
 import JSZip from 'jszip';
 import { Puzzle, Region, VideoSettings } from '../types';
-import { canvasToDataUrl } from './canvasRuntime';
+import { canvasToDataUrl, readRuntimeBlobImageDimensions } from './canvasRuntime';
 import {
   SplitterDefaults,
   type SplitterSharedRegion,
+  type SuperExportThumbnailExportMode,
   type SuperImageExportMode
 } from './appSettings';
 import {
@@ -32,12 +33,22 @@ import type {
   SuperImageExportWorkerResponse
 } from './superImageExportProtocol';
 import { runBatchExportTasks } from './batchExportScheduler';
-import { cancelVideoExport, renderVideoWithWebCodecs, streamVideoToWritableWithWebCodecs } from './videoExport';
+import {
+  cancelVideoExport,
+  renderVideoFramePreview,
+  renderVideoWithWebCodecs,
+  streamVideoToWritableWithWebCodecs
+} from './videoExport';
 import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
 import { acquireSuperImageProcessingPool, disposeSuperImageProcessingPool, releaseSuperImageProcessingPool } from './superImageProcessingPool';
 import type { BinaryRenderablePuzzle } from './videoRenderSource';
+import {
+  applySuperExportThumbnailStylePreset,
+  type SuperExportThumbnailStylePresetId
+} from '../constants/superExportThumbnailStyles';
 
 export type SuperProcessingStage = 'extracting' | 'processing' | 'cleaning' | 'packaging' | 'exporting';
+export type SuperExportOutputMode = 'videos_only' | 'videos_and_thumbnails' | 'thumbnails_only';
 
 export interface SuperExportProgress {
   stage: SuperProcessingStage;
@@ -55,9 +66,12 @@ interface SuperBaseResult {
 }
 
 export interface SuperExportResult extends SuperBaseResult {
+  exportMode: SuperExportOutputMode;
   exportedVideoCount: number;
+  exportedThumbnailCount: number;
   batchSizes: number[];
   imagesPerVideo: number;
+  thumbnailEnabled: boolean;
   watermarkRemovalEnabled: boolean;
   watermarkPairsCleaned: number;
   watermarkPresetName: string | null;
@@ -95,6 +109,7 @@ interface RunFrameSuperExportOptions {
   imagesPerVideo: number;
   sharedRegion?: SplitterSharedRegion | null;
   watermarkRemoval?: SuperWatermarkOptions;
+  thumbnail?: SuperExportThumbnailOptions;
   onProgress?: (progress: SuperExportProgress) => void;
 }
 
@@ -109,6 +124,30 @@ interface RunFrameSuperImageExportOptions {
   sharedRegion?: SplitterSharedRegion | null;
   watermarkRemoval?: SuperWatermarkOptions;
   onProgress?: (progress: SuperExportProgress) => void;
+}
+
+interface RenderSuperExportThumbnailPreviewOptions {
+  video: File;
+  timestamp: ParsedTimestamp;
+  format: 'jpeg' | 'png';
+  jpegQuality: number;
+  videoSettings: VideoSettings;
+  sharedRegion?: SplitterSharedRegion | null;
+  thumbnail: SuperExportThumbnailOptions;
+  watermarkRemoval?: SuperWatermarkOptions;
+  signal?: AbortSignal;
+}
+
+export interface SuperExportThumbnailOptions {
+  enabled: boolean;
+  exportMode: SuperExportThumbnailExportMode;
+  stylePreset: SuperExportThumbnailStylePresetId;
+  title: string;
+  subtitle: string;
+  badgeLabel: string;
+  textScale: number;
+  textOffsetX: number;
+  textOffsetY: number;
 }
 
 interface CollectedExactPuzzleResult<TPuzzle> {
@@ -347,6 +386,68 @@ const buildBatchVideoFilename = (
   )}`;
 };
 
+const buildBatchThumbnailFilename = (videoFilename: string) => {
+  const extensionIndex = videoFilename.lastIndexOf('.');
+  const baseName = extensionIndex > 0 ? videoFilename.slice(0, extensionIndex) : videoFilename;
+  return `${baseName}-thumbnail.png`;
+};
+
+const buildSuperExportThumbnailSettings = (
+  settings: VideoSettings,
+  thumbnail: SuperExportThumbnailOptions
+): VideoSettings => {
+  const styledSettings = applySuperExportThumbnailStylePreset(settings, thumbnail.stylePreset);
+  return {
+    ...styledSettings,
+    introVideoEnabled: false,
+    introVideoSrc: '',
+    introVideoDuration: 0,
+    showTimer: false,
+    showProgress: false,
+    sceneSettings: {
+      ...styledSettings.sceneSettings,
+      introEnabled: false,
+      outroEnabled: false
+    },
+    textTemplates: {
+      ...styledSettings.textTemplates,
+      playTitle: thumbnail.title,
+      playSubtitle: thumbnail.subtitle,
+      puzzleBadgeLabel: thumbnail.badgeLabel
+    },
+    headerTextOverrides: {
+      scale: thumbnail.textScale,
+      offsetX: thumbnail.textOffsetX,
+      offsetY: thumbnail.textOffsetY
+    }
+  };
+};
+
+const shouldExportSuperThumbnails = (thumbnail?: SuperExportThumbnailOptions | null) =>
+  Boolean(thumbnail?.enabled);
+
+const shouldExportSuperVideos = (thumbnail?: SuperExportThumbnailOptions | null) =>
+  !thumbnail?.enabled || thumbnail.exportMode === 'with_video';
+
+const shouldSerializeSuperVideoBatches = (settings: VideoSettings, thumbnail?: SuperExportThumbnailOptions | null) =>
+  shouldExportSuperVideos(thumbnail) && settings.introVideoEnabled && Boolean(settings.introVideoSrc);
+
+const resolveSuperExportOutputMode = (
+  thumbnail?: SuperExportThumbnailOptions | null
+): SuperExportOutputMode => {
+  const exportVideos = shouldExportSuperVideos(thumbnail);
+  const exportThumbnails = shouldExportSuperThumbnails(thumbnail);
+  if (exportVideos && exportThumbnails) return 'videos_and_thumbnails';
+  if (exportThumbnails) return 'thumbnails_only';
+  return 'videos_only';
+};
+
+const throwIfAborted = (signal?: AbortSignal) => {
+  if (signal?.aborted) {
+    throw new DOMException('Preview canceled', 'AbortError');
+  }
+};
+
 const buildSuperImageZipFilename = (splitterDefaults: SplitterDefaults, puzzleCount: number) => {
   const prefix = sanitizePrefix(splitterDefaults.filenamePrefix);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -354,25 +455,11 @@ const buildSuperImageZipFilename = (splitterDefaults: SplitterDefaults, puzzleCo
 };
 
 const readBlobImageSize = async (blob: Blob): Promise<{ width: number; height: number }> => {
-  if (typeof createImageBitmap === 'function') {
-    const bitmap = await createImageBitmap(blob);
-    try {
-      return {
-        width: bitmap.width,
-        height: bitmap.height
-      };
-    } finally {
-      if (typeof bitmap.close === 'function') {
-        bitmap.close();
-      }
-    }
-  }
-
-  const objectUrl = URL.createObjectURL(blob);
   try {
-    return await readImageSize(objectUrl);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
+    return await readRuntimeBlobImageDimensions(blob);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown image decoding error.';
+    throw new Error(`Failed to decode the extracted frame image. ${message}`);
   }
 };
 
@@ -849,9 +936,13 @@ const runFrameSuperExportOnMainThread = async ({
   imagesPerVideo,
   sharedRegion,
   watermarkRemoval,
+  thumbnail,
   onProgress
 }: RunFrameSuperExportOptions): Promise<SuperExportResult> => {
-  const targetDirectory = canUseSuperVideoDirectoryExport()
+  const exportMode = resolveSuperExportOutputMode(thumbnail);
+  const exportVideos = shouldExportSuperVideos(thumbnail);
+  const exportThumbnails = shouldExportSuperThumbnails(thumbnail);
+  const targetDirectory = (exportVideos ? canUseSuperVideoDirectoryExport() : supportsDirectoryExport())
     ? await requestSuperExportOutputDirectory(splitterDefaults)
     : null;
   const processed = await collectExactThreeDifferencePuzzles({
@@ -863,8 +954,10 @@ const runFrameSuperExportOnMainThread = async ({
     onProgress
   });
   const watermarkEnabled = Boolean(watermarkRemoval?.enabled);
+  const thumbnailEnabled = exportThumbnails;
   const watermarkPresetName = watermarkRemoval?.selectionPreset?.name ?? null;
   let watermarkPairsCleaned = 0;
+  let exportedThumbnailCount = 0;
   let cleanedPuzzles = processed.validPuzzles;
   try {
     if (watermarkEnabled && processed.validPuzzles.length > 0) {
@@ -910,6 +1003,9 @@ const runFrameSuperExportOnMainThread = async ({
 
     const randomizedPuzzles = shuffleArray(cleanedPuzzles);
     const batches = chunkArray(randomizedPuzzles, Math.max(1, imagesPerVideo));
+    const thumbnailSettings = exportThumbnails && thumbnail
+      ? buildSuperExportThumbnailSettings(videoSettings, thumbnail)
+      : null;
 
     for (let index = 0; index < batches.length; index += 1) {
       const canvasBatch = batches[index];
@@ -926,8 +1022,36 @@ const runFrameSuperExportOnMainThread = async ({
       const compatibilityBatch = await Promise.all(
         canvasBatch.map((puzzle) => convertCanvasPuzzleToCompatibilityPuzzle(puzzle))
       );
+      const thumbnailFileName = buildBatchThumbnailFilename(outputFileName);
 
-      if (targetDirectory) {
+      if (exportThumbnails && thumbnailSettings) {
+        onProgress?.({
+          stage: 'exporting',
+          progress: mapProgress(exportVideos ? 0.12 : 0.9, batchStart, batchEnd),
+          label: `Rendering thumbnail ${index + 1}/${batches.length}`
+        });
+        const renderedThumbnail = await renderVideoFramePreview({
+          puzzles: compatibilityBatch,
+          settings: thumbnailSettings,
+          timestamp: 0
+        });
+        if (targetDirectory) {
+          await writeBlobToDirectory(targetDirectory, thumbnailFileName, renderedThumbnail.blob);
+        } else {
+          triggerBlobDownload(renderedThumbnail.blob, thumbnailFileName);
+          await delay(80);
+        }
+        exportedThumbnailCount += 1;
+        if (!exportVideos) {
+          onProgress?.({
+            stage: 'exporting',
+            progress: batchEnd,
+            label: `Exported thumbnail ${index + 1}/${batches.length}`
+          });
+        }
+      }
+
+      if (exportVideos && targetDirectory) {
         const writable = await createDirectoryWritable(targetDirectory, outputFileName);
         await streamVideoToWritableWithWebCodecs({
           puzzles: compatibilityBatch,
@@ -936,7 +1060,7 @@ const runFrameSuperExportOnMainThread = async ({
           onProgress: (progress, label) => {
             onProgress?.({
               stage: 'exporting',
-              progress: mapProgress(progress, batchStart, batchEnd),
+              progress: mapProgress(exportThumbnails ? 0.18 + progress * 0.82 : progress, batchStart, batchEnd),
               label:
                 label ||
                 `Exporting video ${index + 1}/${batches.length} (${compatibilityBatch.length} puzzle${
@@ -945,14 +1069,14 @@ const runFrameSuperExportOnMainThread = async ({
             });
           }
         });
-      } else {
+      } else if (exportVideos) {
         const rendered = await renderVideoWithWebCodecs({
           puzzles: compatibilityBatch,
           settings: videoSettings,
           onProgress: (progress, label) => {
             onProgress?.({
               stage: 'exporting',
-              progress: mapProgress(progress, batchStart, batchEnd),
+              progress: mapProgress(exportThumbnails ? 0.18 + progress * 0.82 : progress, batchStart, batchEnd),
               label:
                 label ||
                 `Exporting video ${index + 1}/${batches.length} (${compatibilityBatch.length} puzzle${
@@ -971,9 +1095,12 @@ const runFrameSuperExportOnMainThread = async ({
 
     return {
       ...buildBaseResult(processed),
-      exportedVideoCount: batches.length,
+      exportMode,
+      exportedVideoCount: exportVideos ? batches.length : 0,
+      exportedThumbnailCount,
       batchSizes: batches.map((batch) => batch.length),
       imagesPerVideo: Math.max(1, imagesPerVideo),
+      thumbnailEnabled: exportThumbnails,
       watermarkRemovalEnabled: watermarkEnabled,
       watermarkPairsCleaned,
       watermarkPresetName
@@ -995,6 +1122,38 @@ const convertProcessorPayloadToBinaryPuzzle = (
 
 const estimateBinaryRenderablePuzzleBytes = (puzzle: BinaryRenderablePuzzle) =>
   puzzle.imageABuffer.byteLength + puzzle.imageBBuffer.byteLength;
+
+const blobToDataUrl = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error('Failed to convert image blob to data URL.'));
+    reader.readAsDataURL(blob);
+  });
+
+const convertBinaryPuzzleToCompatibilityPuzzle = async (
+  puzzle: BinaryRenderablePuzzle
+): Promise<Puzzle> => {
+  const mimeType = puzzle.mimeType || 'image/png';
+  const [imageA, imageB] = await Promise.all([
+    blobToDataUrl(new Blob([puzzle.imageABuffer], { type: mimeType })),
+    blobToDataUrl(new Blob([puzzle.imageBBuffer], { type: mimeType }))
+  ]);
+
+  return {
+    imageA,
+    imageB,
+    regions: puzzle.regions,
+    title: puzzle.title
+  };
+};
+
+const isLikelyDecodeError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /decode|codec|imagebitmap|imagedecoder|source image could not be decoded|failed to decode image data/i.test(
+    message
+  );
+};
 
 const collectExactThreeDifferenceBinaryPuzzlesWithSharedPool = async ({
   videos,
@@ -1310,6 +1469,7 @@ const runFrameSuperExportWithSharedPool = async ({
   imagesPerVideo,
   sharedRegion,
   watermarkRemoval,
+  thumbnail,
   onProgress
 }: RunFrameSuperExportOptions): Promise<SuperExportResult> => {
   if (activeSuperExportController || activeSuperImageExportController || activeSuperImageExportWorker) {
@@ -1332,7 +1492,11 @@ const runFrameSuperExportWithSharedPool = async ({
   };
 
   try {
-    const targetDirectory = canUseSuperVideoDirectoryExport()
+    const exportMode = resolveSuperExportOutputMode(thumbnail);
+    const exportVideos = shouldExportSuperVideos(thumbnail);
+    const exportThumbnails = shouldExportSuperThumbnails(thumbnail);
+    const thumbnailEnabled = exportThumbnails;
+    const targetDirectory = (exportVideos ? canUseSuperVideoDirectoryExport() : supportsDirectoryExport())
       ? await requestSuperExportOutputDirectory(splitterDefaults)
       : null;
     const { processed, watermarkPairsCleaned } = await collectExactThreeDifferenceBinaryPuzzlesWithSharedPool({
@@ -1352,9 +1516,12 @@ const runFrameSuperExportWithSharedPool = async ({
     if (processed.validPuzzles.length === 0) {
       const result: SuperExportResult = {
         ...buildBaseResult(processed),
+        exportMode,
         exportedVideoCount: 0,
+        exportedThumbnailCount: 0,
         batchSizes: [],
         imagesPerVideo: Math.max(1, imagesPerVideo),
+        thumbnailEnabled: exportThumbnails,
         watermarkRemovalEnabled: Boolean(watermarkRemoval?.enabled),
         watermarkPairsCleaned,
         watermarkPresetName: watermarkRemoval?.selectionPreset?.name ?? null
@@ -1364,9 +1531,15 @@ const runFrameSuperExportWithSharedPool = async ({
       return result;
     }
 
-    emitProgress('exporting', watermarkRemoval?.enabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END, 'Preparing video batches...');
+    emitProgress(
+      'exporting',
+      watermarkRemoval?.enabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END,
+      exportVideos ? 'Preparing export batches...' : 'Preparing thumbnail batches...'
+    );
 
     const batchSize = Math.max(1, imagesPerVideo);
+    const thumbnailSettings =
+      exportThumbnails && thumbnail ? buildSuperExportThumbnailSettings(videoSettings, thumbnail) : null;
     const randomizedPuzzles = shuffleArray(processed.validPuzzles);
     processed.validPuzzles.length = 0;
     const batches = Array.from({ length: Math.ceil(randomizedPuzzles.length / batchSize) }, (_value, index) => {
@@ -1380,9 +1553,13 @@ const runFrameSuperExportWithSharedPool = async ({
     const totalBatches = batches.length;
     const batchSizes = batches.map(({ batch }) => batch.length);
     const exportStart = watermarkRemoval?.enabled ? CLEANING_PROGRESS_END : PROCESSING_PROGRESS_END;
+    const maxBatchConcurrency = shouldSerializeSuperVideoBatches(videoSettings, thumbnail)
+      ? 1
+      : Math.min(2, Math.max(1, totalBatches));
     const activeBatchStats = new Map<string, { batchBytes: number; puzzleCount: number }>();
     let queuedPuzzles = randomizedPuzzles.length;
     let completedBatches = 0;
+    let exportedThumbnailCount = 0;
 
     const emitCoordinatorStats = () => {
       const activePuzzles = [...activeBatchStats.values()].reduce((sum, batch) => sum + batch.puzzleCount, 0);
@@ -1413,7 +1590,7 @@ const runFrameSuperExportWithSharedPool = async ({
       const taskId = `super-video-batch:${index + 1}`;
       return {
         id: taskId,
-        label: `Super Video ${index + 1}/${totalBatches}`,
+        label: `${exportVideos ? 'Super Export' : 'Thumbnail Export'} ${index + 1}/${totalBatches}`,
         weight: Math.max(1, batch.length),
         cancel: () => {
           cancelVideoExport();
@@ -1430,6 +1607,12 @@ const runFrameSuperExportWithSharedPool = async ({
           });
           emitCoordinatorStats();
 
+          let compatibilityBatchPromise: Promise<Puzzle[]> | null = null;
+          const getCompatibilityBatch = () => {
+            compatibilityBatchPromise ??= Promise.all(batch.map((puzzle) => convertBinaryPuzzleToCompatibilityPuzzle(puzzle)));
+            return compatibilityBatchPromise;
+          };
+
           try {
             const outputFileName = buildBatchVideoFilename(
               videoSettings,
@@ -1438,41 +1621,141 @@ const runFrameSuperExportWithSharedPool = async ({
               totalBatches,
               batch.length
             );
-            if (targetDirectory) {
-              const writable = await createDirectoryWritable(targetDirectory, outputFileName);
-              await streamVideoToWritableWithWebCodecs({
-                source: 'binary',
-                puzzles: batch,
-                settings: videoSettings,
-                writable,
-                diagnosticsJob: job,
-                manageDiagnosticsLifecycle: false,
-                onProgress: (progress, label) => {
-                  reportProgress(
-                    progress,
-                    label ||
-                      `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${batch.length === 1 ? '' : 's'})`
-                  );
-                }
-              });
-            } else {
-              const rendered = await renderVideoWithWebCodecs({
-                source: 'binary',
-                puzzles: batch,
-                settings: videoSettings,
-                diagnosticsJob: job,
-                manageDiagnosticsLifecycle: false,
-                onProgress: (progress, label) => {
-                  reportProgress(
-                    progress,
-                    label ||
-                      `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${batch.length === 1 ? '' : 's'})`
-                  );
-                }
-              });
+            const thumbnailFileName = buildBatchThumbnailFilename(outputFileName);
+            let useCompatibilityFallback = false;
+            let thumbnailRendered = false;
+
+            const renderThumbnailBatch = async () => {
+              reportProgress(exportVideos ? 0.12 : 0.9, `Rendering thumbnail ${index + 1}/${totalBatches}`);
+              const renderedThumbnail = useCompatibilityFallback
+                ? await renderVideoFramePreview({
+                    puzzles: await getCompatibilityBatch(),
+                    settings: thumbnailSettings as VideoSettings,
+                    timestamp: 0
+                  })
+                : await renderVideoFramePreview({
+                    source: 'binary',
+                    puzzles: batch,
+                    settings: thumbnailSettings as VideoSettings,
+                    timestamp: 0
+                  });
+              if (targetDirectory) {
+                await writeBlobToDirectory(targetDirectory, thumbnailFileName, renderedThumbnail.blob);
+              } else {
+                triggerBlobDownload(renderedThumbnail.blob, thumbnailFileName);
+                await delay(80);
+              }
+              exportedThumbnailCount += 1;
+              thumbnailRendered = true;
+              if (!exportVideos) {
+                reportProgress(1, `Exported thumbnail ${index + 1}/${totalBatches}`);
+              }
+            };
+
+            const renderVideoBatch = async () => {
+              if (exportVideos && targetDirectory) {
+                const writable = await createDirectoryWritable(targetDirectory, outputFileName);
+                await streamVideoToWritableWithWebCodecs(
+                  useCompatibilityFallback
+                    ? {
+                        puzzles: await getCompatibilityBatch(),
+                        settings: videoSettings,
+                        writable,
+                        diagnosticsJob: job,
+                        manageDiagnosticsLifecycle: false,
+                        onProgress: (progress, label) => {
+                          reportProgress(
+                            exportThumbnails ? 0.18 + progress * 0.82 : progress,
+                            label ||
+                              `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${
+                                batch.length === 1 ? '' : 's'
+                              })`
+                          );
+                        }
+                      }
+                    : {
+                        source: 'binary',
+                        puzzles: batch,
+                        settings: videoSettings,
+                        writable,
+                        diagnosticsJob: job,
+                        manageDiagnosticsLifecycle: false,
+                        onProgress: (progress, label) => {
+                          reportProgress(
+                            exportThumbnails ? 0.18 + progress * 0.82 : progress,
+                            label ||
+                              `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${
+                                batch.length === 1 ? '' : 's'
+                              })`
+                          );
+                        }
+                      }
+                );
+                return;
+              }
+
+              if (!exportVideos) {
+                return;
+              }
+
+              const rendered = await renderVideoWithWebCodecs(
+                useCompatibilityFallback
+                  ? {
+                      puzzles: await getCompatibilityBatch(),
+                      settings: videoSettings,
+                      diagnosticsJob: job,
+                      manageDiagnosticsLifecycle: false,
+                      onProgress: (progress, label) => {
+                        reportProgress(
+                          exportThumbnails ? 0.18 + progress * 0.82 : progress,
+                          label ||
+                            `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${
+                              batch.length === 1 ? '' : 's'
+                            })`
+                        );
+                      }
+                    }
+                  : {
+                      source: 'binary',
+                      puzzles: batch,
+                      settings: videoSettings,
+                      diagnosticsJob: job,
+                      manageDiagnosticsLifecycle: false,
+                      onProgress: (progress, label) => {
+                        reportProgress(
+                          exportThumbnails ? 0.18 + progress * 0.82 : progress,
+                          label ||
+                            `Exporting video ${index + 1}/${totalBatches} (${batch.length} puzzle${
+                              batch.length === 1 ? '' : 's'
+                            })`
+                        );
+                      }
+                    }
+              );
 
               triggerBlobDownload(rendered.blob, outputFileName);
               await delay(120);
+            };
+
+            try {
+              if (exportThumbnails && thumbnailSettings) {
+                await renderThumbnailBatch();
+              }
+              await renderVideoBatch();
+            } catch (error) {
+              if (!isLikelyDecodeError(error) || useCompatibilityFallback) {
+                throw error;
+              }
+
+              useCompatibilityFallback = true;
+              reportProgress(
+                0.08,
+                `Decode fallback for batch ${index + 1}/${totalBatches}. Retrying with compatibility images...`
+              );
+              if (exportThumbnails && thumbnailSettings && !thumbnailRendered) {
+                await renderThumbnailBatch();
+              }
+              await renderVideoBatch();
             }
 
             completedBatches += 1;
@@ -1490,7 +1773,7 @@ const runFrameSuperExportWithSharedPool = async ({
     emitCoordinatorStats();
     await runBatchExportTasks({
       tasks: batchTasks,
-      maxConcurrency: Math.min(2, Math.max(1, totalBatches)),
+      maxConcurrency: maxBatchConcurrency,
       signal: abortController.signal,
       cancelMessage: createSuperExportCancellationError().message,
       onProgress: (progress, label) => {
@@ -1505,15 +1788,34 @@ const runFrameSuperExportWithSharedPool = async ({
 
     const result: SuperExportResult = {
       ...buildBaseResult(processed),
-      exportedVideoCount: totalBatches,
+      exportMode,
+      exportedVideoCount: exportVideos ? totalBatches : 0,
+      exportedThumbnailCount,
       batchSizes,
       imagesPerVideo: batchSize,
+      thumbnailEnabled: exportThumbnails,
       watermarkRemovalEnabled: Boolean(watermarkRemoval?.enabled),
       watermarkPairsCleaned,
       watermarkPresetName: watermarkRemoval?.selectionPreset?.name ?? null
     };
-    emitProgress('exporting', 1, `Exported ${totalBatches} video${totalBatches === 1 ? '' : 's'}.`);
-    job?.complete(`Exported ${totalBatches} Super Video batch${totalBatches === 1 ? '' : 'es'}`);
+    emitProgress(
+      'exporting',
+      1,
+      exportVideos
+        ? `Exported ${result.exportedVideoCount} video${result.exportedVideoCount === 1 ? '' : 's'}${
+            exportThumbnails
+              ? ` and ${result.exportedThumbnailCount} thumbnail${result.exportedThumbnailCount === 1 ? '' : 's'}`
+              : ''
+          }.`
+        : `Exported ${result.exportedThumbnailCount} thumbnail${result.exportedThumbnailCount === 1 ? '' : 's'}.`
+    );
+    job?.complete(
+      exportVideos
+        ? `Exported ${result.exportedVideoCount} Super Export batch${result.exportedVideoCount === 1 ? '' : 'es'}`
+        : `Exported ${result.exportedThumbnailCount} Super Export thumbnail batch${
+            result.exportedThumbnailCount === 1 ? '' : 'es'
+          }`
+    );
     return result;
   } catch (error) {
     if (abortController.signal.aborted || isSuperExportCancellationError(error)) {
@@ -1540,6 +1842,81 @@ export const runFrameSuperExport = async (options: RunFrameSuperExportOptions): 
   }
 
   return await runFrameSuperExportOnMainThread(options);
+};
+
+export const renderSuperExportThumbnailPreview = async ({
+  video,
+  timestamp,
+  format,
+  jpegQuality,
+  videoSettings,
+  sharedRegion,
+  thumbnail,
+  watermarkRemoval,
+  signal
+}: RenderSuperExportThumbnailPreviewOptions): Promise<Blob> => {
+  throwIfAborted(signal);
+  const extracted = await extractFrames({
+    videos: [video],
+    timestamps: [timestamp],
+    format,
+    jpegQuality
+  });
+  const frame = extracted.files[0];
+  if (!frame) {
+    throw new Error('No frame was available for thumbnail preview.');
+  }
+
+  const split = await resolveFrameSplitToCanvases(frame.blob, frame.filename, sharedRegion);
+  let imageA = split.imageA;
+  let imageB = split.imageB;
+
+  try {
+    if (watermarkRemoval?.enabled) {
+      const cleaned = await applyWatermarkRemovalToCanvasPuzzle(
+        {
+          imageA,
+          imageB,
+          regions: [],
+          title: split.baseName
+        },
+        watermarkRemoval.selectionPreset ?? null
+      );
+      if (cleaned.imageA !== imageA) {
+        releaseCanvas(imageA);
+      }
+      if (cleaned.imageB !== imageB) {
+        releaseCanvas(imageB);
+      }
+      imageA = cleaned.imageA;
+      imageB = cleaned.imageB;
+    }
+
+    throwIfAborted(signal);
+    const [puzzleImageA, puzzleImageB] = await Promise.all([
+      canvasToDataUrl(imageA, 'image/png'),
+      canvasToDataUrl(imageB, 'image/png')
+    ]);
+    throwIfAborted(signal);
+
+    const rendered = await renderVideoFramePreview({
+      puzzles: [
+        {
+          imageA: puzzleImageA,
+          imageB: puzzleImageB,
+          regions: [],
+          title: split.baseName
+        }
+      ],
+      settings: buildSuperExportThumbnailSettings(videoSettings, thumbnail),
+      timestamp: 0,
+      signal
+    });
+
+    return rendered.blob;
+  } finally {
+    releaseCanvases(imageA, imageB);
+  }
 };
 
 const runFrameSuperImageExportOnMainThread = async ({

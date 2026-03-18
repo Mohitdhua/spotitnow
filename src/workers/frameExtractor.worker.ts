@@ -242,7 +242,9 @@ const extractFramesInWorker = async ({
             const wrapped = await sink.getCanvas(safeTimestamp);
             const sourceCanvas = (wrapped?.canvas as OffscreenCanvas | undefined) ?? null;
             if (!sourceCanvas) {
-              throw new Error('Unable to decode the requested frame in the worker.');
+              throw new Error(
+                'The browser could not decode the requested frame in the worker. The app will retry on the main thread.'
+              );
             }
 
             const exportCanvas = new OffscreenCanvas(

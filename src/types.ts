@@ -77,6 +77,90 @@ export type VideoRevealBehavior =
   | 'freeze_ring'
   | 'cinematic_sequential';
 
+export type VideoTextStyle =
+  | 'package'
+  | 'poster'
+  | 'rounded'
+  | 'mono'
+  | 'storybook'
+  | 'editorial';
+
+export type VideoHeaderStyle =
+  | 'package'
+  | 'plain'
+  | 'panel'
+  | 'ribbon'
+  | 'split'
+  | 'underline';
+
+export type VideoTimerStyle =
+  | 'package'
+  | 'pill'
+  | 'digital'
+  | 'chunky'
+  | 'ticket'
+  | 'minimal'
+  | 'capsule'
+  | 'scoreboard'
+  | 'beacon'
+  | 'retro_flip'
+  | 'neon_chip'
+  | 'sticker'
+  | 'jelly'
+  | 'marquee'
+  | 'glass'
+  | 'notched'
+  | 'orbital'
+  | 'bracelet'
+  | 'tab'
+  | 'soft_block'
+  | 'badge'
+  | 'micro'
+  | 'terminal'
+  | 'ticket_stub'
+  | 'chevron'
+  | 'burst'
+  | 'frame'
+  | 'lozenge'
+  | 'capsule_duo'
+  | 'racer'
+  | 'slab'
+  | 'countdown_ring'
+  | 'hollow_drain'
+  | 'pill_progress'
+  | 'magnify_timer'
+  | 'radar_sweep'
+  | 'fuse_burn'
+  | 'badge_pop'
+  | 'dual_ring_pro'
+  | 'segmented_timer'
+  | 'warning_mode';
+
+export type VideoProgressStyle =
+  | 'package'
+  | 'pill'
+  | 'segmented'
+  | 'blocks'
+  | 'glow'
+  | 'minimal'
+  | 'text_fill';
+
+export type VideoSceneCardStyle =
+  | 'package'
+  | 'standard'
+  | 'scoreboard'
+  | 'storybook'
+  | 'spotlight'
+  | 'celebration';
+
+export type VideoTransitionStyle =
+  | 'fade'
+  | 'slide'
+  | 'zoom'
+  | 'pop'
+  | 'wipe'
+  | 'none';
+
 export interface VideoSceneSettings {
   introEnabled: boolean;
   introDuration: number;
@@ -90,6 +174,7 @@ export interface VideoTextTemplates {
   introSubtitle: string;
   playTitle: string;
   playSubtitle: string;
+  progressLabel: string;
   revealTitle: string;
   transitionEyebrow: string;
   transitionTitle: string;
@@ -98,6 +183,20 @@ export interface VideoTextTemplates {
   completionTitle: string;
   completionSubtitle: string;
   puzzleBadgeLabel: string;
+}
+
+export interface VideoHeaderTextOverrides {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+export interface AudioPhaseLevels {
+  intro: number;
+  showing: number;
+  revealing: number;
+  transitioning: number;
+  outro: number;
 }
 
 export interface VideoSettings {
@@ -123,7 +222,19 @@ export interface VideoSettings {
     | 'arcade'
     | 'ivory'
     | 'storybook';
+  textStyle: VideoTextStyle;
+  headerStyle: VideoHeaderStyle;
+  timerStyle: VideoTimerStyle;
+  progressStyle: VideoProgressStyle;
+  showTimer: boolean;
+  showProgress: boolean;
+  introCardStyle: VideoSceneCardStyle;
+  transitionCardStyle: VideoSceneCardStyle;
+  outroCardStyle: VideoSceneCardStyle;
   sceneSettings: VideoSceneSettings;
+  introVideoEnabled: boolean;
+  introVideoSrc?: string;
+  introVideoDuration?: number;
   textTemplates: VideoTextTemplates;
   showDuration: number; // Seconds to show the puzzle before revealing
   revealDuration: number; // Total seconds spent in the reveal phase
@@ -151,13 +262,49 @@ export interface VideoSettings {
   revealColor: string;
   outlineColor: string;
   outlineThickness: number;
-  transitionStyle: 'fade' | 'slide' | 'none';
+  imagePanelOutlineColor: string;
+  imagePanelOutlineThickness: number;
+  transitionStyle: VideoTransitionStyle;
   transitionDuration: number; // Seconds
   useCustomLayout?: boolean;
   customLayout?: CustomVideoLayout;
   exportResolution: '480p' | '720p' | '1080p' | '1440p' | '2160p';
   exportBitrateMbps: number;
   exportCodec: 'h264' | 'av1';
+  soundEffectsEnabled: boolean;
+  countdownSoundEnabled: boolean;
+  revealSoundEnabled: boolean;
+  markerSoundEnabled: boolean;
+  blinkSoundEnabled: boolean;
+  playSoundEnabled: boolean;
+  introSoundEnabled: boolean;
+  transitionSoundEnabled: boolean;
+  outroSoundEnabled: boolean;
+  previewSoundEnabled: boolean;
+  soundEffectsVolume: number;
+  countdownSoundSrc?: string;
+  revealSoundSrc?: string;
+  markerSoundSrc?: string;
+  blinkSoundSrc?: string;
+  playSoundSrc?: string;
+  introSoundSrc?: string;
+  transitionSoundSrc?: string;
+  outroSoundSrc?: string;
+  revealSoundVariantSrcs?: string[];
+  revealSoundRandomize: boolean;
+  countdownSoundOffsetMs: number;
+  revealSoundOffsetMs: number;
+  backgroundMusicEnabled: boolean;
+  backgroundMusicSrc?: string;
+  backgroundMusicVolume: number;
+  backgroundMusicLoop: boolean;
+  backgroundMusicFadeIn: number;
+  backgroundMusicFadeOut: number;
+  backgroundMusicDuckingAmount: number;
+  backgroundMusicOffsetSec: number;
+  musicPhaseLevels: AudioPhaseLevels;
+  sfxPhaseLevels: AudioPhaseLevels;
+  audioLimiterEnabled: boolean;
   logo?: string; // Base64 or URL
   logoZoom: number;
   logoChromaKeyEnabled: boolean;
@@ -166,15 +313,46 @@ export interface VideoSettings {
   generatedBackgroundsEnabled: boolean;
   generatedBackgroundPackId: string;
   generatedBackgroundShuffleSeed: number;
+  headerTextOverrides?: VideoHeaderTextOverrides;
 }
 
-export type GeneratedBackgroundSceneKind =
-  | 'arcade'
-  | 'studio'
-  | 'forest'
-  | 'city'
-  | 'seaside'
-  | 'dreamscape';
+export type VideoAspectRatio = VideoSettings['aspectRatio'];
+
+export interface AspectLayoutSnapshot {
+  aspectRatio: VideoAspectRatio;
+  useCustomLayout: boolean;
+  customLayout: CustomVideoLayout | null;
+}
+
+export type VideoPackageSharedSettings = Omit<
+  VideoSettings,
+  'aspectRatio' | 'useCustomLayout' | 'customLayout'
+>;
+
+export type VideoPackageAspectLayouts = Record<VideoAspectRatio, AspectLayoutSnapshot>;
+
+export interface VideoUserPackage {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number;
+  preferredAspectRatio: VideoAspectRatio;
+  sharedSettings: VideoPackageSharedSettings;
+  aspectLayouts: VideoPackageAspectLayouts;
+}
+
+export type GeneratedBackgroundMotifFamily =
+  | 'confetti_field'
+  | 'paper_cut'
+  | 'comic_dots'
+  | 'ribbon_swoop'
+  | 'blob_garden'
+  | 'starburst'
+  | 'doodle_parade'
+  | 'spark_trails'
+  | 'layered_waves'
+  | 'sticker_scatter';
 
 export type GeneratedBackgroundPaletteId =
   | 'sunrise'
@@ -184,19 +362,30 @@ export type GeneratedBackgroundPaletteId =
   | 'ocean'
   | 'amber';
 
-export type GeneratedBackgroundPattern = 'dots' | 'grid' | 'sparkle' | 'waves';
+export type GeneratedBackgroundDetailStyle =
+  | 'sprinkles'
+  | 'halftone'
+  | 'sparkle'
+  | 'sticker'
+  | 'streamers';
 
-export interface GeneratedBackgroundSpec {
+export interface GeneratedBackgroundRecipe {
   id: string;
   name: string;
   seed: number;
-  sceneKind: GeneratedBackgroundSceneKind;
+  family: GeneratedBackgroundMotifFamily;
   paletteId: GeneratedBackgroundPaletteId;
-  horizon: number;
   density: number;
   accentScale: number;
-  pattern: GeneratedBackgroundPattern;
+  contrast: number;
+  safeZone: number;
+  motionSpeed: number;
+  detailStyle: GeneratedBackgroundDetailStyle;
 }
+
+export type GeneratedBackgroundSceneKind = GeneratedBackgroundMotifFamily;
+export type GeneratedBackgroundPattern = GeneratedBackgroundDetailStyle;
+export type GeneratedBackgroundSpec = GeneratedBackgroundRecipe;
 
 export interface GeneratedBackgroundPack {
   id: string;
@@ -205,7 +394,7 @@ export interface GeneratedBackgroundPack {
   aspectRatio: VideoSettings['aspectRatio'];
   createdAt: number;
   updatedAt: number;
-  backgrounds: GeneratedBackgroundSpec[];
+  backgrounds: GeneratedBackgroundRecipe[];
   coverBackgroundId: string;
 }
 
@@ -235,6 +424,7 @@ export type GameMode =
   | 'upload'
   | 'splitter'
   | 'image_upscaler'
+  | 'timer_mode'
   | 'background_generator'
   | 'frame_extractor'
   | 'edit'
@@ -244,3 +434,85 @@ export type GameMode =
   | 'overlay_editor'
   | 'progress_bar'
   | 'watermark_removal';
+
+export type AppRoute =
+  | '/'
+  | '/create/upload'
+  | '/create/review'
+  | '/create/editor'
+  | '/editor'
+  | '/play'
+  | '/video/setup'
+  | '/video/preview'
+  | '/video/overlay'
+  | '/tools/splitter'
+  | '/tools/extractor'
+  | '/tools/upscaler'
+  | '/tools/backgrounds'
+  | '/tools/timers'
+  | '/tools/progress'
+  | '/tools/watermark'
+  | '/settings';
+
+export type ExportJobKind =
+  | 'video'
+  | 'overlay'
+  | 'progress'
+  | 'super_image'
+  | 'super_video';
+
+export type ExportJobState =
+  | 'idle'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface ExportJobAction {
+  id: 'cancel' | 'retry' | 'open';
+  label: string;
+  href?: string;
+  disabled?: boolean;
+}
+
+export interface ExportJob {
+  id: string;
+  kind: ExportJobKind;
+  label: string;
+  state: ExportJobState;
+  progress: number;
+  status: string;
+  startedAt: number;
+  endedAt: number | null;
+  errorMessage: string | null;
+  outputName?: string;
+  actions: ExportJobAction[];
+}
+
+export interface ProjectWorkspaceSnapshot {
+  puzzle: Puzzle | null;
+  batch: Puzzle[];
+  playIndex: number;
+  incomingVideoFrames: VideoModeTransferFrame[];
+}
+
+export interface ProjectVideoSnapshot {
+  settings: VideoSettings;
+}
+
+export interface ProjectUiSnapshot {
+  lastRoute: AppRoute;
+}
+
+export interface ProjectRecord {
+  kind: 'spotitnow-project';
+  version: 1;
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  lastOpenedAt: number;
+  workspace: ProjectWorkspaceSnapshot;
+  video: ProjectVideoSnapshot;
+  uiSnapshot: ProjectUiSnapshot;
+}

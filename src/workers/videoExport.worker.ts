@@ -1,6 +1,12 @@
 import {
+  ALL_FORMATS,
+  AudioSample,
+  AudioSampleSource,
+  BlobSource,
   BufferTarget,
+  CanvasSink,
   CanvasSource,
+  Input,
   Mp4OutputFormat,
   Output,
   StreamTarget,
@@ -8,15 +14,35 @@ import {
   canEncodeVideo
 } from 'mediabunny';
 import { Puzzle, Region, VideoSettings } from '../types';
-import { VISUAL_THEMES, resolveVisualThemeStyle } from '../constants/videoThemes';
+import { VISUAL_THEMES, resolveVisualThemeStyle, type VisualTheme } from '../constants/videoThemes';
 import { BASE_STAGE_SIZE, CLASSIC_HUD_SPEC, TRANSITION_TUNING } from '../constants/videoLayoutSpec';
 import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
 import { resolveVideoLayoutSettings } from '../constants/videoLayoutCustom';
 import { VIDEO_PACKAGE_PRESETS, resolvePackageImageArrangement } from '../constants/videoPackages';
+import {
+  applyTextTransform,
+  buildProgressFillDefinition,
+  buildTimerBackground,
+  measureResolvedTimerBox,
+  radiusTokenToPx,
+  resolveTimerRenderProfile,
+  resolveVideoStyleModules
+} from '../constants/videoStyleModules';
 import { drawGeneratedBackground, resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
+import { decodeRuntimeImageBitmapFromBlob } from '../services/canvasRuntime';
 import { applyLogoChromaKey, clampLogoZoom } from '../utils/logoProcessing';
+import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import { buildCueTones, type AudioCueKind, type AudioCueTone, type AudioCueWaveform } from '../utils/audioCueTones';
+import { isDesignerTimerStyle } from '../utils/timerPackShared';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
-import type { BinaryRenderablePuzzle, VideoExportWorkerStartPayload, VideoRenderSource } from '../services/videoRenderSource';
+import type {
+  BinaryRenderablePuzzle,
+  VideoExportAudioAsset,
+  VideoExportAudioAssets,
+  VideoExportWorkerStartPayload,
+  VideoRenderSource
+} from '../services/videoRenderSource';
+import { drawDesignerTimerPreset } from './videoTimerPackCanvas';
 
 type FramePhase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro';
 type SceneCardKind = 'intro' | 'transition' | 'outro';
@@ -27,6 +53,15 @@ interface TimelineSegment {
   start: number;
   duration: number;
   end: number;
+}
+
+type ExportAudioCueKind = AudioCueKind;
+
+interface ExportAudioCueEvent {
+  timestamp: number;
+  kind: ExportAudioCueKind;
+  phase: FramePhase;
+  puzzleIndex: number;
 }
 
 interface RenderScene {
@@ -43,6 +78,11 @@ interface RenderScene {
   cardEyebrow: string;
 }
 
+interface IntroVideoResource {
+  sink: CanvasSink;
+  duration: number;
+}
+
 type RenderablePuzzle = Puzzle | BinaryRenderablePuzzle;
 type RenderSourceKind = VideoRenderSource['source'];
 
@@ -52,6 +92,8 @@ type ExportVideoOptions =
       puzzles: Puzzle[];
       settings: VideoSettings;
       generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
+      audioAssets?: VideoExportAudioAssets;
+      introVideoFile?: File;
       streamOutput?: boolean;
       onProgress?: (progress: number, status?: string) => void;
     }
@@ -60,16 +102,29 @@ type ExportVideoOptions =
       puzzles: BinaryRenderablePuzzle[];
       settings: VideoSettings;
       generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
+      audioAssets?: VideoExportAudioAssets;
+      introVideoFile?: File;
       streamOutput?: boolean;
       onProgress?: (progress: number, status?: string) => void;
     };
 
-interface PreviewFrameOptions {
-  puzzles: Puzzle[];
-  settings: VideoSettings;
-  timestamp: number;
-  generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
-}
+type PreviewFrameOptions =
+  | {
+      source?: 'legacy';
+      puzzles: Puzzle[];
+      settings: VideoSettings;
+      timestamp: number;
+      generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
+      introVideoFile?: File;
+    }
+  | {
+      source: 'binary';
+      puzzles: BinaryRenderablePuzzle[];
+      settings: VideoSettings;
+      timestamp: number;
+      generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
+      introVideoFile?: File;
+    };
 
 interface WorkerStartMessage {
   type: 'start';
@@ -78,12 +133,7 @@ interface WorkerStartMessage {
 
 interface WorkerPreviewFrameMessage {
   type: 'preview-frame';
-  payload: {
-    puzzles: Puzzle[];
-    settings: VideoSettings;
-    timestamp: number;
-    generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
-  };
+  payload: PreviewFrameOptions;
 }
 
 interface WorkerCancelMessage {
@@ -152,17 +202,24 @@ const RESOLUTION_HEIGHT: Record<VideoSettings['exportResolution'], number> = {
 const FORMAT_BY_CODEC = {
   h264: {
     codec: 'avc' as const,
+    audioCodec: 'aac' as const,
     format: new Mp4OutputFormat(),
     extension: 'mp4',
     mimeType: 'video/mp4'
   },
   av1: {
     codec: 'av1' as const,
+    audioCodec: 'opus' as const,
     format: new WebMOutputFormat(),
     extension: 'webm',
     mimeType: 'video/webm'
   }
 };
+
+const AUDIO_BITRATE = 128_000;
+const AUDIO_SAMPLE_RATE = 48_000;
+const AUDIO_CHANNELS = 2;
+const AUDIO_SILENCE_FLOOR = 0.0001;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
@@ -170,6 +227,557 @@ const formatCountdownSeconds = (seconds: number) =>
   `${Math.max(0, Math.ceil(seconds - 0.001))}s`;
 const fillTemplate = (template: string, values: Record<string, string | number>) =>
   template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => String(values[key] ?? ''));
+
+type SynthWaveform = AudioCueWaveform;
+type SynthToneOptions = AudioCueTone;
+
+const getWaveSample = (phase: number, type: SynthWaveform) => {
+  switch (type) {
+    case 'triangle':
+      return (2 / Math.PI) * Math.asin(Math.sin(phase));
+    case 'square':
+      return Math.sin(phase) >= 0 ? 1 : -1;
+    case 'sawtooth': {
+      const wrapped = ((phase / (Math.PI * 2)) % 1 + 1) % 1;
+      return wrapped * 2 - 1;
+    }
+    default:
+      return Math.sin(phase);
+  }
+};
+
+const mixToneIntoBuffer = (
+  data: Float32Array,
+  tone: SynthToneOptions,
+  masterVolume: number
+) => {
+  const startFrame = Math.max(0, Math.round(tone.startOffset * AUDIO_SAMPLE_RATE));
+  const frameCount = Math.max(1, Math.round(tone.duration * AUDIO_SAMPLE_RATE));
+  const attackFrames = Math.max(
+    1,
+    Math.round(Math.min(tone.attack ?? 0.012, tone.duration * 0.4) * AUDIO_SAMPLE_RATE)
+  );
+  const releaseFrames = Math.max(
+    1,
+    Math.round(Math.min(tone.release ?? Math.max(0.03, tone.duration * 0.62), tone.duration) * AUDIO_SAMPLE_RATE)
+  );
+  const baseFrequency = Math.max(1, tone.frequency);
+  const targetFrequency = Math.max(1, tone.endFrequency ?? tone.frequency);
+  const detuneRatio = Math.pow(2, (tone.detune ?? 0) / 1200);
+  let phase = 0;
+
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    const bufferIndex = startFrame + frame;
+    if (bufferIndex < 0 || bufferIndex >= data.length / AUDIO_CHANNELS) {
+      continue;
+    }
+
+    const progress = frameCount <= 1 ? 1 : frame / (frameCount - 1);
+    const frequency =
+      targetFrequency !== baseFrequency
+        ? baseFrequency * Math.pow(targetFrequency / baseFrequency, progress)
+        : baseFrequency;
+    phase += ((Math.PI * 2 * frequency) / AUDIO_SAMPLE_RATE) * detuneRatio;
+
+    let envelope = 1;
+    if (frame < attackFrames) {
+      envelope = Math.max(AUDIO_SILENCE_FLOOR, frame / attackFrames);
+    } else if (frame >= frameCount - releaseFrames) {
+      const releaseProgress = (frameCount - frame) / releaseFrames;
+      envelope = Math.max(AUDIO_SILENCE_FLOOR, releaseProgress);
+    }
+
+    const sampleValue = getWaveSample(phase, tone.type) * tone.volume * masterVolume * envelope;
+    const clampedSample = clamp(sampleValue, -1, 1);
+    const sampleOffset = bufferIndex * AUDIO_CHANNELS;
+    for (let channel = 0; channel < AUDIO_CHANNELS; channel += 1) {
+      data[sampleOffset + channel] = clamp(data[sampleOffset + channel] + clampedSample, -1, 1);
+    }
+  }
+};
+
+const createCueAudioBuffer = (kind: ExportAudioCueKind, masterVolume: number) => {
+  const safeVolume = clamp(masterVolume, 0, 1);
+  if (safeVolume <= 0) return null;
+  const tones = buildCueTones(kind);
+  const sampleDuration = tones.reduce(
+    (maxDuration, tone) => Math.max(maxDuration, tone.startOffset + tone.duration),
+    0
+  );
+  const frameCount = Math.max(1, Math.ceil(sampleDuration * AUDIO_SAMPLE_RATE));
+  const data = new Float32Array(frameCount * AUDIO_CHANNELS);
+
+  tones.forEach((tone) => {
+    mixToneIntoBuffer(data, tone, safeVolume);
+  });
+
+  return {
+    data,
+    frames: frameCount
+  };
+};
+
+const clamp01 = (value: number) => clamp(value, 0, 1);
+
+const resolvePhaseLevel = (levels: VideoSettings['musicPhaseLevels'] | undefined, phase: FramePhase) =>
+  clamp01(
+    phase === 'intro'
+      ? levels?.intro ?? 1
+      : phase === 'showing'
+      ? levels?.showing ?? 1
+      : phase === 'revealing'
+      ? levels?.revealing ?? 1
+      : phase === 'transitioning'
+      ? levels?.transitioning ?? 1
+      : levels?.outro ?? 1
+  );
+
+const resampleInterleaved = (
+  asset: VideoExportAudioAsset,
+  targetSampleRate: number,
+  targetChannels: number
+) => {
+  const sourceChannels = Math.max(1, asset.channels);
+  const sourceFrames = Math.floor(asset.data.length / sourceChannels);
+  if (!Number.isFinite(asset.sampleRate) || asset.sampleRate <= 0 || sourceFrames <= 0) {
+    return null;
+  }
+
+  const rateRatio = asset.sampleRate / targetSampleRate;
+  const targetFrames = Math.max(1, Math.round(sourceFrames / rateRatio));
+  const output = new Float32Array(targetFrames * targetChannels);
+
+  const readSample = (frame: number, channel: number) => {
+    if (sourceChannels === targetChannels) {
+      return asset.data[frame * sourceChannels + channel] ?? 0;
+    }
+    if (sourceChannels === 1) {
+      return asset.data[frame] ?? 0;
+    }
+    if (targetChannels === 1) {
+      let sum = 0;
+      for (let ch = 0; ch < sourceChannels; ch += 1) {
+        sum += asset.data[frame * sourceChannels + ch] ?? 0;
+      }
+      return sum / sourceChannels;
+    }
+    if (channel < sourceChannels) {
+      return asset.data[frame * sourceChannels + channel] ?? 0;
+    }
+    return asset.data[frame * sourceChannels] ?? 0;
+  };
+
+  for (let frame = 0; frame < targetFrames; frame += 1) {
+    const sourcePos = frame * rateRatio;
+    const index0 = Math.min(sourceFrames - 1, Math.max(0, Math.floor(sourcePos)));
+    const index1 = Math.min(sourceFrames - 1, index0 + 1);
+    const t = sourcePos - index0;
+    for (let channel = 0; channel < targetChannels; channel += 1) {
+      const sample0 = readSample(index0, channel);
+      const sample1 = readSample(index1, channel);
+      output[frame * targetChannels + channel] = sample0 + (sample1 - sample0) * t;
+    }
+  }
+
+  return {
+    data: output,
+    frames: targetFrames,
+    channels: targetChannels
+  };
+};
+
+const mixInterleaved = (
+  target: Float32Array,
+  source: Float32Array,
+  sourceFrames: number,
+  targetChannels: number,
+  startFrame: number,
+  gain: number
+) => {
+  if (gain <= 0) return;
+  const totalFrames = Math.floor(target.length / targetChannels);
+  for (let frame = 0; frame < sourceFrames; frame += 1) {
+    const targetFrame = startFrame + frame;
+    if (targetFrame < 0 || targetFrame >= totalFrames) continue;
+    const targetIndex = targetFrame * targetChannels;
+    const sourceIndex = frame * targetChannels;
+    for (let channel = 0; channel < targetChannels; channel += 1) {
+      target[targetIndex + channel] = clamp(
+        target[targetIndex + channel] + source[sourceIndex + channel] * gain,
+        -2,
+        2
+      );
+    }
+  }
+};
+
+const applySoftLimiter = (buffer: Float32Array, enabled: boolean) => {
+  if (!enabled) return;
+  const drive = 1.6;
+  const norm = Math.tanh(drive);
+  for (let index = 0; index < buffer.length; index += 1) {
+    const sample = buffer[index] * drive;
+    buffer[index] = Math.tanh(sample) / norm;
+  }
+};
+
+const buildExportAudioCueEvents = (
+  timeline: TimelineSegment[],
+  settings: VideoSettings,
+  puzzles: RenderablePuzzle[]
+): ExportAudioCueEvent[] => {
+  if (!settings.soundEffectsEnabled) {
+    return [];
+  }
+
+  const events: ExportAudioCueEvent[] = [];
+  const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
+  const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
+
+  timeline.forEach((segment) => {
+    if (segment.phase === 'intro' && settings.introSoundEnabled) {
+      events.push({
+        timestamp: segment.start,
+        kind: 'intro',
+        phase: segment.phase,
+        puzzleIndex: segment.puzzleIndex
+      });
+    }
+
+    if (segment.phase === 'showing' && settings.countdownSoundEnabled) {
+      [3, 2, 1].forEach((secondsLeft) => {
+        if (segment.duration + 0.001 < secondsLeft) {
+          return;
+        }
+        events.push({
+          timestamp: Math.max(segment.start, segment.end - secondsLeft),
+          kind: 'countdown',
+          phase: segment.phase,
+          puzzleIndex: segment.puzzleIndex
+        });
+      });
+    }
+
+    if (segment.phase === 'showing' && settings.playSoundEnabled) {
+      events.push({
+        timestamp: segment.start,
+        kind: 'play',
+        phase: segment.phase,
+        puzzleIndex: segment.puzzleIndex
+      });
+    }
+
+    if (segment.phase === 'transitioning' && settings.transitionSoundEnabled) {
+      events.push({
+        timestamp: segment.start,
+        kind: 'transition',
+        phase: segment.phase,
+        puzzleIndex: segment.puzzleIndex
+      });
+    }
+
+    if (segment.phase === 'outro' && settings.outroSoundEnabled) {
+      events.push({
+        timestamp: segment.start,
+        kind: 'outro',
+        phase: segment.phase,
+        puzzleIndex: segment.puzzleIndex
+      });
+    }
+
+    if (segment.phase === 'revealing') {
+      if (settings.revealSoundEnabled) {
+        events.push({
+          timestamp: segment.start,
+          kind: 'reveal',
+          phase: segment.phase,
+          puzzleIndex: segment.puzzleIndex
+        });
+      }
+
+      const puzzle = puzzles[segment.puzzleIndex];
+      const revealRegionCount = puzzle?.regions?.length ?? 0;
+      if (revealRegionCount > 0) {
+        const revealStepSeconds = Math.min(
+          Math.max(0.5, settings.sequentialRevealStep),
+          revealPhaseDuration / Math.max(1, revealRegionCount + 1)
+        );
+
+        if (settings.markerSoundEnabled) {
+          for (let index = 0; index < revealRegionCount; index += 1) {
+            events.push({
+              timestamp: segment.start + index * revealStepSeconds,
+              kind: 'marker',
+              phase: segment.phase,
+              puzzleIndex: segment.puzzleIndex
+            });
+          }
+        }
+
+        if (settings.blinkSoundEnabled && settings.enableBlinking !== false) {
+          const blinkStartTime =
+            revealRegionCount > 0
+              ? Math.max(0, (revealRegionCount - 1) * revealStepSeconds + blinkCycleDuration)
+              : 0;
+          for (
+            let blinkTime = blinkStartTime;
+            blinkTime < segment.duration;
+            blinkTime += blinkCycleDuration
+          ) {
+            events.push({
+              timestamp: segment.start + blinkTime,
+              kind: 'blink',
+              phase: segment.phase,
+              puzzleIndex: segment.puzzleIndex
+            });
+          }
+        }
+      }
+    }
+  });
+
+  return events.sort((left, right) => left.timestamp - right.timestamp);
+};
+
+const buildExportAudioMixSample = (
+  timeline: TimelineSegment[],
+  settings: VideoSettings,
+  audioAssets: VideoExportAudioAssets | undefined,
+  totalDuration: number,
+  puzzles: RenderablePuzzle[]
+): AudioSample | null => {
+  const hasSfx = settings.soundEffectsEnabled;
+  const hasMusic = settings.backgroundMusicEnabled && audioAssets?.music;
+  const hasIntroClip = Boolean(audioAssets?.introClip);
+  if (!hasSfx && !hasMusic && !hasIntroClip) return null;
+
+  const totalFrames = Math.max(1, Math.ceil(totalDuration * AUDIO_SAMPLE_RATE));
+  const mix = new Float32Array(totalFrames * AUDIO_CHANNELS);
+  const cueEvents = hasSfx ? buildExportAudioCueEvents(timeline, settings, puzzles) : [];
+
+  let countdownAsset = audioAssets?.countdown
+    ? resampleInterleaved(audioAssets.countdown, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let revealAsset = audioAssets?.reveal
+    ? resampleInterleaved(audioAssets.reveal, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let markerAsset = audioAssets?.marker
+    ? resampleInterleaved(audioAssets.marker, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let blinkAsset = audioAssets?.blink
+    ? resampleInterleaved(audioAssets.blink, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let playAsset = audioAssets?.play
+    ? resampleInterleaved(audioAssets.play, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let introAsset = audioAssets?.intro
+    ? resampleInterleaved(audioAssets.intro, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let introClipAsset = audioAssets?.introClip
+    ? resampleInterleaved(audioAssets.introClip, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let transitionAsset = audioAssets?.transition
+    ? resampleInterleaved(audioAssets.transition, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  let outroAsset = audioAssets?.outro
+    ? resampleInterleaved(audioAssets.outro, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    : null;
+  const revealVariantAssets =
+    audioAssets?.revealVariants?.map((variant) =>
+      resampleInterleaved(variant, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+    ) ?? [];
+
+  const countdownOffset = settings.countdownSoundOffsetMs / 1000;
+  const revealOffset = settings.revealSoundOffsetMs / 1000;
+
+  if (hasSfx) {
+    cueEvents.forEach((event) => {
+      const phaseGain = resolvePhaseLevel(settings.sfxPhaseLevels, event.phase);
+      const gain = clamp01(settings.soundEffectsVolume) * phaseGain;
+      if (gain <= 0) return;
+
+      const offset = event.kind === 'countdown' ? countdownOffset : revealOffset;
+      const timestamp = clamp(event.timestamp + offset, 0, totalDuration);
+      const startFrame = Math.round(timestamp * AUDIO_SAMPLE_RATE);
+
+      if (event.kind === 'countdown') {
+        const asset = countdownAsset;
+        if (asset) {
+          mixInterleaved(mix, asset.data, asset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      if (event.kind === 'reveal') {
+        if (settings.revealSoundRandomize && revealVariantAssets.length > 0) {
+          const index = Math.abs(event.puzzleIndex) % revealVariantAssets.length;
+          const asset = revealVariantAssets[index];
+          if (asset) {
+            mixInterleaved(mix, asset.data, asset.frames, AUDIO_CHANNELS, startFrame, gain);
+            return;
+          }
+        }
+        if (revealAsset) {
+          mixInterleaved(mix, revealAsset.data, revealAsset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      if (event.kind === 'marker') {
+        if (markerAsset) {
+          mixInterleaved(mix, markerAsset.data, markerAsset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      if (event.kind === 'blink') {
+        if (blinkAsset) {
+          mixInterleaved(mix, blinkAsset.data, blinkAsset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      if (event.kind === 'play') {
+        if (playAsset) {
+          mixInterleaved(mix, playAsset.data, playAsset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      if (event.kind === 'intro') {
+        if (introAsset) {
+          mixInterleaved(mix, introAsset.data, introAsset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      if (event.kind === 'transition') {
+        if (transitionAsset) {
+          mixInterleaved(mix, transitionAsset.data, transitionAsset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      if (event.kind === 'outro') {
+        if (outroAsset) {
+          mixInterleaved(mix, outroAsset.data, outroAsset.frames, AUDIO_CHANNELS, startFrame, gain);
+          return;
+        }
+      }
+
+      const cueBuffer = createCueAudioBuffer(event.kind, gain);
+      if (!cueBuffer) return;
+      mixInterleaved(mix, cueBuffer.data, cueBuffer.frames, AUDIO_CHANNELS, startFrame, 1);
+    });
+  }
+
+  if (introClipAsset) {
+    const introDuration = resolveIntroDuration(settings);
+    const maxFrames = introDuration > 0
+      ? Math.min(introClipAsset.frames, Math.ceil(introDuration * AUDIO_SAMPLE_RATE))
+      : introClipAsset.frames;
+    mixInterleaved(mix, introClipAsset.data, maxFrames, AUDIO_CHANNELS, 0, 1);
+  }
+
+  if (hasMusic && audioAssets?.music) {
+    const musicResampled = resampleInterleaved(audioAssets.music, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS);
+    if (musicResampled) {
+      const musicGain = new Float32Array(totalFrames);
+      const baseVolume = clamp01(settings.backgroundMusicVolume);
+      timeline.forEach((segment) => {
+        const level = baseVolume * resolvePhaseLevel(settings.musicPhaseLevels, segment.phase);
+        const startFrame = Math.max(0, Math.round(segment.start * AUDIO_SAMPLE_RATE));
+        const endFrame = Math.min(totalFrames, Math.round(segment.end * AUDIO_SAMPLE_RATE));
+        for (let frame = startFrame; frame < endFrame; frame += 1) {
+          musicGain[frame] = level;
+        }
+      });
+
+      const fadeInFrames = Math.round(Math.max(0, settings.backgroundMusicFadeIn) * AUDIO_SAMPLE_RATE);
+      const fadeOutFrames = Math.round(Math.max(0, settings.backgroundMusicFadeOut) * AUDIO_SAMPLE_RATE);
+      if (fadeInFrames > 0) {
+        for (let frame = 0; frame < Math.min(fadeInFrames, totalFrames); frame += 1) {
+          musicGain[frame] *= frame / fadeInFrames;
+        }
+      }
+      if (fadeOutFrames > 0) {
+        for (let frame = 0; frame < Math.min(fadeOutFrames, totalFrames); frame += 1) {
+          const index = totalFrames - 1 - frame;
+          if (index < 0) break;
+          musicGain[index] *= frame / fadeOutFrames;
+        }
+      }
+
+      if (settings.backgroundMusicDuckingAmount > 0 && cueEvents.length > 0) {
+        const duckFactor = new Float32Array(totalFrames);
+        duckFactor.fill(1);
+        const duckDepth = clamp01(settings.backgroundMusicDuckingAmount);
+        const minGain = 1 - duckDepth;
+        const attackFrames = Math.max(1, Math.round(0.04 * AUDIO_SAMPLE_RATE));
+        const holdFrames = Math.max(1, Math.round(0.08 * AUDIO_SAMPLE_RATE));
+        const releaseFrames = Math.max(1, Math.round(0.22 * AUDIO_SAMPLE_RATE));
+
+        cueEvents.forEach((event) => {
+          const offset = event.kind === 'countdown' ? countdownOffset : revealOffset;
+          const centerFrame = Math.round(clamp(event.timestamp + offset, 0, totalDuration) * AUDIO_SAMPLE_RATE);
+          const attackStart = Math.max(0, centerFrame - attackFrames);
+          const holdEnd = Math.min(totalFrames, centerFrame + holdFrames);
+          const releaseEnd = Math.min(totalFrames, holdEnd + releaseFrames);
+
+          for (let frame = attackStart; frame < centerFrame; frame += 1) {
+            const t = (frame - attackStart) / Math.max(1, centerFrame - attackStart);
+            const factor = 1 - duckDepth * t;
+            duckFactor[frame] = Math.min(duckFactor[frame], factor);
+          }
+          for (let frame = centerFrame; frame < holdEnd; frame += 1) {
+            duckFactor[frame] = Math.min(duckFactor[frame], minGain);
+          }
+          for (let frame = holdEnd; frame < releaseEnd; frame += 1) {
+            const t = (frame - holdEnd) / Math.max(1, releaseEnd - holdEnd);
+            const factor = minGain + duckDepth * t;
+            duckFactor[frame] = Math.min(duckFactor[frame], factor);
+          }
+        });
+
+        for (let frame = 0; frame < totalFrames; frame += 1) {
+          musicGain[frame] *= duckFactor[frame];
+        }
+      }
+
+      const musicFrames = musicResampled.frames;
+      const musicData = musicResampled.data;
+      const loop = settings.backgroundMusicLoop;
+      const offsetFrames = Math.round(Math.max(0, settings.backgroundMusicOffsetSec) * AUDIO_SAMPLE_RATE);
+
+      for (let frame = 0; frame < totalFrames; frame += 1) {
+        const gain = musicGain[frame];
+        if (gain <= 0) continue;
+        const musicFrame = frame + offsetFrames;
+        if (!loop && musicFrame >= musicFrames) continue;
+        const sourceFrame = loop ? musicFrame % musicFrames : musicFrame;
+        const sourceIndex = sourceFrame * AUDIO_CHANNELS;
+        const targetIndex = frame * AUDIO_CHANNELS;
+        for (let channel = 0; channel < AUDIO_CHANNELS; channel += 1) {
+          mix[targetIndex + channel] = clamp(
+            mix[targetIndex + channel] + musicData[sourceIndex + channel] * gain,
+            -2,
+            2
+          );
+        }
+      }
+    }
+  }
+
+  applySoftLimiter(mix, settings.audioLimiterEnabled);
+
+  return new AudioSample({
+    data: mix,
+    format: 'f32',
+    numberOfChannels: AUDIO_CHANNELS,
+    sampleRate: AUDIO_SAMPLE_RATE,
+    timestamp: 0
+  });
+};
 
 const hexToRgba = (hex: string, alpha: number) => {
   if (!hex.startsWith('#')) return hex;
@@ -282,6 +890,674 @@ const drawRoundedRect = (
     ctx.lineWidth = options.lineWidth ?? 1;
     ctx.strokeStyle = options.stroke;
     ctx.stroke();
+  }
+};
+
+const resolveTextProgressFillColors = (remainingPercent: number, visualTheme: VisualTheme) => {
+  return resolveSmoothTextProgressFillColors(remainingPercent, visualTheme);
+};
+
+const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
+  const safeText = text.trim() || 'PROGRESS';
+  const widthBound = width / Math.max(4.8, safeText.length * 0.68);
+  const heightBound = height * 0.78;
+  return clamp(Math.min(preferred, widthBound, heightBound), 12, 256);
+};
+
+const drawTextProgressLabel = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  label: string,
+  remainingPercent: number,
+  styleModules: ReturnType<typeof resolveVideoStyleModules>,
+  visualTheme: VisualTheme,
+  scale: number
+) => {
+  const safeLabel = label.trim() || 'PROGRESS';
+  const width = Math.max(1, rect.width);
+  const height = Math.max(1, rect.height);
+  const x = rect.x;
+  const y = rect.y;
+  const textRect: Rect = { x, y, width, height, radius: 0 };
+  const fontSize = resolveTextProgressFontSize(
+    safeLabel,
+    width,
+    height,
+    Math.max(18, height * 1.24, width, 28 * scale)
+  );
+  const textX = x + width / 2;
+  const textY = y + height * 0.68;
+  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08));
+  const shellFill = TEXT_PROGRESS_EMPTY_FILL;
+  const shellStroke = '#111827';
+  const fillColors = resolveTextProgressFillColors(remainingPercent, visualTheme);
+  const textCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
+  const textCtx = textCanvas.getContext('2d');
+
+  if (!textCtx) {
+    return;
+  }
+
+  textCtx.clearRect(0, 0, width, height);
+  textCtx.textAlign = 'center';
+  textCtx.textBaseline = 'alphabetic';
+  textCtx.font = `${styleModules.text.titleCanvasWeight} ${fontSize}px ${styleModules.text.titleCanvasFamily}`;
+  const metrics = textCtx.measureText(safeLabel);
+  const textSpanWidth = Math.max(
+    1,
+    Math.min(width, Math.max(metrics.width, (metrics.actualBoundingBoxLeft || 0) + (metrics.actualBoundingBoxRight || 0)))
+  );
+  const fillX = Math.max(0, (width - textSpanWidth) / 2);
+  const fillWidth = Math.max(0, Math.min(textSpanWidth, (textSpanWidth * clamp(remainingPercent, 0, 100)) / 100));
+  textCtx.fillStyle = '#000000';
+  textCtx.fillText(safeLabel, width / 2, height * 0.68);
+  textCtx.globalCompositeOperation = 'source-in';
+  const gradient = textCtx.createLinearGradient(0, 0, width, 0);
+  gradient.addColorStop(0, fillColors.start);
+  gradient.addColorStop(0.58, fillColors.middle);
+  gradient.addColorStop(1, fillColors.end);
+  textCtx.fillStyle = gradient;
+  textCtx.fillRect(fillX, 0, fillWidth, height);
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `${styleModules.text.titleCanvasWeight} ${fontSize}px ${styleModules.text.titleCanvasFamily}`;
+  ctx.lineWidth = strokeWidth;
+  ctx.strokeStyle = shellStroke;
+  ctx.fillStyle = shellFill;
+  ctx.strokeText(safeLabel, textX, textY);
+  ctx.fillText(safeLabel, textX, textY);
+  ctx.drawImage(textCanvas, textRect.x, textRect.y, textRect.width, textRect.height);
+  ctx.restore();
+};
+
+const drawTimerIndicator = (
+  ctx: CanvasRenderingContext2D,
+  style: ReturnType<typeof resolveVideoStyleModules>['timer'],
+  color: string,
+  x: number,
+  centerY: number,
+  dotSize: number
+) => {
+  if (style.dotKind === 'none') return 0;
+  const indicatorWidth = style.dotKind === 'bar' ? Math.round(dotSize * 1.45) : dotSize;
+  ctx.save();
+  ctx.fillStyle = color;
+  if (style.dotKind === 'bar') {
+    drawRoundedRect(
+      ctx,
+      {
+        x,
+        y: centerY - Math.max(2, Math.round(dotSize * 0.22)),
+        width: indicatorWidth,
+        height: Math.max(4, Math.round(dotSize * 0.45)),
+        radius: Math.max(2, Math.round(dotSize * 0.2))
+      },
+      { fill: color }
+    );
+  } else {
+    ctx.translate(x + indicatorWidth / 2, centerY);
+    if (style.dotKind === 'spark') {
+      ctx.rotate(Math.PI / 4);
+    }
+    drawRoundedRect(
+      ctx,
+      {
+        x: -dotSize / 2,
+        y: -dotSize / 2,
+        width: dotSize,
+        height: dotSize,
+        radius: style.dotKind === 'spark' ? Math.max(2, Math.round(dotSize * 0.22)) : dotSize / 2
+      },
+      { fill: color }
+    );
+  }
+  ctx.restore();
+  return indicatorWidth;
+};
+
+const drawTimerTextCentered = (
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  style: ReturnType<typeof resolveVideoStyleModules>['timer'],
+  fontSize: number,
+  color: string
+) => {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.font = `${style.canvasFontWeight} ${fontSize}px ${style.canvasFontFamily}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y + 1);
+  ctx.restore();
+};
+
+const drawTimerTextLeft = (
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  style: ReturnType<typeof resolveVideoStyleModules>['timer'],
+  fontSize: number,
+  color: string
+) => {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.font = `${style.canvasFontWeight} ${fontSize}px ${style.canvasFontFamily}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y + 1);
+  ctx.restore();
+};
+
+const drawTimerLabel = (
+  ctx: CanvasRenderingContext2D,
+  labelText: string,
+  rect: Rect,
+  color: string,
+  fill: string,
+  scale: number
+) => {
+  if (!labelText) return;
+  const labelWidth = Math.max(Math.round(rect.width * 0.26), Math.round(48 * scale));
+  const labelHeight = Math.max(12, Math.round(12 * scale));
+  drawRoundedRect(
+    ctx,
+    {
+      x: rect.x + (rect.width - labelWidth) / 2,
+      y: rect.y + Math.max(2, Math.round(4 * scale)),
+      width: labelWidth,
+      height: labelHeight,
+      radius: Math.round(labelHeight / 2)
+    },
+    { fill, stroke: '#000000', lineWidth: Math.max(1, Math.round(1.25 * scale)) }
+  );
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.font = `900 ${Math.max(7, Math.round(7 * scale))}px "Segoe UI", Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(labelText, rect.x + rect.width / 2, rect.y + Math.max(2, Math.round(10 * scale)));
+  ctx.restore();
+};
+
+const drawStyledHeaderTimer = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  style: ReturnType<typeof resolveVideoStyleModules>['timer'],
+  visualTheme: (typeof VISUAL_THEMES)[VideoSettings['visualStyle']],
+  textValue: string,
+  headerBackground: string,
+  options: {
+    padX: number;
+    padY: number;
+    dotSize: number;
+    gap: number;
+    fontSize: number;
+    scale: number;
+  },
+  isAlert: boolean,
+  durationSeconds: number,
+  remainingSeconds: number,
+  progress: number
+) => {
+  if (isDesignerTimerStyle(style.id)) {
+    drawDesignerTimerPreset({
+      ctx,
+      styleId: style.id,
+      rect,
+      durationSeconds,
+      remainingSeconds,
+      progress,
+      isEndingSoon: isAlert,
+      visualTheme
+    });
+    return;
+  }
+
+  const profile = resolveTimerRenderProfile(style);
+  const timerBackground = buildTimerBackground(style, visualTheme);
+  const timerTextColor = isAlert ? '#FF6B6B' : visualTheme.timerText;
+  const accentColor = isAlert ? '#FF6B6B' : visualTheme.timerDot;
+  const timerBorderColor = visualTheme.timerBorder;
+  const labelFontSize = Math.max(7, Math.round(options.fontSize * 0.28));
+  const mainRadius = radiusTokenToPx(style.radiusToken, rect.height, options.scale);
+
+  if (profile.shadow !== 'none') {
+    ctx.save();
+    ctx.shadowColor = profile.shadow === 'glow' ? accentColor : 'rgba(0, 0, 0, 0.95)';
+    ctx.shadowBlur = profile.shadow === 'glow' ? Math.max(6, Math.round(14 * options.scale)) : 0;
+    ctx.shadowOffsetX = profile.shadow === 'offset' ? Math.max(2, Math.round(3 * options.scale)) : 0;
+    ctx.shadowOffsetY = profile.shadow === 'offset' ? Math.max(2, Math.round(3 * options.scale)) : 0;
+    drawRoundedRect(ctx, { ...rect, radius: mainRadius }, { fill: timerBackground, stroke: timerBorderColor, lineWidth: Math.max(2, Math.round(2 * options.scale)) });
+    ctx.restore();
+  } else {
+    drawRoundedRect(ctx, { ...rect, radius: mainRadius }, { fill: timerBackground, stroke: timerBorderColor, lineWidth: Math.max(2, Math.round(2 * options.scale)) });
+  }
+
+  if (profile.family === 'chip') {
+    const indicatorWidth = drawTimerIndicator(
+      ctx,
+      style,
+      accentColor,
+      rect.x + options.padX,
+      rect.y + rect.height / 2,
+      options.dotSize
+    );
+    drawTimerTextLeft(
+      ctx,
+      textValue,
+      rect.x + options.padX + indicatorWidth + (style.dotKind === 'none' ? 0 : options.gap),
+      rect.y + rect.height / 2,
+      style,
+      options.fontSize,
+      timerTextColor
+    );
+    return;
+  }
+
+  if (profile.family === 'screen') {
+    const labelWidth = profile.labelMode === 'left' ? Math.max(26, Math.round(options.fontSize * 1.25)) : 0;
+    if (profile.labelMode === 'left') {
+      drawRoundedRect(
+        ctx,
+        { x: rect.x, y: rect.y, width: labelWidth, height: rect.height, radius: Math.max(6, Math.round(8 * options.scale)) },
+        { fill: accentColor, stroke: '#000000', lineWidth: Math.max(1, Math.round(1.5 * options.scale)) }
+      );
+      ctx.save();
+      ctx.fillStyle = '#111827';
+      ctx.font = `900 ${labelFontSize}px "Segoe UI", Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(profile.labelText, rect.x + labelWidth / 2, rect.y + rect.height / 2 + 1);
+      ctx.restore();
+    }
+    const innerRect: Rect = {
+      x: rect.x + labelWidth + Math.max(3, Math.round(4 * options.scale)),
+      y: rect.y + Math.max(3, Math.round(4 * options.scale)),
+      width: rect.width - labelWidth - Math.max(6, Math.round(8 * options.scale)),
+      height: rect.height - Math.max(6, Math.round(8 * options.scale)),
+      radius: Math.max(6, Math.round(8 * options.scale))
+    };
+    drawRoundedRect(
+      ctx,
+      innerRect,
+      {
+        fill:
+          profile.ornament === 'double'
+            ? 'rgba(15,23,42,0.95)'
+            : 'rgba(255,255,255,0.18)',
+        stroke: 'rgba(0,0,0,0.8)',
+        lineWidth: Math.max(1, Math.round(1.5 * options.scale))
+      }
+    );
+    if (profile.ornament === 'double') {
+      for (let index = 0; index < 3; index += 1) {
+        drawRoundedRect(
+          ctx,
+          {
+            x: innerRect.x + Math.round(6 * options.scale) + index * Math.round(8 * options.scale),
+            y: innerRect.y + innerRect.height / 2 - Math.max(1, Math.round(2 * options.scale)),
+            width: Math.max(2, Math.round(4 * options.scale)),
+            height: Math.max(2, Math.round(4 * options.scale)),
+            radius: Math.max(1, Math.round(2 * options.scale))
+          },
+          { fill: accentColor }
+        );
+      }
+    }
+    const indicatorWidth = drawTimerIndicator(
+      ctx,
+      style,
+      accentColor,
+      innerRect.x + Math.max(10, Math.round(16 * options.scale)),
+      innerRect.y + innerRect.height / 2,
+      options.dotSize
+    );
+    drawTimerTextCentered(
+      ctx,
+      textValue,
+      innerRect.x + innerRect.width / 2 + (style.dotKind === 'none' ? 0 : Math.round(indicatorWidth * 0.35)),
+      innerRect.y + innerRect.height / 2,
+      style,
+      options.fontSize,
+      timerTextColor
+    );
+    return;
+  }
+
+  if (profile.family === 'split') {
+    if (profile.labelMode === 'top') {
+      drawTimerLabel(ctx, profile.labelText, rect, accentColor, '#FFFFFF', options.scale);
+    } else {
+      const panelWidth = Math.max(28, Math.round(options.fontSize * 1.5));
+      ctx.save();
+      if (profile.ornament === 'chevron') {
+        ctx.beginPath();
+        ctx.moveTo(rect.x, rect.y);
+        ctx.lineTo(rect.x + panelWidth - Math.round(8 * options.scale), rect.y);
+        ctx.lineTo(rect.x + panelWidth, rect.y + rect.height / 2);
+        ctx.lineTo(rect.x + panelWidth - Math.round(8 * options.scale), rect.y + rect.height);
+        ctx.lineTo(rect.x, rect.y + rect.height);
+        ctx.closePath();
+        ctx.fillStyle = accentColor;
+        ctx.fill();
+        ctx.lineWidth = Math.max(1, Math.round(1.5 * options.scale));
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+      } else {
+        drawRoundedRect(
+          ctx,
+          { x: rect.x, y: rect.y, width: panelWidth, height: rect.height, radius: Math.max(6, Math.round(8 * options.scale)) },
+          { fill: accentColor, stroke: '#000000', lineWidth: Math.max(1, Math.round(1.5 * options.scale)) }
+        );
+      }
+      ctx.fillStyle = '#111827';
+      ctx.font = `900 ${labelFontSize}px "Segoe UI", Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(profile.labelText, rect.x + panelWidth / 2 - (profile.ornament === 'chevron' ? Math.round(4 * options.scale) : 0), rect.y + rect.height / 2 + 1);
+      ctx.restore();
+    }
+    if (profile.ornament === 'panel') {
+      drawRoundedRect(
+        ctx,
+        {
+          x: rect.x + Math.max(3, Math.round(4 * options.scale)),
+          y: rect.y + Math.max(3, Math.round(4 * options.scale)),
+          width: rect.width - Math.max(6, Math.round(8 * options.scale)),
+          height: rect.height - Math.max(6, Math.round(8 * options.scale)),
+          radius: Math.max(6, Math.round(8 * options.scale))
+        },
+        { stroke: 'rgba(0,0,0,0.55)', lineWidth: Math.max(1, Math.round(1.2 * options.scale)) }
+      );
+    }
+    const indicatorWidth = drawTimerIndicator(
+      ctx,
+      style,
+      accentColor,
+      rect.x + Math.max(8, Math.round(12 * options.scale)) + (profile.labelMode === 'left' ? Math.max(28, Math.round(options.fontSize * 1.5)) : 0),
+      rect.y + rect.height / 2,
+      options.dotSize
+    );
+    drawTimerTextCentered(
+      ctx,
+      textValue,
+      rect.x + rect.width / 2 + (profile.labelMode === 'left' ? Math.round(options.fontSize * 0.3) : 0),
+      rect.y + rect.height / 2 + (profile.labelMode === 'top' ? Math.round(options.fontSize * 0.1) : 0),
+      style,
+      options.fontSize,
+      timerTextColor
+    );
+    return;
+  }
+
+  if (profile.family === 'ticket') {
+    const notchRadius = Math.max(5, Math.round(6 * options.scale));
+    ctx.save();
+    ctx.fillStyle = headerBackground;
+    ctx.beginPath();
+    ctx.arc(rect.x, rect.y + rect.height / 2, notchRadius, 0, Math.PI * 2);
+    ctx.arc(rect.x + rect.width, rect.y + rect.height / 2, notchRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    const labelWidth = Math.max(30, Math.round(options.fontSize * 1.35));
+    ctx.save();
+    ctx.setLineDash([Math.max(3, Math.round(3 * options.scale)), Math.max(3, Math.round(3 * options.scale))]);
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = Math.max(1, Math.round(1.2 * options.scale));
+    ctx.beginPath();
+    ctx.moveTo(rect.x + labelWidth, rect.y + Math.max(4, Math.round(6 * options.scale)));
+    ctx.lineTo(rect.x + labelWidth, rect.y + rect.height - Math.max(4, Math.round(6 * options.scale)));
+    ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.fillStyle = accentColor;
+    ctx.font = `900 ${labelFontSize}px "Segoe UI", Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(profile.labelText, rect.x + labelWidth / 2, rect.y + rect.height / 2 + 1);
+    ctx.restore();
+    drawTimerTextCentered(
+      ctx,
+      textValue,
+      rect.x + labelWidth + (rect.width - labelWidth) / 2,
+      rect.y + rect.height / 2,
+      style,
+      options.fontSize,
+      timerTextColor
+    );
+    return;
+  }
+
+  if (profile.family === 'flip') {
+    const flipRect = { ...rect, radius: Math.max(6, Math.round(8 * options.scale)) };
+    drawRoundedRect(ctx, flipRect, { fill: 'rgba(15,23,42,0.98)', stroke: timerBorderColor, lineWidth: Math.max(2, Math.round(2 * options.scale)) });
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(flipRect.x, flipRect.y, flipRect.width, flipRect.height / 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.fillRect(flipRect.x, flipRect.y + flipRect.height / 2, flipRect.width, flipRect.height / 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.26)';
+    ctx.lineWidth = Math.max(1, Math.round(1.2 * options.scale));
+    ctx.beginPath();
+    ctx.moveTo(flipRect.x, flipRect.y + flipRect.height / 2);
+    ctx.lineTo(flipRect.x + flipRect.width, flipRect.y + flipRect.height / 2);
+    ctx.stroke();
+    if (profile.labelText) {
+      ctx.fillStyle = accentColor;
+      ctx.font = `900 ${labelFontSize}px "Segoe UI", Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(profile.labelText, flipRect.x + flipRect.width / 2, flipRect.y + Math.max(2, Math.round(3 * options.scale)));
+    }
+    drawTimerTextCentered(ctx, textValue, flipRect.x + flipRect.width / 2, flipRect.y + flipRect.height / 2 + Math.round(options.fontSize * 0.12), style, options.fontSize, timerTextColor);
+    return;
+  }
+
+  if (profile.family === 'ring') {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(rect.x + rect.width / 2, rect.y + rect.height / 2, Math.max(8, rect.width / 2 - Math.max(4, Math.round(6 * options.scale))), 0, Math.PI * 2);
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = Math.max(3, Math.round(3 * options.scale));
+    ctx.stroke();
+    if (profile.ornament === 'double') {
+      ctx.beginPath();
+      ctx.arc(rect.x + rect.width / 2, rect.y + rect.height / 2, Math.max(6, rect.width / 2 - Math.max(10, Math.round(12 * options.scale))), 0, Math.PI * 2);
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = Math.max(1, Math.round(1.2 * options.scale));
+      ctx.stroke();
+    }
+    ctx.restore();
+    drawTimerLabel(ctx, profile.labelText, rect, accentColor, '#FFFFFF', options.scale);
+    drawTimerTextCentered(ctx, textValue, rect.x + rect.width / 2, rect.y + rect.height / 2 + Math.round(options.fontSize * 0.1), style, options.fontSize, timerTextColor);
+    return;
+  }
+
+  if (profile.family === 'sticker') {
+    if (profile.ornament === 'double') {
+      drawRoundedRect(
+        ctx,
+        {
+          x: rect.x + Math.max(3, Math.round(3 * options.scale)),
+          y: rect.y + Math.max(3, Math.round(3 * options.scale)),
+          width: rect.width - Math.max(6, Math.round(6 * options.scale)),
+          height: rect.height - Math.max(6, Math.round(6 * options.scale)),
+          radius: Math.max(8, Math.round(10 * options.scale))
+        },
+        { stroke: 'rgba(0,0,0,0.45)', lineWidth: Math.max(1, Math.round(1.2 * options.scale)) }
+      );
+    }
+    for (const orb of [
+      { x: rect.x + Math.round(10 * options.scale), y: rect.y + Math.round(8 * options.scale), radius: Math.max(1, Math.round(2 * options.scale)), color: 'rgba(255,255,255,0.55)' },
+      { x: rect.x + rect.width - Math.round(12 * options.scale), y: rect.y + rect.height - Math.round(10 * options.scale), radius: Math.max(1, Math.round(2 * options.scale)), color: 'rgba(255,255,255,0.45)' },
+      { x: rect.x + rect.width - Math.round(10 * options.scale), y: rect.y + Math.round(12 * options.scale), radius: Math.max(1, Math.round(2 * options.scale)), color: accentColor }
+    ]) {
+      ctx.beginPath();
+      ctx.arc(orb.x, orb.y, orb.radius, 0, Math.PI * 2);
+      ctx.fillStyle = orb.color;
+      ctx.fill();
+    }
+    if (profile.labelText) {
+      drawTimerLabel(ctx, profile.labelText, rect, accentColor, '#FFFFFF', options.scale);
+    }
+    const indicatorWidth = drawTimerIndicator(
+      ctx,
+      style,
+      accentColor,
+      rect.x + Math.max(10, Math.round(12 * options.scale)),
+      rect.y + rect.height / 2,
+      options.dotSize
+    );
+    drawTimerTextCentered(
+      ctx,
+      textValue,
+      rect.x + rect.width / 2 + (style.dotKind === 'none' ? 0 : Math.round(indicatorWidth * 0.3)),
+      rect.y + rect.height / 2 + (profile.labelText ? Math.round(options.fontSize * 0.12) : 0),
+      style,
+      options.fontSize,
+      timerTextColor
+    );
+    return;
+  }
+
+  if (profile.family === 'marquee') {
+    const bulbs = 7;
+    for (let index = 0; index < bulbs; index += 1) {
+      const x = rect.x + Math.round((rect.width / (bulbs + 1)) * (index + 1));
+      for (const y of [rect.y + Math.max(3, Math.round(4 * options.scale)), rect.y + rect.height - Math.max(3, Math.round(4 * options.scale))]) {
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(1.5, Math.round(2 * options.scale)), 0, Math.PI * 2);
+        ctx.fillStyle = index % 2 === 0 ? accentColor : '#FFFFFF';
+        ctx.fill();
+      }
+    }
+    drawRoundedRect(
+      ctx,
+      {
+        x: rect.x + Math.max(6, Math.round(8 * options.scale)),
+        y: rect.y + Math.max(6, Math.round(8 * options.scale)),
+        width: rect.width - Math.max(12, Math.round(16 * options.scale)),
+        height: rect.height - Math.max(12, Math.round(16 * options.scale)),
+        radius: Math.max(6, Math.round(8 * options.scale))
+      },
+      { fill: 'rgba(255,255,255,0.08)', stroke: 'rgba(0,0,0,0.7)', lineWidth: Math.max(1, Math.round(1.2 * options.scale)) }
+    );
+    drawTimerLabel(ctx, profile.labelText, rect, accentColor, '#FFFFFF', options.scale);
+    drawTimerTextCentered(ctx, textValue, rect.x + rect.width / 2, rect.y + rect.height / 2 + Math.round(options.fontSize * 0.12), style, options.fontSize, timerTextColor);
+    return;
+  }
+
+  if (profile.family === 'frame') {
+    if (profile.ornament === 'double') {
+      drawRoundedRect(
+        ctx,
+        {
+          x: rect.x + Math.max(3, Math.round(4 * options.scale)),
+          y: rect.y + Math.max(3, Math.round(4 * options.scale)),
+          width: rect.width - Math.max(6, Math.round(8 * options.scale)),
+          height: rect.height - Math.max(6, Math.round(8 * options.scale)),
+          radius: Math.max(6, Math.round(6 * options.scale))
+        },
+        { stroke: 'rgba(0,0,0,0.55)', lineWidth: Math.max(1, Math.round(1.2 * options.scale)) }
+      );
+    }
+    if (profile.ornament === 'brackets') {
+      const bracket = Math.max(6, Math.round(8 * options.scale));
+      ctx.save();
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = Math.max(1, Math.round(1.5 * options.scale));
+      for (const [startX, startY, horizontal, vertical] of [
+        [rect.x + 2, rect.y + bracket, rect.x + 2, rect.y + 2],
+        [rect.x + bracket, rect.y + 2, rect.x + 2, rect.y + 2],
+        [rect.x + rect.width - bracket, rect.y + 2, rect.x + rect.width - 2, rect.y + 2],
+        [rect.x + rect.width - 2, rect.y + bracket, rect.x + rect.width - 2, rect.y + 2],
+        [rect.x + 2, rect.y + rect.height - bracket, rect.x + 2, rect.y + rect.height - 2],
+        [rect.x + bracket, rect.y + rect.height - 2, rect.x + 2, rect.y + rect.height - 2],
+        [rect.x + rect.width - bracket, rect.y + rect.height - 2, rect.x + rect.width - 2, rect.y + rect.height - 2],
+        [rect.x + rect.width - 2, rect.y + rect.height - bracket, rect.x + rect.width - 2, rect.y + rect.height - 2]
+      ] as Array<[number, number, number, number]>) {
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(horizontal, vertical);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    const labelOffset = profile.labelMode === 'left' ? Math.max(24, Math.round(options.fontSize * 1.15)) : 0;
+    if (profile.labelMode === 'left') {
+      ctx.save();
+      ctx.fillStyle = accentColor;
+      ctx.font = `900 ${labelFontSize}px "Segoe UI", Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(profile.labelText, rect.x + labelOffset / 2, rect.y + rect.height / 2 + 1);
+      ctx.restore();
+      ctx.beginPath();
+      ctx.moveTo(rect.x + labelOffset, rect.y + Math.max(4, Math.round(6 * options.scale)));
+      ctx.lineTo(rect.x + labelOffset, rect.y + rect.height - Math.max(4, Math.round(6 * options.scale)));
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = Math.max(1, Math.round(1.2 * options.scale));
+      ctx.stroke();
+    }
+    drawTimerTextCentered(
+      ctx,
+      textValue,
+      rect.x + labelOffset + (rect.width - labelOffset) / 2,
+      rect.y + rect.height / 2,
+      style,
+      options.fontSize,
+      timerTextColor
+    );
+    return;
+  }
+
+  if (profile.family === 'dual') {
+    const labelWidth = profile.labelMode === 'left' ? Math.max(28, Math.round(options.fontSize * 1.2)) : 0;
+    if (profile.labelMode === 'left') {
+      drawRoundedRect(
+        ctx,
+        {
+          x: rect.x + Math.max(2, Math.round(3 * options.scale)),
+          y: rect.y + Math.max(3, Math.round(4 * options.scale)),
+          width: labelWidth,
+          height: rect.height - Math.max(6, Math.round(8 * options.scale)),
+          radius: Math.max(8, Math.round(10 * options.scale))
+        },
+        { fill: accentColor, stroke: '#000000', lineWidth: Math.max(1, Math.round(1.2 * options.scale)) }
+      );
+      ctx.save();
+      ctx.fillStyle = '#111827';
+      ctx.font = `900 ${labelFontSize}px "Segoe UI", Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(profile.labelText, rect.x + Math.max(2, Math.round(3 * options.scale)) + labelWidth / 2, rect.y + rect.height / 2 + 1);
+      ctx.restore();
+    }
+    drawRoundedRect(
+      ctx,
+      {
+        x: rect.x + labelWidth + Math.max(4, Math.round(6 * options.scale)),
+        y: rect.y + Math.max(4, Math.round(5 * options.scale)),
+        width: rect.width - labelWidth - Math.max(8, Math.round(12 * options.scale)),
+        height: rect.height - Math.max(8, Math.round(10 * options.scale)),
+        radius: Math.max(10, Math.round(12 * options.scale))
+      },
+      { fill: 'rgba(255,255,255,0.2)', stroke: 'rgba(0,0,0,0.75)', lineWidth: Math.max(1, Math.round(1.2 * options.scale)) }
+    );
+    drawTimerTextCentered(
+      ctx,
+      textValue,
+      rect.x + labelWidth + (rect.width - labelWidth) / 2,
+      rect.y + rect.height / 2,
+      style,
+      options.fontSize,
+      timerTextColor
+    );
+    return;
   }
 };
 
@@ -406,12 +1682,102 @@ const loadImage = async (src: string): Promise<ImageBitmap> => {
   }
   const blob = await response.blob();
   throwIfCanceled();
-  return await createImageBitmap(blob);
+  return await decodeRuntimeImageBitmapFromBlob(blob);
+};
+
+const loadLogoImage = async (src: string): Promise<ImageBitmap> => {
+  const response = await fetch(src);
+  if (!response.ok) {
+    throw new Error('Failed to fetch logo image for export.');
+  }
+  const blob = await response.blob();
+  throwIfCanceled();
+
+  const baseBitmap = await decodeRuntimeImageBitmapFromBlob(blob);
+  const isSvg =
+    blob.type.includes('svg') ||
+    src.startsWith('data:image/svg+xml') ||
+    src.startsWith('data:image/svg+xml;base64,');
+
+  if (!isSvg) {
+    return baseBitmap;
+  }
+
+  const maxDimension = Math.max(baseBitmap.width, baseBitmap.height);
+  if (maxDimension >= 2048 || maxDimension <= 0) {
+    return baseBitmap;
+  }
+
+  const scale = 2048 / maxDimension;
+  const targetWidth = Math.max(1, Math.round(baseBitmap.width * scale));
+  const targetHeight = Math.max(1, Math.round(baseBitmap.height * scale));
+
+  try {
+    const resizedBitmap = await createImageBitmap(blob, {
+      resizeWidth: targetWidth,
+      resizeHeight: targetHeight,
+      resizeQuality: 'high'
+    });
+    releaseBitmap(baseBitmap);
+    return resizedBitmap;
+  } catch {
+    return baseBitmap;
+  }
+};
+
+const prepareIntroVideoResource = async (file: File): Promise<IntroVideoResource> => {
+  try {
+    const input = new Input({
+      source: new BlobSource(file),
+      formats: ALL_FORMATS
+    });
+    const track = await input.getPrimaryVideoTrack();
+    if (!track) {
+      throw new Error('The intro clip does not contain a video track.');
+    }
+    const sink = new CanvasSink(track, { alpha: true });
+    let duration = 0;
+    try {
+      duration = await track.computeDuration();
+    } catch {
+      duration = 0;
+    }
+    return {
+      sink,
+      duration
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === 'The intro clip does not contain a video track.') {
+      throw error;
+    }
+    const detail = error instanceof Error && error.message ? ` ${error.message}` : '';
+    throw new Error(
+      `Failed to decode the intro clip for export. Re-save it as MP4 (H.264/AAC) or disable the intro clip.${detail}`
+    );
+  }
+};
+
+const drawIntroVideoFrame = async (
+  ctx: CanvasRenderingContext2D,
+  introVideo: IntroVideoResource,
+  phaseElapsed: number,
+  width: number,
+  height: number
+) => {
+  const safeDuration = introVideo.duration > 0.01 ? introVideo.duration : Math.max(0.5, phaseElapsed);
+  const sampleTimestamp = Math.min(Math.max(0, phaseElapsed), Math.max(0, safeDuration - 1 / FPS));
+  const wrapped = await introVideo.sink.getCanvas(sampleTimestamp);
+  const canvas = (wrapped?.canvas as OffscreenCanvas | undefined) ?? null;
+  if (!canvas) {
+    return false;
+  }
+  drawImageCover(ctx, canvas, { x: 0, y: 0, width, height, radius: 0 });
+  return true;
 };
 
 const loadBinaryImage = async (buffer: ArrayBuffer, mimeType: string): Promise<ImageBitmap> => {
   throwIfCanceled();
-  return await createImageBitmap(new Blob([buffer], { type: mimeType || 'image/png' }));
+  return await decodeRuntimeImageBitmapFromBlob(new Blob([buffer], { type: mimeType || 'image/png' }));
 };
 
 const releaseBitmap = (bitmap: ImageBitmap | null | undefined) => {
@@ -543,7 +1909,13 @@ const getExportDimensions = (
   };
 };
 
-const computeCoverFrame = (viewport: Rect, image: ImageBitmap): Rect => {
+const computeCoverFrame = (
+  viewport: Rect,
+  image: {
+    width: number;
+    height: number;
+  }
+): Rect => {
   const imageWidth = image.width;
   const imageHeight = image.height;
 
@@ -563,7 +1935,7 @@ const computeCoverFrame = (viewport: Rect, image: ImageBitmap): Rect => {
   };
 };
 
-const drawImageCover = (ctx: CanvasRenderingContext2D, image: ImageBitmap, panel: Rect) => {
+const drawImageCover = (ctx: CanvasRenderingContext2D, image: CanvasImageSource & { width: number; height: number }, panel: Rect) => {
   const coverFrame = computeCoverFrame(panel, image);
   ctx.save();
   roundRectPath(ctx, panel);
@@ -775,13 +2147,26 @@ const resolveSceneText = (
   };
 };
 
+const resolveIntroDuration = (settings: VideoSettings) => {
+  if (settings.introVideoEnabled && settings.introVideoSrc) {
+    const clipDuration = Number(settings.introVideoDuration);
+    if (Number.isFinite(clipDuration) && clipDuration > 0) {
+      return clipDuration;
+    }
+    const fallbackDuration = Number(settings.sceneSettings.introDuration);
+    return Number.isFinite(fallbackDuration) ? Math.max(0, fallbackDuration) : 0;
+  }
+
+  return settings.sceneSettings.introEnabled
+    ? Math.max(0, settings.sceneSettings.introDuration)
+    : 0;
+};
+
 const buildTimeline = (puzzles: RenderablePuzzle[], settings: VideoSettings): TimelineSegment[] => {
   const showDuration = Math.max(0.1, settings.showDuration);
   const revealDuration = Math.max(0.5, settings.revealDuration);
   const transitionDuration = Math.max(0, settings.transitionDuration);
-  const introDuration = settings.sceneSettings.introEnabled
-    ? Math.max(0, settings.sceneSettings.introDuration)
-    : 0;
+  const introDuration = resolveIntroDuration(settings);
   const outroDuration = settings.sceneSettings.outroEnabled
     ? Math.max(0, settings.sceneSettings.outroDuration)
     : 0;
@@ -869,11 +2254,15 @@ const getSceneAtTime = (
     const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
     const revealRegionCount = puzzle.regions.length;
     const isBlinkingEnabled = settings.enableBlinking !== false;
+    const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
     const revealStepSeconds = Math.min(
       Math.max(0.5, settings.sequentialRevealStep),
       revealPhaseDuration / Math.max(1, revealRegionCount + 1)
     );
-    const revealBlinkStartTime = revealRegionCount * revealStepSeconds;
+    const revealBlinkStartTime =
+      revealRegionCount > 0
+        ? Math.max(0, (revealRegionCount - 1) * revealStepSeconds + blinkCycleDuration)
+        : 0;
     const revealElapsed = clamp(phaseElapsed, 0, revealPhaseDuration);
 
     revealedRegionCount =
@@ -937,12 +2326,13 @@ const drawSceneCard = (
       : 'transition';
   const packagePreset =
     VIDEO_PACKAGE_PRESETS[settings.videoPackagePreset] ?? VIDEO_PACKAGE_PRESETS.gameshow;
+  const styleModules = resolveVideoStyleModules(settings, packagePreset);
   const variant =
-    kind === 'intro'
-      ? packagePreset.introCardVariant
+      kind === 'intro'
+      ? styleModules.sceneCards.intro
       : kind === 'outro'
-      ? packagePreset.outroCardVariant
-      : packagePreset.transitionCardVariant;
+      ? styleModules.sceneCards.outro
+      : styleModules.sceneCards.transition;
   const transitionProgress = kind === 'transition' ? clamp(scene.progressPercent / 100, 0, 1) : 0;
   const transitionSmooth =
     kind === 'transition'
@@ -954,17 +2344,25 @@ const drawSceneCard = (
           TRANSITION_TUNING.cardOpacityBase +
             transitionSmooth * (TRANSITION_TUNING.cardOpacityPulse - 0.3) -
             transitionProgress * TRANSITION_TUNING.cardOpacityDecay,
-          0,
+          styleModules.transition.activeOpacityFloor,
           1
         )
       : 1;
   const transitionCardTranslateY =
-    kind === 'transition' ? Math.round((1 - transitionSmooth) * (TRANSITION_TUNING.cardTranslateY + 8)) : 0;
+    kind === 'transition'
+      ? Math.round(
+          (1 - transitionSmooth) *
+            (TRANSITION_TUNING.cardTranslateY + 8) *
+            styleModules.transition.cardTranslateMultiplier
+        )
+      : 0;
   const transitionCardScale =
     kind === 'transition'
-      ? TRANSITION_TUNING.cardScaleBase + transitionSmooth * (TRANSITION_TUNING.cardScalePulse + 0.04)
+      ? TRANSITION_TUNING.cardScaleBase +
+        transitionSmooth * (TRANSITION_TUNING.cardScalePulse + 0.04 + styleModules.transition.cardScaleBoost)
       : 1;
-  const transitionCardGlowOpacity = 0.18 + transitionSmooth * 0.34;
+  const transitionCardGlowOpacity =
+    0.18 + transitionSmooth * (0.34 + styleModules.transition.cardGlowBoost);
 
   ctx.save();
   roundRectPath(ctx, gameRect);
@@ -977,6 +2375,37 @@ const drawSceneCard = (
       `rgba(52,35,14,${kind === 'transition' ? (0.24 + transitionSmooth * 0.44).toFixed(3) : '0.48'})`
     );
     overlay.addColorStop(1, 'rgba(19,11,4,0.74)');
+    ctx.fillStyle = overlay;
+  } else if (variant === 'spotlight') {
+    const overlay = ctx.createRadialGradient(
+      gameRect.x + gameRect.width / 2,
+      gameRect.y + gameRect.height / 2,
+      Math.max(1, gameRect.width * 0.08),
+      gameRect.x + gameRect.width / 2,
+      gameRect.y + gameRect.height / 2,
+      Math.max(gameRect.width, gameRect.height)
+    );
+    overlay.addColorStop(
+      0,
+      `rgba(15,23,42,${kind === 'transition' ? (0.18 + transitionSmooth * 0.2).toFixed(3) : '0.12'})`
+    );
+    overlay.addColorStop(0.72, 'rgba(2,6,23,0.88)');
+    overlay.addColorStop(1, 'rgba(1,4,14,0.96)');
+    ctx.fillStyle = overlay;
+  } else if (variant === 'celebration') {
+    const overlay = ctx.createRadialGradient(
+      gameRect.x + gameRect.width / 2,
+      gameRect.y,
+      Math.max(1, gameRect.width * 0.03),
+      gameRect.x + gameRect.width / 2,
+      gameRect.y,
+      Math.max(gameRect.width, gameRect.height)
+    );
+    overlay.addColorStop(
+      0,
+      `rgba(255,255,255,${kind === 'transition' ? (0.22 + transitionSmooth * 0.12).toFixed(3) : '0.26'})`
+    );
+    overlay.addColorStop(1, 'rgba(17,24,39,0.2)');
     ctx.fillStyle = overlay;
   } else if (variant === 'scoreboard') {
     const overlay = ctx.createRadialGradient(
@@ -1019,6 +2448,10 @@ const drawSceneCard = (
   ctx.shadowColor =
     variant === 'storybook'
       ? `rgba(229,191,115,${kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.22'})`
+      : variant === 'spotlight'
+      ? `rgba(255,255,255,${kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.12'})`
+      : variant === 'celebration'
+      ? `rgba(255,255,255,${kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.18'})`
       : variant === 'scoreboard'
       ? `rgba(90,223,255,${kind === 'transition' ? transitionCardGlowOpacity.toFixed(3) : '0.18'})`
       : 'rgba(15,23,42,0.18)';
@@ -1035,12 +2468,30 @@ const drawSceneCard = (
   const cardFill =
     variant === 'storybook'
       ? 'rgba(248,232,194,0.97)'
+      : variant === 'spotlight'
+      ? 'rgba(15,23,42,0.96)'
+      : variant === 'celebration'
+      ? `linear-gradient(180deg, ${visualTheme.headerBg} 0%, ${visualTheme.completionBg} 100%)`
       : variant === 'scoreboard'
       ? 'rgba(13,20,37,0.96)'
       : 'rgba(255,255,255,0.97)';
-  const cardStroke = variant === 'storybook' ? '#4D3E26' : variant === 'scoreboard' ? visualTheme.headerBg : '#111827';
+  const cardStroke =
+    variant === 'storybook'
+      ? '#4D3E26'
+      : variant === 'spotlight'
+      ? visualTheme.timerDot
+      : variant === 'scoreboard'
+      ? visualTheme.headerBg
+      : '#111827';
   drawRoundedRect(ctx, cardRect, {
-    fill: cardFill,
+    fill: typeof cardFill === 'string' && cardFill.startsWith('linear-gradient')
+      ? (() => {
+          const gradient = ctx.createLinearGradient(cardRect.x, cardRect.y, cardRect.x, cardRect.y + cardRect.height);
+          gradient.addColorStop(0, visualTheme.headerBg);
+          gradient.addColorStop(1, visualTheme.completionBg);
+          return gradient;
+        })()
+      : cardFill,
     stroke: cardStroke,
     lineWidth: Math.max(2, Math.round(3 * uiScale))
   });
@@ -1063,20 +2514,40 @@ const drawSceneCard = (
   );
 
   const badgeFontFamily =
-    variant === 'storybook' ? '"Georgia", "Times New Roman", serif' : '"Segoe UI", Arial, sans-serif';
+    variant === 'storybook'
+      ? '"Georgia", "Times New Roman", serif'
+      : styleModules.text.subtitleCanvasFamily;
   const badgeColor =
-    variant === 'scoreboard' ? visualTheme.headerBg : variant === 'storybook' ? '#5A4320' : '#475569';
+    variant === 'scoreboard'
+      ? visualTheme.headerBg
+      : variant === 'storybook'
+      ? '#5A4320'
+      : variant === 'spotlight'
+      ? '#F8FAFC'
+      : variant === 'celebration'
+      ? '#111827'
+      : '#475569';
   const badgeBackground =
     variant === 'scoreboard'
       ? hexToRgba(visualTheme.headerBg, 0.16)
+      : variant === 'spotlight'
+      ? 'rgba(255,255,255,0.08)'
+      : variant === 'celebration'
+      ? 'rgba(255,255,255,0.62)'
       : variant === 'storybook'
       ? 'rgba(255,248,230,0.84)'
       : 'rgba(255,255,255,0.78)';
   const badgeBorder =
-    variant === 'scoreboard' ? hexToRgba(visualTheme.headerBg, 0.7) : variant === 'storybook' ? '#8B6D33' : '#CBD5E1';
-  const badgeText = scene.cardEyebrow.toUpperCase();
+    variant === 'scoreboard'
+      ? hexToRgba(visualTheme.headerBg, 0.7)
+      : variant === 'storybook'
+      ? '#8B6D33'
+      : variant === 'spotlight'
+      ? 'rgba(255,255,255,0.18)'
+      : 'rgba(17,24,39,0.12)';
+  const badgeText = applyTextTransform(scene.cardEyebrow, styleModules.text.subtitleTransform);
   const badgeFontSize = Math.max(10, Math.round(13 * uiScale));
-  ctx.font = `900 ${badgeFontSize}px ${badgeFontFamily}`;
+  ctx.font = `${styleModules.text.subtitleCanvasWeight} ${badgeFontSize}px ${badgeFontFamily}`;
   const badgeWidth = Math.max(
     Math.round(140 * uiScale),
     Math.ceil(ctx.measureText(badgeText).width + Math.round(32 * uiScale))
@@ -1102,14 +2573,19 @@ const drawSceneCard = (
   ctx.textBaseline = 'middle';
   ctx.fillText(badgeText, 0, cardRect.y + Math.round(28 * uiScale) + badgeHeight / 2 + 1);
 
-  const titleFontFamily =
-    variant === 'storybook' ? '"Georgia", "Times New Roman", serif' : '"Arial Black", "Segoe UI", sans-serif';
+  const titleFontFamily = variant === 'storybook' ? '"Georgia", "Times New Roman", serif' : styleModules.text.titleCanvasFamily;
   const subtitleFontFamily =
-    variant === 'storybook' ? '"Georgia", "Times New Roman", serif' : '"Segoe UI", Arial, sans-serif';
-  const titleText = scene.title.toUpperCase();
-  const subtitleText = scene.subtitle.toUpperCase();
-  const textColor = variant === 'storybook' ? '#2E2414' : variant === 'scoreboard' ? '#F8FAFC' : '#111827';
-  const subtitleColor = variant === 'scoreboard' ? '#CBD5E1' : textColor;
+    variant === 'storybook' ? '"Georgia", "Times New Roman", serif' : styleModules.text.subtitleCanvasFamily;
+  const titleText = applyTextTransform(scene.title, styleModules.text.titleTransform);
+  const subtitleText = applyTextTransform(scene.subtitle, styleModules.text.subtitleTransform);
+  const textColor =
+    variant === 'storybook'
+      ? '#2E2414'
+      : variant === 'scoreboard' || variant === 'spotlight'
+      ? '#F8FAFC'
+      : '#111827';
+  const subtitleColor =
+    variant === 'scoreboard' || variant === 'spotlight' ? '#CBD5E1' : textColor;
   const maxTextWidth = cardWidth - Math.round(64 * uiScale);
   const titleFontSize = fitTextSize(
     ctx,
@@ -1128,10 +2604,10 @@ const drawSceneCard = (
     10
   );
   ctx.fillStyle = textColor;
-  ctx.font = `900 ${titleFontSize}px ${titleFontFamily}`;
+  ctx.font = `${styleModules.text.titleCanvasWeight} ${titleFontSize}px ${titleFontFamily}`;
   ctx.fillText(titleText, 0, -Math.round(4 * uiScale));
   ctx.fillStyle = subtitleColor;
-  ctx.font = `800 ${subtitleFontSize}px ${subtitleFontFamily}`;
+  ctx.font = `${styleModules.text.subtitleCanvasWeight} ${subtitleFontSize}px ${subtitleFontFamily}`;
   ctx.fillText(subtitleText, 0, Math.round(48 * uiScale));
 
   const aspectFontSize = Math.max(10, Math.round(12 * uiScale));
@@ -1504,12 +2980,14 @@ const drawFrame = (
   brandLogo: ImageBitmap | null,
   settings: VideoSettings,
   generatedBackgroundPack: VideoExportWorkerStartPayload['generatedBackgroundPack'],
-  scene: RenderScene
+  scene: RenderScene,
+  timestamp: number
 ) => {
   const packagePreset =
     VIDEO_PACKAGE_PRESETS[settings.videoPackagePreset] ?? VIDEO_PACKAGE_PRESETS.gameshow;
   const effectiveVisualStyle = resolveVisualThemeStyle(settings.visualStyle, scene.segment.puzzleIndex);
   const visualTheme = VISUAL_THEMES[effectiveVisualStyle];
+  const styleModules = resolveVideoStyleModules(settings, packagePreset);
   const accent = visualTheme.timerDot;
   const isVerticalLayout = resolvePackageImageArrangement(packagePreset, settings.aspectRatio);
   const customLayoutEnabled = settings.useCustomLayout === true;
@@ -1532,13 +3010,14 @@ const drawFrame = (
         settings.generatedBackgroundShuffleSeed
       )
     : null;
-  const timerBackground = visualTheme.timerBg;
-  const timerTextColor = visualTheme.timerText;
-  const timerBorderColor = visualTheme.timerBorder;
+  const progressFillDefinition =
+    isClassicStyle && styleModules.progress.id === 'package'
+      ? CLASSIC_HUD_SPEC.progress.fillGradient
+      : buildProgressFillDefinition(styleModules.progress, visualTheme);
   const isRevealPhase = scene.segment.phase === 'revealing';
   const shouldRenderHeaderText = scene.segment.phase !== 'intro' && scene.segment.phase !== 'outro';
-  const shouldShowHeaderTimer = !isRevealPhase;
-  const shouldShowHeaderProgress = scene.segment.phase === 'showing';
+  const shouldShowHeaderTimer = settings.showTimer !== false && !isRevealPhase;
+  const shouldShowHeaderProgress = settings.showProgress !== false && scene.segment.phase === 'showing';
   const shouldRenderCustomLogo = Boolean(brandLogo) && customLayoutEnabled;
   const shouldRenderInlineLogo =
     Boolean(brandLogo) && !customLayoutEnabled && !isClassicStyle && !isStorybookStyle && shouldRenderHeaderText;
@@ -1586,8 +3065,16 @@ const drawFrame = (
     : isStorybookStyle
     ? Math.round(18 * uiScale)
     : Math.round(styleFrameLayout.panelRadius * layoutScale);
+  const imagePanelOutlineWidth =
+    Number(settings.imagePanelOutlineThickness) > 0
+      ? Math.max(1, Math.round(Number(settings.imagePanelOutlineThickness) * uiScale))
+      : 0;
+  const imagePanelOutlineColor = settings.imagePanelOutlineColor || '#CEC3A5';
+  const usesImagePanelOutline = imagePanelOutlineWidth > 0;
   const gamePadding = isStorybookStyle
     ? Math.round(8 * uiScale)
+    : usesImagePanelOutline
+    ? 0
     : isClassicStyle
     ? Math.max(0, Math.round(styleFrameLayout.gamePadding * classicLayoutScale))
     : Math.max(0, Math.round(styleFrameLayout.gamePadding * layoutScale));
@@ -1622,26 +3109,39 @@ const drawFrame = (
     remaining: Math.max(0, puzzles.length - (scene.segment.puzzleIndex + 1)),
     preset: ''
   };
+  const rawHeaderTextScale = Number(settings.headerTextOverrides?.scale);
+  const rawHeaderTextOffsetX = Number(settings.headerTextOverrides?.offsetX);
+  const rawHeaderTextOffsetY = Number(settings.headerTextOverrides?.offsetY);
+  const headerTextScale = Number.isFinite(rawHeaderTextScale) ? clamp(rawHeaderTextScale, 0.6, 2.4) : 1;
+  const headerTextOffsetX = Number.isFinite(rawHeaderTextOffsetX) ? rawHeaderTextOffsetX : 0;
+  const headerTextOffsetY = Number.isFinite(rawHeaderTextOffsetY) ? rawHeaderTextOffsetY : 0;
   const puzzleBadgeLabel = fillTemplate(settings.textTemplates.puzzleBadgeLabel, templateValues);
+  const progressLabel = applyTextTransform(
+    fillTemplate(settings.textTemplates.progressLabel || settings.textTemplates.playTitle, templateValues),
+    styleModules.text.titleTransform
+  );
   const titleFontSize = Math.max(18, Math.round((isStorybookStyle ? 48 : 34) * uiScale));
 
   if (isStorybookStyle) {
-    const timerBoxWidth = Math.round(126 * uiScale);
-    const timerBoxHeight = Math.round(52 * uiScale);
+    const storybookTimerPadX = Math.max(8, Math.round(14 * uiScale * styleModules.timer.paddingScale));
+    const storybookTimerPadY = Math.max(4, Math.round(6 * uiScale * styleModules.timer.paddingScale));
+    const storybookTimerDotSize = Math.max(5, Math.round(9 * uiScale));
+    const storybookTimerGap = Math.max(5, Math.round(8 * uiScale));
+    const storybookTimerFontSize = Math.max(14, Math.round(30 * uiScale));
+    ctx.font = `${styleModules.timer.canvasFontWeight} ${storybookTimerFontSize}px ${styleModules.timer.canvasFontFamily}`;
+    const storybookTimerMetrics = measureResolvedTimerBox(styleModules.timer, {
+      textWidth: ctx.measureText(formatCountdownSeconds(scene.timeLeft)).width,
+      fontSize: storybookTimerFontSize,
+      padX: storybookTimerPadX,
+      padY: storybookTimerPadY,
+      dotSize: storybookTimerDotSize,
+      gap: storybookTimerGap,
+      minWidth: Math.round(126 * uiScale)
+    });
+    const timerBoxWidth = storybookTimerMetrics.width;
+    const timerBoxHeight = storybookTimerMetrics.height;
     const timerBoxX = board.x + board.width - contentPadding - timerBoxWidth;
     const timerBoxY = board.y + Math.round((headerHeight - timerBoxHeight) / 2);
-
-    if (shouldRenderHeaderText) {
-      ctx.fillStyle = '#2E2414';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.font = `900 ${titleFontSize}px "Georgia", "Times New Roman", serif`;
-      ctx.fillText(
-        scene.title.toLowerCase(),
-        board.x + contentPadding,
-        board.y + headerHeight / 2 + Math.round(2 * uiScale)
-      );
-    }
 
     if (shouldShowHeaderProgress) {
       const progressTrackHeight = Math.max(14, Math.round(24 * uiScale));
@@ -1655,23 +3155,40 @@ const drawFrame = (
         height: progressTrackHeight,
         radius: progressTrackHeight / 2
       };
-      drawRoundedRect(ctx, progressTrackRect, {
-        fill: '#8B6D33',
-        stroke: '#3F301A',
-        lineWidth: Math.max(2, 3 * uiScale)
-      });
-      const progressFillRect: Rect = {
-        x: progressTrackX + Math.max(2, 3 * uiScale),
-        y: progressTrackY + Math.max(2, 3 * uiScale),
-        width: ((progressTrackWidth - Math.max(4, 6 * uiScale)) * countdownPercent) / 100,
-        height: progressTrackHeight - Math.max(4, 6 * uiScale),
-        radius: (progressTrackHeight - Math.max(4, 6 * uiScale)) / 2
-      };
-      if (progressFillRect.width > 0) {
-        roundRectPath(ctx, progressFillRect);
-        ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, visualTheme.progressFill, accent);
-        ctx.fill();
+      if (styleModules.progress.variant === 'text_fill') {
+        drawTextProgressLabel(ctx, progressTrackRect, progressLabel, countdownPercent, styleModules, visualTheme, uiScale);
+      } else {
+        drawRoundedRect(ctx, progressTrackRect, {
+          fill: '#8B6D33',
+          stroke: '#3F301A',
+          lineWidth: Math.max(2, 3 * uiScale)
+        });
+        const progressFillRect: Rect = {
+          x: progressTrackX + Math.max(2, 3 * uiScale),
+          y: progressTrackY + Math.max(2, 3 * uiScale),
+          width: ((progressTrackWidth - Math.max(4, 6 * uiScale)) * countdownPercent) / 100,
+          height: progressTrackHeight - Math.max(4, 6 * uiScale),
+          radius: (progressTrackHeight - Math.max(4, 6 * uiScale)) / 2
+        };
+        if (progressFillRect.width > 0) {
+          roundRectPath(ctx, progressFillRect);
+          ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, visualTheme.progressFill, accent);
+          ctx.fill();
+        }
       }
+    }
+
+    if (shouldRenderHeaderText) {
+      const storybookTitleFontSize = Math.max(18, Math.round(titleFontSize * headerTextScale));
+      ctx.fillStyle = '#2E2414';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = `900 ${storybookTitleFontSize}px "Georgia", "Times New Roman", serif`;
+      ctx.fillText(
+        scene.title.toLowerCase(),
+        board.x + contentPadding + headerTextOffsetX,
+        board.y + headerHeight / 2 + Math.round(2 * uiScale) + headerTextOffsetY
+      );
     }
 
     ctx.fillStyle = '#2E2414';
@@ -1680,33 +3197,55 @@ const drawFrame = (
     ctx.fillText(`${scene.segment.puzzleIndex + 1}/${puzzles.length}`, timerBoxX - Math.round(12 * uiScale), board.y + headerHeight / 2 + 1);
 
     if (shouldShowHeaderTimer) {
-      drawRoundedRect(
+      drawStyledHeaderTimer(
         ctx,
         { x: timerBoxX, y: timerBoxY, width: timerBoxWidth, height: timerBoxHeight, radius: Math.round(14 * uiScale) },
-        { fill: timerBackground, stroke: timerBorderColor, lineWidth: Math.max(2, 3 * uiScale) }
+        styleModules.timer,
+        visualTheme,
+        formatCountdownSeconds(scene.timeLeft),
+        headerBackground,
+        {
+          padX: storybookTimerPadX,
+          padY: storybookTimerPadY,
+          dotSize: storybookTimerDotSize,
+          gap: storybookTimerGap,
+          fontSize: storybookTimerFontSize,
+          scale: uiScale
+        },
+        scene.timeLeft <= 2,
+        scene.segment.duration,
+        scene.timeLeft,
+        scene.countdownPercent / 100
       );
-      ctx.fillStyle = timerTextColor;
-      ctx.textAlign = 'center';
-      ctx.font = `900 ${Math.max(14, Math.round(30 * uiScale))}px "Georgia", "Times New Roman", serif`;
-      ctx.fillText(formatCountdownSeconds(scene.timeLeft), timerBoxX + timerBoxWidth / 2, timerBoxY + timerBoxHeight / 2 + 1);
     }
   } else {
     const headerRect: Rect = { x: board.x, y: board.y, width: board.width, height: headerHeight };
     const timerTextValue = formatCountdownSeconds(scene.timeLeft);
 
     if (isClassicStyle) {
-      const timerPadX = Math.max(6, Math.round(CLASSIC_HUD_SPEC.timer.padX * classicLayoutScale));
-      const timerPadY = Math.max(2, Math.round(CLASSIC_HUD_SPEC.timer.padY * classicLayoutScale));
+      const timerPadX = Math.max(
+        6,
+        Math.round(CLASSIC_HUD_SPEC.timer.padX * classicLayoutScale * styleModules.timer.paddingScale)
+      );
+      const timerPadY = Math.max(
+        2,
+        Math.round(CLASSIC_HUD_SPEC.timer.padY * classicLayoutScale * styleModules.timer.paddingScale)
+      );
       const timerDotSize = Math.max(4, Math.round(CLASSIC_HUD_SPEC.timer.dotSize * classicLayoutScale));
       const timerGap = Math.max(4, Math.round(CLASSIC_HUD_SPEC.timer.gap * classicLayoutScale));
       const timerFontSize = Math.max(14, Math.round(CLASSIC_HUD_SPEC.timer.fontSize * classicLayoutScale));
-      ctx.font = `900 ${timerFontSize}px "Consolas", "Courier New", monospace`;
-      const timerTextWidth = ctx.measureText(timerTextValue).width;
-      const timerBoxWidth = Math.max(
-        Math.round(CLASSIC_HUD_SPEC.timer.minWidth * classicLayoutScale),
-        Math.ceil(timerPadX * 2 + timerDotSize + timerGap + timerTextWidth + Math.round(2 * classicLayoutScale))
-      );
-      const timerBoxHeight = Math.max(30, Math.round(timerFontSize + timerPadY * 2 + Math.round(2 * classicLayoutScale)));
+      ctx.font = `${styleModules.timer.canvasFontWeight} ${timerFontSize}px ${styleModules.timer.canvasFontFamily}`;
+      const classicTimerMetrics = measureResolvedTimerBox(styleModules.timer, {
+        textWidth: ctx.measureText(timerTextValue).width,
+        fontSize: timerFontSize,
+        padX: timerPadX,
+        padY: timerPadY,
+        dotSize: timerDotSize,
+        gap: timerGap,
+        minWidth: Math.round(CLASSIC_HUD_SPEC.timer.minWidth * classicLayoutScale)
+      });
+      const timerBoxWidth = Math.max(30, classicTimerMetrics.width);
+      const timerBoxHeight = Math.max(30, classicTimerMetrics.height);
       const timerBoxX = board.x + board.width - contentPadding - timerBoxWidth;
       const timerBoxY = board.y + Math.round(CLASSIC_HUD_SPEC.timer.top * classicLayoutScale);
 
@@ -1728,10 +3267,11 @@ const drawFrame = (
       const badgeX = board.x + Math.round(CLASSIC_HUD_SPEC.puzzleBadge.left * classicLayoutScale);
       const badgeY = board.y + Math.round(CLASSIC_HUD_SPEC.puzzleBadge.top * classicLayoutScale);
       const badgeText = `${scene.segment.puzzleIndex + 1}/${puzzles.length}`;
+      const badgeLabelText = applyTextTransform(puzzleBadgeLabel, styleModules.text.subtitleTransform);
 
-      ctx.font = `900 ${badgeLabelSize}px "Segoe UI", Arial, sans-serif`;
-      const badgeLabelWidth = ctx.measureText(puzzleBadgeLabel).width;
-      ctx.font = `900 ${badgeValueSize}px "Arial Black", "Segoe UI", sans-serif`;
+      ctx.font = `${styleModules.text.subtitleCanvasWeight} ${badgeLabelSize}px ${styleModules.text.subtitleCanvasFamily}`;
+      const badgeLabelWidth = ctx.measureText(badgeLabelText).width;
+      ctx.font = `${styleModules.text.titleCanvasWeight} ${badgeValueSize}px ${styleModules.text.titleCanvasFamily}`;
       const badgeValueWidth = ctx.measureText(badgeText).width;
       const badgeWidth = Math.max(
         Math.round(CLASSIC_HUD_SPEC.puzzleBadge.minWidth * classicLayoutScale),
@@ -1759,11 +3299,11 @@ const drawFrame = (
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#111827';
       ctx.textAlign = 'left';
-      ctx.font = `900 ${badgeLabelSize}px "Segoe UI", Arial, sans-serif`;
-      ctx.fillText(puzzleBadgeLabel, badgeRect.x + badgePadX, badgeRect.y + badgeRect.height / 2 + 1);
+      ctx.font = `${styleModules.text.subtitleCanvasWeight} ${badgeLabelSize}px ${styleModules.text.subtitleCanvasFamily}`;
+      ctx.fillText(badgeLabelText, badgeRect.x + badgePadX, badgeRect.y + badgeRect.height / 2 + 1);
       ctx.fillStyle = '#020617';
       ctx.textAlign = 'right';
-      ctx.font = `900 ${badgeValueSize}px "Arial Black", "Segoe UI", sans-serif`;
+      ctx.font = `${styleModules.text.titleCanvasWeight} ${badgeValueSize}px ${styleModules.text.titleCanvasFamily}`;
       ctx.fillText(
         badgeText,
         badgeRect.x + badgeRect.width - badgePadX,
@@ -1772,7 +3312,7 @@ const drawFrame = (
       ctx.restore();
 
       if (shouldRenderHeaderText) {
-        const centerTitleText = scene.title.toUpperCase();
+        const centerTitleText = applyTextTransform(scene.title, styleModules.text.titleTransform);
         let centerTitleSize = Math.max(
           16,
           Math.round(
@@ -1786,12 +3326,21 @@ const drawFrame = (
           120,
           timerBoxX - sidePadding - (badgeRect.x + badgeRect.width + sidePadding)
         );
-        ctx.font = `900 ${centerTitleSize}px "Arial Black", "Segoe UI", sans-serif`;
+        ctx.font = `${styleModules.text.titleCanvasWeight} ${centerTitleSize}px ${styleModules.text.titleCanvasFamily}`;
         const measuredTitleWidth = ctx.measureText(centerTitleText).width;
         if (measuredTitleWidth > titleAvailableWidth) {
           centerTitleSize = Math.max(
             14,
             Math.floor(centerTitleSize * (titleAvailableWidth / Math.max(1, measuredTitleWidth)))
+          );
+        }
+        centerTitleSize = Math.max(14, Math.round(centerTitleSize * headerTextScale));
+        ctx.font = `${styleModules.text.titleCanvasWeight} ${centerTitleSize}px ${styleModules.text.titleCanvasFamily}`;
+        const scaledTitleWidth = ctx.measureText(centerTitleText).width;
+        if (scaledTitleWidth > titleAvailableWidth) {
+          centerTitleSize = Math.max(
+            14,
+            Math.floor(centerTitleSize * (titleAvailableWidth / Math.max(1, scaledTitleWidth)))
           );
         }
         const centerTitleRect: Rect = {
@@ -1809,13 +3358,13 @@ const drawFrame = (
         ctx.save();
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.font = `900 ${centerTitleSize}px "Arial Black", "Segoe UI", sans-serif`;
+        ctx.font = `${styleModules.text.titleCanvasWeight} ${centerTitleSize}px ${styleModules.text.titleCanvasFamily}`;
         ctx.lineWidth = Math.max(1.5, Math.round(2 * classicLayoutScale));
         ctx.strokeStyle = CLASSIC_HUD_SPEC.centerTitle.strokeColor;
         ctx.shadowColor = 'rgba(0, 0, 0, 0.24)';
         ctx.shadowBlur = Math.max(2, Math.round(8 * classicLayoutScale));
-        const centerTitleX = board.x + board.width / 2;
-        const centerTitleY = board.y + headerHeight / 2;
+        const centerTitleX = board.x + board.width / 2 + headerTextOffsetX;
+        const centerTitleY = board.y + headerHeight / 2 + headerTextOffsetY;
         ctx.strokeText(centerTitleText, centerTitleX, centerTitleY);
         ctx.fillStyle = centerTitleFill;
         ctx.fillText(centerTitleText, centerTitleX, centerTitleY);
@@ -1823,38 +3372,31 @@ const drawFrame = (
       }
 
       if (shouldShowHeaderTimer) {
-        drawRoundedRect(
+        drawStyledHeaderTimer(
           ctx,
           {
             x: timerBoxX,
             y: timerBoxY,
             width: timerBoxWidth,
             height: timerBoxHeight,
-            radius: timerBoxHeight / 2
+            radius: radiusTokenToPx(styleModules.timer.radiusToken, timerBoxHeight, classicLayoutScale)
           },
-          {
-            fill: timerBackground,
-            stroke: timerBorderColor,
-            lineWidth: Math.max(2, Math.round(2 * classicLayoutScale))
-          }
-        );
-        ctx.beginPath();
-        ctx.arc(
-          timerBoxX + timerPadX + timerDotSize / 2,
-          timerBoxY + timerBoxHeight / 2,
-          timerDotSize / 2,
-          0,
-          Math.PI * 2
-        );
-        ctx.fillStyle = scene.timeLeft <= 2 ? '#FF0000' : accent;
-        ctx.fill();
-        ctx.fillStyle = timerTextColor;
-        ctx.font = `900 ${timerFontSize}px "Consolas", "Courier New", monospace`;
-        ctx.textBaseline = 'middle';
-        ctx.fillText(
+          styleModules.timer,
+          visualTheme,
           timerTextValue,
-          timerBoxX + timerPadX + timerDotSize + timerGap,
-          timerBoxY + timerBoxHeight / 2 + 1
+          headerBackground,
+          {
+            padX: timerPadX,
+            padY: timerPadY,
+            dotSize: timerDotSize,
+            gap: timerGap,
+            fontSize: timerFontSize,
+            scale: classicLayoutScale
+          },
+          scene.timeLeft <= 2,
+          scene.segment.duration,
+          scene.timeLeft,
+          scene.countdownPercent / 100
         );
 
         if (shouldShowHeaderProgress) {
@@ -1871,8 +3413,85 @@ const drawFrame = (
             y: progressTrackY,
             width: progressTrackWidth,
             height: progressTrackHeight,
-            radius: progressTrackHeight / 2
+            radius: radiusTokenToPx(styleModules.progress.radiusToken, progressTrackHeight, classicLayoutScale)
           };
+          if (styleModules.progress.variant === 'text_fill') {
+            drawTextProgressLabel(
+              ctx,
+              progressTrackRect,
+              progressLabel,
+              countdownPercent,
+              styleModules,
+              visualTheme,
+              classicLayoutScale
+            );
+          } else {
+            const classicTrackFill = resolveProgressFill(
+              ctx,
+              progressTrackRect,
+              CLASSIC_HUD_SPEC.progress.trackBackground,
+              '#141414'
+            );
+            drawRoundedRect(ctx, progressTrackRect, {
+              fill: classicTrackFill,
+              stroke: visualTheme.progressTrackBorder,
+              lineWidth: Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.borderWidth * classicLayoutScale))
+            });
+            const fillInset = Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.fillInset * classicLayoutScale));
+            const progressFillRect: Rect = {
+              x: progressTrackX + fillInset,
+              y: progressTrackY + fillInset,
+              width: ((progressTrackWidth - fillInset * 2) * countdownPercent) / 100,
+              height: Math.max(1, progressTrackHeight - fillInset * 2),
+              radius: Math.max(1, (progressTrackHeight - fillInset * 2) / 2)
+            };
+            if (progressFillRect.width > 0) {
+              roundRectPath(ctx, progressFillRect);
+              ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, accent);
+              ctx.fill();
+              ctx.save();
+              roundRectPath(ctx, progressFillRect);
+              ctx.shadowColor =
+                styleModules.progress.variant === 'glow'
+                  ? visualTheme.progressFillGlow ?? accent
+                  : CLASSIC_HUD_SPEC.progress.fillGlowCanvas;
+              ctx.shadowBlur = Math.max(4, Math.round(8 * uiScale));
+              ctx.strokeStyle = 'rgba(255, 166, 120, 0.8)';
+              ctx.lineWidth = Math.max(1, Math.round(1.5 * uiScale));
+              ctx.stroke();
+              ctx.restore();
+            }
+          }
+        }
+      }
+
+      if (shouldShowHeaderProgress && !shouldShowHeaderTimer) {
+        const progressTrackHeight = Math.max(8, Math.round(CLASSIC_HUD_SPEC.progress.height * classicLayoutScale));
+        const progressTrackWidth = Math.round(board.width * CLASSIC_HUD_SPEC.progress.widthRatio);
+        const progressTrackX = Math.round(board.x + (board.width - progressTrackWidth) / 2);
+        const progressTrackY =
+          board.y +
+          headerHeight -
+          progressTrackHeight -
+          Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.bottom * classicLayoutScale));
+        const progressTrackRect: Rect = {
+          x: progressTrackX,
+          y: progressTrackY,
+          width: progressTrackWidth,
+          height: progressTrackHeight,
+          radius: radiusTokenToPx(styleModules.progress.radiusToken, progressTrackHeight, classicLayoutScale)
+        };
+        if (styleModules.progress.variant === 'text_fill') {
+          drawTextProgressLabel(
+            ctx,
+            progressTrackRect,
+            progressLabel,
+            countdownPercent,
+            styleModules,
+            visualTheme,
+            classicLayoutScale
+          );
+        } else {
           const classicTrackFill = resolveProgressFill(
             ctx,
             progressTrackRect,
@@ -1894,11 +3513,14 @@ const drawFrame = (
           };
           if (progressFillRect.width > 0) {
             roundRectPath(ctx, progressFillRect);
-            ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, CLASSIC_HUD_SPEC.progress.fillGradient, accent);
+            ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, accent);
             ctx.fill();
             ctx.save();
             roundRectPath(ctx, progressFillRect);
-            ctx.shadowColor = CLASSIC_HUD_SPEC.progress.fillGlowCanvas;
+            ctx.shadowColor =
+              styleModules.progress.variant === 'glow'
+                ? visualTheme.progressFillGlow ?? accent
+                : CLASSIC_HUD_SPEC.progress.fillGlowCanvas;
             ctx.shadowBlur = Math.max(4, Math.round(8 * uiScale));
             ctx.strokeStyle = 'rgba(255, 166, 120, 0.8)';
             ctx.lineWidth = Math.max(1, Math.round(1.5 * uiScale));
@@ -1907,62 +3529,26 @@ const drawFrame = (
           }
         }
       }
-
-      if (shouldShowHeaderProgress && !shouldShowHeaderTimer) {
-        const progressTrackHeight = Math.max(8, Math.round(CLASSIC_HUD_SPEC.progress.height * classicLayoutScale));
-        const progressTrackWidth = Math.round(board.width * CLASSIC_HUD_SPEC.progress.widthRatio);
-        const progressTrackX = Math.round(board.x + (board.width - progressTrackWidth) / 2);
-        const progressTrackY =
-          board.y +
-          headerHeight -
-          progressTrackHeight -
-          Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.bottom * classicLayoutScale));
-        const progressTrackRect: Rect = {
-          x: progressTrackX,
-          y: progressTrackY,
-          width: progressTrackWidth,
-          height: progressTrackHeight,
-          radius: progressTrackHeight / 2
-        };
-        const classicTrackFill = resolveProgressFill(
-          ctx,
-          progressTrackRect,
-          CLASSIC_HUD_SPEC.progress.trackBackground,
-          '#141414'
-        );
-        drawRoundedRect(ctx, progressTrackRect, {
-          fill: classicTrackFill,
-          stroke: visualTheme.progressTrackBorder,
-          lineWidth: Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.borderWidth * classicLayoutScale))
-        });
-        const fillInset = Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.fillInset * classicLayoutScale));
-        const progressFillRect: Rect = {
-          x: progressTrackX + fillInset,
-          y: progressTrackY + fillInset,
-          width: ((progressTrackWidth - fillInset * 2) * countdownPercent) / 100,
-          height: Math.max(1, progressTrackHeight - fillInset * 2),
-          radius: Math.max(1, (progressTrackHeight - fillInset * 2) / 2)
-        };
-        if (progressFillRect.width > 0) {
-          roundRectPath(ctx, progressFillRect);
-          ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, CLASSIC_HUD_SPEC.progress.fillGradient, accent);
-          ctx.fill();
-          ctx.save();
-          roundRectPath(ctx, progressFillRect);
-          ctx.shadowColor = CLASSIC_HUD_SPEC.progress.fillGlowCanvas;
-          ctx.shadowBlur = Math.max(4, Math.round(8 * uiScale));
-          ctx.strokeStyle = 'rgba(255, 166, 120, 0.8)';
-          ctx.lineWidth = Math.max(1, Math.round(1.5 * uiScale));
-          ctx.stroke();
-          ctx.restore();
-        }
-      }
     } else {
       const nonClassicScale = Math.max(0.55, layoutScale);
-      const titleFontSizePx = Math.max(12, Math.round(styleHudLayout.title.fontSize * nonClassicScale));
-      const subtitleFontSizePx = Math.max(8, Math.round(styleHudLayout.title.subtitleSize * nonClassicScale));
-      const subtitleGapPx = Math.max(1, Math.round(styleHudLayout.title.subtitleGap * nonClassicScale));
-      const titleOrigin = resolveAnchoredRect(styleHudLayout.title, 0, 0, headerRect, nonClassicScale);
+      const titleFontSizePx = Math.max(
+        12,
+        Math.round(styleHudLayout.title.fontSize * nonClassicScale * headerTextScale)
+      );
+      const subtitleFontSizePx = Math.max(
+        8,
+        Math.round(styleHudLayout.title.subtitleSize * nonClassicScale * headerTextScale)
+      );
+      const subtitleGapPx = Math.max(
+        1,
+        Math.round(styleHudLayout.title.subtitleGap * nonClassicScale * Math.max(0.8, headerTextScale))
+      );
+      const titleOriginBase = resolveAnchoredRect(styleHudLayout.title, 0, 0, headerRect, nonClassicScale);
+      const titleOrigin = {
+        ...titleOriginBase,
+        x: titleOriginBase.x + headerTextOffsetX,
+        y: titleOriginBase.y + headerTextOffsetY
+      };
       const customLogoSize = Math.max(12, Math.round(resolvedLayout.logo.size * nonClassicScale));
 
       if (shouldRenderCustomLogo) {
@@ -1974,103 +3560,222 @@ const drawFrame = (
         });
       }
 
-      if (shouldRenderHeaderText) {
-        ctx.textAlign = styleHudLayout.title.align;
+      const drawNonClassicHeaderText = () => {
+        if (!shouldRenderHeaderText) {
+          return;
+        }
+
+        const titleText = applyTextTransform(scene.title, styleModules.text.titleTransform);
+        const subtitleText = applyTextTransform(scene.subtitle, styleModules.text.subtitleTransform);
         ctx.textBaseline = 'top';
-        ctx.font = `900 ${titleFontSizePx}px "Arial Black", "Segoe UI", sans-serif`;
-        const titleTextWidth = ctx.measureText(scene.title).width;
-        ctx.font = `700 ${subtitleFontSizePx}px "Segoe UI", Arial, sans-serif`;
-        const subtitleTextWidth = ctx.measureText(scene.subtitle).width;
-        const titleBlockWidth = Math.max(titleTextWidth, subtitleTextWidth);
+        ctx.font = `${styleModules.text.titleCanvasWeight} ${titleFontSizePx}px ${styleModules.text.titleCanvasFamily}`;
+        const titleTextWidth = ctx.measureText(titleText).width;
+        ctx.font = `${styleModules.text.subtitleCanvasWeight} ${subtitleFontSizePx}px ${styleModules.text.subtitleCanvasFamily}`;
+        const subtitleTextWidth = ctx.measureText(subtitleText).width;
+        const subtitleBadgeWidth =
+          styleModules.header.variant === 'split'
+            ? subtitleTextWidth + Math.round(22 * nonClassicScale)
+            : subtitleTextWidth;
+        const wrapperPadX =
+          styleModules.header.variant === 'panel' || styleModules.header.variant === 'ribbon'
+            ? Math.round(14 * nonClassicScale)
+            : 0;
+        const wrapperPadY =
+          styleModules.header.variant === 'panel' || styleModules.header.variant === 'ribbon'
+            ? Math.round(8 * nonClassicScale)
+            : 0;
+        const accentInset =
+          styleModules.header.variant === 'ribbon' ? Math.round(10 * nonClassicScale) : 0;
+        const underlineHeight =
+          styleModules.header.variant === 'underline' ? Math.max(3, Math.round(4 * nonClassicScale)) : 0;
+        const titleBlockWidth =
+          Math.max(titleTextWidth, subtitleBadgeWidth) + wrapperPadX * 2 + accentInset;
+        const titleBlockHeight =
+          titleFontSizePx +
+          subtitleGapPx +
+          (styleModules.header.variant === 'split'
+            ? Math.max(18, Math.round(subtitleFontSizePx + 10 * nonClassicScale))
+            : subtitleFontSizePx) +
+          wrapperPadY * 2 +
+          underlineHeight +
+          (underlineHeight > 0 ? Math.round(6 * nonClassicScale) : 0);
         const inlineLogoSize =
           shouldRenderInlineLogo && brandLogo
             ? Math.max(14, Math.round(packagePreset.chrome.logoSize * nonClassicScale))
             : 0;
-        const inlineLogoGap = inlineLogoSize > 0 ? Math.max(4, Math.round(packagePreset.chrome.titleGap * nonClassicScale)) : 0;
-        let titleTextX = titleOrigin.x;
+        const inlineLogoGap =
+          inlineLogoSize > 0 ? Math.max(4, Math.round(packagePreset.chrome.titleGap * nonClassicScale)) : 0;
+        const contentWidth = titleBlockWidth + (inlineLogoSize > 0 ? inlineLogoSize + inlineLogoGap : 0);
+        const contentLeft =
+          styleHudLayout.title.align === 'left'
+            ? titleOrigin.x
+            : styleHudLayout.title.align === 'center'
+            ? titleOrigin.x - contentWidth / 2
+            : titleOrigin.x - contentWidth;
+        const textBlockLeft = contentLeft + (inlineLogoSize > 0 ? inlineLogoSize + inlineLogoGap : 0);
+        let titleTextX =
+          styleHudLayout.title.align === 'left'
+            ? textBlockLeft + wrapperPadX + accentInset
+            : styleHudLayout.title.align === 'center'
+            ? textBlockLeft + titleBlockWidth / 2
+            : textBlockLeft + titleBlockWidth - wrapperPadX;
 
         if (inlineLogoSize > 0) {
           const inlineLogoRect: Rect = {
-            x:
-              styleHudLayout.title.align === 'left'
-                ? titleOrigin.x
-                : styleHudLayout.title.align === 'center'
-                ? titleOrigin.x - titleBlockWidth / 2 - inlineLogoGap - inlineLogoSize
-                : titleOrigin.x - titleBlockWidth - inlineLogoGap - inlineLogoSize,
+            x: contentLeft,
             y: titleOrigin.y,
             width: inlineLogoSize,
             height: inlineLogoSize
           };
-          if (styleHudLayout.title.align === 'left') {
-            titleTextX += inlineLogoSize + inlineLogoGap;
-          }
           drawHeaderLogo(inlineLogoRect);
         }
 
-        ctx.fillStyle = visualTheme.headerText;
-        ctx.font = `900 ${titleFontSizePx}px "Arial Black", "Segoe UI", sans-serif`;
-        ctx.fillText(scene.title, titleTextX, titleOrigin.y);
-        ctx.fillStyle = visualTheme.headerSubText;
-        ctx.font = `700 ${subtitleFontSizePx}px "Segoe UI", Arial, sans-serif`;
-        ctx.fillText(scene.subtitle, titleTextX, titleOrigin.y + titleFontSizePx + subtitleGapPx);
-      }
+        if (styleModules.header.variant === 'panel' || styleModules.header.variant === 'ribbon') {
+          drawRoundedRect(
+            ctx,
+            {
+              x: textBlockLeft,
+              y: titleOrigin.y,
+              width: titleBlockWidth,
+              height: titleBlockHeight,
+              radius: Math.round(18 * nonClassicScale)
+            },
+            {
+              fill: 'rgba(255,255,255,0.22)',
+              stroke: '#000000',
+              lineWidth: Math.max(1.5, Math.round(2 * nonClassicScale))
+            }
+          );
+          if (styleModules.header.variant === 'ribbon') {
+            drawRoundedRect(
+              ctx,
+              {
+                x: textBlockLeft,
+                y: titleOrigin.y + Math.round(6 * nonClassicScale),
+                width: Math.max(4, Math.round(6 * nonClassicScale)),
+                height: Math.max(24, titleBlockHeight - Math.round(12 * nonClassicScale)),
+                radius: Math.round(4 * nonClassicScale)
+              },
+              {
+                fill: visualTheme.timerDot
+              }
+            );
+          }
+        }
 
-      const timerPadX = Math.max(6, Math.round(styleHudLayout.timer.padX * nonClassicScale));
-      const timerPadY = Math.max(2, Math.round(styleHudLayout.timer.padY * nonClassicScale));
+        ctx.textAlign = styleHudLayout.title.align;
+        ctx.fillStyle = visualTheme.headerText;
+        ctx.font = `${styleModules.text.titleCanvasWeight} ${titleFontSizePx}px ${styleModules.text.titleCanvasFamily}`;
+        ctx.fillText(titleText, titleTextX, titleOrigin.y + wrapperPadY);
+        const subtitleY = titleOrigin.y + wrapperPadY + titleFontSizePx + subtitleGapPx;
+
+        if (styleModules.header.variant === 'split') {
+          const badgeHeight = Math.max(18, Math.round(subtitleFontSizePx + 10 * nonClassicScale));
+          let badgeX = titleTextX;
+          if (styleHudLayout.title.align === 'left') {
+            badgeX = textBlockLeft;
+          } else if (styleHudLayout.title.align === 'center') {
+            badgeX = textBlockLeft + titleBlockWidth / 2 - subtitleBadgeWidth / 2;
+          } else {
+            badgeX = textBlockLeft + titleBlockWidth - subtitleBadgeWidth;
+          }
+          drawRoundedRect(
+            ctx,
+            {
+              x: badgeX,
+              y: subtitleY,
+              width: subtitleBadgeWidth,
+              height: badgeHeight,
+              radius: badgeHeight / 2
+            },
+            {
+              fill: 'rgba(255,255,255,0.72)',
+              stroke: '#000000',
+              lineWidth: Math.max(1.5, Math.round(2 * nonClassicScale))
+            }
+          );
+          ctx.fillStyle = visualTheme.headerSubText;
+          ctx.textAlign = 'center';
+          ctx.font = `${styleModules.text.subtitleCanvasWeight} ${subtitleFontSizePx}px ${styleModules.text.subtitleCanvasFamily}`;
+          ctx.fillText(subtitleText, badgeX + subtitleBadgeWidth / 2, subtitleY + Math.max(2, Math.round(4 * nonClassicScale)));
+        } else {
+          ctx.fillStyle = visualTheme.headerSubText;
+          ctx.textAlign = styleHudLayout.title.align;
+          ctx.font = `${styleModules.text.subtitleCanvasWeight} ${subtitleFontSizePx}px ${styleModules.text.subtitleCanvasFamily}`;
+          ctx.fillText(subtitleText, titleTextX, subtitleY);
+        }
+
+        if (styleModules.header.variant === 'underline') {
+          const underlineWidth = Math.max(36, Math.round(titleFontSizePx * 2.35));
+          const underlineX =
+            styleHudLayout.title.align === 'left'
+              ? titleTextX
+              : styleHudLayout.title.align === 'center'
+              ? titleTextX - underlineWidth / 2
+              : titleTextX - underlineWidth;
+          drawRoundedRect(
+            ctx,
+            {
+              x: underlineX,
+              y: subtitleY + subtitleFontSizePx + Math.max(4, Math.round(6 * nonClassicScale)),
+              width: underlineWidth,
+              height: Math.max(3, Math.round(4 * nonClassicScale)),
+              radius: Math.max(2, Math.round(3 * nonClassicScale))
+            },
+            {
+              fill: visualTheme.timerDot
+            }
+          );
+        }
+      };
+
+      const timerPadX = Math.max(
+        6,
+        Math.round(styleHudLayout.timer.padX * nonClassicScale * styleModules.timer.paddingScale)
+      );
+      const timerPadY = Math.max(
+        2,
+        Math.round(styleHudLayout.timer.padY * nonClassicScale * styleModules.timer.paddingScale)
+      );
       const timerDotSize = Math.max(4, Math.round(styleHudLayout.timer.dotSize * nonClassicScale));
       const timerGap = Math.max(4, Math.round(styleHudLayout.timer.gap * nonClassicScale));
       const timerFontSize = Math.max(12, Math.round(styleHudLayout.timer.fontSize * nonClassicScale));
-      ctx.font = `900 ${timerFontSize}px "Consolas", "Courier New", monospace`;
-      const timerTextWidth = ctx.measureText(timerTextValue).width;
-      const timerBoxWidth = Math.max(
-        Math.round(styleHudLayout.timer.minWidth * nonClassicScale),
-        Math.ceil(timerPadX * 2 + timerDotSize + timerGap + timerTextWidth + Math.round(2 * nonClassicScale))
-      );
-      const timerBoxHeight = Math.max(
-        Math.round(timerDotSize + timerPadY * 2 + Math.round(2 * nonClassicScale)),
-        Math.round(timerFontSize + timerPadY * 2 + Math.round(2 * nonClassicScale))
-      );
+      ctx.font = `${styleModules.timer.canvasFontWeight} ${timerFontSize}px ${styleModules.timer.canvasFontFamily}`;
+      const nonClassicTimerMetrics = measureResolvedTimerBox(styleModules.timer, {
+        textWidth: ctx.measureText(timerTextValue).width,
+        fontSize: timerFontSize,
+        padX: timerPadX,
+        padY: timerPadY,
+        dotSize: timerDotSize,
+        gap: timerGap,
+        minWidth: Math.round(styleHudLayout.timer.minWidth * nonClassicScale)
+      });
+      const timerBoxWidth = Math.max(24, nonClassicTimerMetrics.width);
+      const timerBoxHeight = Math.max(24, nonClassicTimerMetrics.height);
       const timerRect = resolveAnchoredRect(styleHudLayout.timer, timerBoxWidth, timerBoxHeight, headerRect, nonClassicScale);
-      const timerRadius =
-        visualTheme.timerShapeClass.includes('rounded-none')
-          ? 0
-          : visualTheme.timerShapeClass.includes('rounded-2xl')
-          ? Math.round(14 * nonClassicScale)
-          : visualTheme.timerShapeClass.includes('rounded-lg')
-          ? Math.round(10 * nonClassicScale)
-          : visualTheme.timerShapeClass.includes('rounded-md')
-          ? Math.round(8 * nonClassicScale)
-          : visualTheme.timerShapeClass.includes('rounded-sm')
-          ? Math.round(5 * nonClassicScale)
-          : Math.round(timerRect.height / 2);
       if (shouldShowHeaderTimer) {
-        drawRoundedRect(
+        drawStyledHeaderTimer(
           ctx,
-          { ...timerRect, radius: timerRadius },
           {
-            fill: timerBackground,
-            stroke: timerBorderColor,
-            lineWidth: Math.max(2, Math.round(2 * nonClassicScale))
-          }
-        );
-        ctx.beginPath();
-        ctx.arc(
-          timerRect.x + timerPadX + timerDotSize / 2,
-          timerRect.y + timerRect.height / 2,
-          timerDotSize / 2,
-          0,
-          Math.PI * 2
-        );
-        ctx.fillStyle = scene.timeLeft <= 2 ? '#FF0000' : accent;
-        ctx.fill();
-        ctx.fillStyle = timerTextColor;
-        ctx.font = `900 ${timerFontSize}px "Consolas", "Courier New", monospace`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(
+            ...timerRect,
+            radius: radiusTokenToPx(styleModules.timer.radiusToken, timerRect.height, nonClassicScale)
+          },
+          styleModules.timer,
+          visualTheme,
           timerTextValue,
-          timerRect.x + timerPadX + timerDotSize + timerGap,
-          timerRect.y + timerRect.height / 2 + 1
+          headerBackground,
+          {
+            padX: timerPadX,
+            padY: timerPadY,
+            dotSize: timerDotSize,
+            gap: timerGap,
+            fontSize: timerFontSize,
+            scale: nonClassicScale
+          },
+          scene.timeLeft <= 2,
+          scene.segment.duration,
+          scene.timeLeft,
+          scene.countdownPercent / 100
         );
       }
 
@@ -2087,52 +3792,76 @@ const drawFrame = (
         const progressTrackRect: Rect = {
           ...progressTrackRectBase,
           radius: clamp(
-            Math.round(styleHudLayout.progress.radius * nonClassicScale),
+            radiusTokenToPx(styleModules.progress.radiusToken, progressTrackRectBase.height, nonClassicScale),
             0,
             Math.min(progressTrackRectBase.width, progressTrackRectBase.height) / 2
           )
         };
-        drawRoundedRect(ctx, progressTrackRect, {
-          fill: visualTheme.progressTrackBg,
-          stroke: visualTheme.progressTrackBorder,
-          lineWidth: Math.max(2, Math.round(2 * nonClassicScale))
-        });
-        const fillPercent = countdownPercent / 100;
-        const progressFillRect: Rect =
-          styleHudLayout.progress.orientation === 'vertical'
-            ? {
-                x: progressTrackRect.x,
-                y: progressTrackRect.y + progressTrackRect.height * (1 - fillPercent),
-                width: progressTrackRect.width,
-                height: progressTrackRect.height * fillPercent,
-                radius: progressTrackRect.radius
-              }
-            : {
-                x: progressTrackRect.x,
-                y: progressTrackRect.y,
-                width: progressTrackRect.width * fillPercent,
-                height: progressTrackRect.height,
-                radius: progressTrackRect.radius
-              };
-        if (progressFillRect.width > 0 && progressFillRect.height > 0) {
-          roundRectPath(ctx, progressFillRect);
-          ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, visualTheme.progressFill, accent);
-          ctx.fill();
+        if (styleModules.progress.variant === 'text_fill') {
+          drawTextProgressLabel(
+            ctx,
+            progressTrackRect,
+            progressLabel,
+            countdownPercent,
+            styleModules,
+            visualTheme,
+            nonClassicScale
+          );
+        } else {
+          drawRoundedRect(ctx, progressTrackRect, {
+            fill: visualTheme.progressTrackBg,
+            stroke: visualTheme.progressTrackBorder,
+            lineWidth: Math.max(1.5, Math.round(2 * nonClassicScale * styleModules.progress.borderWidthScale))
+          });
+          const fillPercent = countdownPercent / 100;
+          const progressFillRect: Rect =
+            styleHudLayout.progress.orientation === 'vertical'
+              ? {
+                  x: progressTrackRect.x,
+                  y: progressTrackRect.y + progressTrackRect.height * (1 - fillPercent),
+                  width: progressTrackRect.width,
+                  height: progressTrackRect.height * fillPercent,
+                  radius: progressTrackRect.radius
+                }
+              : {
+                  x: progressTrackRect.x,
+                  y: progressTrackRect.y,
+                  width: progressTrackRect.width * fillPercent,
+                  height: progressTrackRect.height,
+                  radius: progressTrackRect.radius
+                };
+          if (progressFillRect.width > 0 && progressFillRect.height > 0) {
+            roundRectPath(ctx, progressFillRect);
+            ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, accent);
+            ctx.fill();
+            if (styleModules.progress.variant === 'glow') {
+              ctx.save();
+              roundRectPath(ctx, progressFillRect);
+              ctx.shadowColor = visualTheme.progressFillGlow ?? accent;
+              ctx.shadowBlur = Math.max(6, Math.round(10 * uiScale));
+              ctx.strokeStyle = visualTheme.timerDot;
+              ctx.lineWidth = Math.max(1, Math.round(1.5 * uiScale));
+              ctx.stroke();
+              ctx.restore();
+            }
+          }
         }
       }
+
+      drawNonClassicHeaderText();
     }
   }
 
   drawRoundedRect(ctx, gameRect, {
     fill: isStorybookStyle ? '#1F475B' : gameBackground,
-    stroke: isStorybookStyle ? '#3F301A' : '#000000',
-    lineWidth: Math.max(2, 2 * uiScale)
+    stroke: isStorybookStyle ? '#3F301A' : usesImagePanelOutline ? undefined : '#000000',
+    lineWidth: isStorybookStyle ? Math.max(2, 2 * uiScale) : usesImagePanelOutline ? 0 : Math.max(2, 2 * uiScale)
   });
   ctx.save();
   roundRectPath(ctx, gameRect);
   ctx.clip();
   if (generatedBackgroundSpec) {
-    drawGeneratedBackground(ctx, generatedBackgroundSpec, gameRect);
+    drawGeneratedBackground(ctx, generatedBackgroundSpec, gameRect, timestamp);
   }
   if (isStorybookStyle) {
     const gameGradient = ctx.createLinearGradient(gameRect.x, gameRect.y, gameRect.x, gameRect.y + gameRect.height);
@@ -2201,8 +3930,8 @@ const drawFrame = (
         };
       }
 
-      const panelStrokeColor = '#CEC3A5';
-      const panelStrokeWidth = Math.max(4, 4 * uiScale);
+      const panelStrokeColor = imagePanelOutlineColor;
+      const panelStrokeWidth = imagePanelOutlineWidth;
       const insetPanelViewport = (panel: Rect): Rect => {
         const inset = panelStrokeWidth;
         const innerWidth = Math.max(1, panel.width - inset * 2);
@@ -2293,6 +4022,17 @@ const drawFrame = (
         modifiedCoverFrame.height
       );
       ctx.restore();
+    }
+
+    if (!isStorybookStyle && imagePanelOutlineWidth > 0) {
+      drawRoundedRect(ctx, originalPanel, {
+        stroke: imagePanelOutlineColor,
+        lineWidth: imagePanelOutlineWidth
+      });
+      drawRoundedRect(ctx, modifiedPanel, {
+        stroke: imagePanelOutlineColor,
+        lineWidth: imagePanelOutlineWidth
+      });
     }
 
     if (isStorybookStyle && !isVerticalLayout) {
@@ -2416,10 +4156,12 @@ const postMessageToMain = (message: WorkerResponse, transfer: Transferable[] = [
 };
 
 const renderPreviewFrameInWorker = async ({
+  source = 'legacy',
   puzzles,
   settings,
   timestamp,
-  generatedBackgroundPack
+  generatedBackgroundPack,
+  introVideoFile
 }: PreviewFrameOptions): Promise<{ buffer: ArrayBuffer; mimeType: string }> => {
   if (!puzzles.length) throw new Error('No puzzles available for preview.');
 
@@ -2429,23 +4171,22 @@ const renderPreviewFrameInWorker = async ({
   const safeTimestamp =
     totalDuration > 0 ? clamp(timestamp, 0, Math.max(0, totalDuration - 1 / FPS)) : 0;
   const scene = getSceneAtTime(safeTimestamp, timeline, puzzles, settings);
-
-  const loadedImages: Array<LoadedPuzzleImages | null> = new Array(puzzles.length).fill(null);
+  const telemetry = createTelemetryState();
+  const puzzleAssetCache = createPuzzleAssetCache(source, puzzles, telemetry);
+  const loadedImages = puzzleAssetCache.loadedImages;
   const sceneNeedsImages = scene.segment.phase !== 'intro' && scene.segment.phase !== 'outro';
+  const introVideoActive =
+    scene.segment.phase === 'intro' && settings.introVideoEnabled && Boolean(introVideoFile);
   let rawLogo: ImageBitmap | null = null;
   let brandLogo: ImageBitmap | null = null;
+  let introVideoResource: IntroVideoResource | null = null;
 
   try {
     if (sceneNeedsImages) {
-      const puzzle = puzzles[scene.segment.puzzleIndex];
-      const [original, modified] = await Promise.all([loadImage(puzzle.imageA), loadImage(puzzle.imageB)]);
-      loadedImages[scene.segment.puzzleIndex] = {
-        original,
-        modified
-      };
+      await puzzleAssetCache.ensureWindow(scene.segment.puzzleIndex);
     }
     if (settings.logo) {
-      rawLogo = await loadImage(settings.logo);
+      rawLogo = await loadLogoImage(settings.logo);
       brandLogo = await processLogoBitmap(rawLogo, settings);
       if (brandLogo !== rawLogo) {
         releaseBitmap(rawLogo);
@@ -2460,17 +4201,43 @@ const renderPreviewFrameInWorker = async ({
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    drawFrame(
-      ctx as unknown as CanvasRenderingContext2D,
-      width,
-      height,
-      puzzles,
-      loadedImages,
-      brandLogo,
-      settings,
-      generatedBackgroundPack,
-      scene
-    );
+    if (introVideoActive && introVideoFile) {
+      introVideoResource = await prepareIntroVideoResource(introVideoFile);
+      const drewIntro = await drawIntroVideoFrame(
+        ctx as unknown as CanvasRenderingContext2D,
+        introVideoResource,
+        scene.phaseElapsed,
+        width,
+        height
+      );
+      if (!drewIntro) {
+        drawFrame(
+          ctx as unknown as CanvasRenderingContext2D,
+          width,
+          height,
+          puzzles,
+          loadedImages,
+          brandLogo,
+          settings,
+          generatedBackgroundPack,
+          scene,
+          safeTimestamp
+        );
+      }
+    } else {
+      drawFrame(
+        ctx as unknown as CanvasRenderingContext2D,
+        width,
+        height,
+        puzzles,
+        loadedImages,
+        brandLogo,
+        settings,
+        generatedBackgroundPack,
+        scene,
+        safeTimestamp
+      );
+    }
     throwIfCanceled();
 
     const blob = await canvas.convertToBlob({ type: 'image/png' });
@@ -2481,7 +4248,7 @@ const renderPreviewFrameInWorker = async ({
       mimeType: blob.type || 'image/png'
     };
   } finally {
-    loadedImages.forEach((images) => releaseLoadedPuzzleImages(images));
+    puzzleAssetCache.releaseAll();
     releaseBitmap(brandLogo);
     releaseBitmap(rawLogo);
   }
@@ -2492,6 +4259,8 @@ const exportVideoInWorker = async ({
   puzzles,
   settings,
   generatedBackgroundPack,
+  audioAssets,
+  introVideoFile,
   streamOutput = false,
   onProgress
 }: ExportVideoOptions): Promise<
@@ -2508,6 +4277,7 @@ const exportVideoInWorker = async ({
   const totalFrames = Math.max(1, Math.ceil(totalDuration * FPS));
   const bitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
+  const audioMixSample = buildExportAudioMixSample(timeline, settings, audioAssets, totalDuration, puzzles);
   const telemetry = createTelemetryState();
   const loadAssetsTaskId = getScopedTaskId('video-export-load-assets');
   const encodeTaskId = getScopedTaskId('video-export-encode');
@@ -2533,6 +4303,7 @@ const exportVideoInWorker = async ({
   const loadedImages = puzzleAssetCache.loadedImages;
   let rawLogo: ImageBitmap | null = null;
   let brandLogo: ImageBitmap | null = null;
+  let introVideoResource: IntroVideoResource | null = null;
   let activePuzzleIndex = -1;
 
   try {
@@ -2540,12 +4311,15 @@ const exportVideoInWorker = async ({
       await puzzleAssetCache.ensureWindow(0);
     }
     if (settings.logo) {
-      rawLogo = await loadImage(settings.logo);
+      rawLogo = await loadLogoImage(settings.logo);
       brandLogo = await processLogoBitmap(rawLogo, settings);
       if (brandLogo !== rawLogo) {
         releaseBitmap(rawLogo);
         rawLogo = null;
       }
+    }
+    if (settings.introVideoEnabled && introVideoFile) {
+      introVideoResource = await prepareIntroVideoResource(introVideoFile);
     }
     emitTaskEvent({
       taskId: loadAssetsTaskId,
@@ -2603,6 +4377,16 @@ const exportVideoInWorker = async ({
       contentHint: 'detail'
     });
     output.addVideoTrack(videoSource, { frameRate: FPS });
+    const audioSource =
+      audioMixSample
+        ? new AudioSampleSource({
+            codec: codecConfig.audioCodec,
+            bitrate: AUDIO_BITRATE
+          })
+        : null;
+    if (audioSource) {
+      output.addAudioTrack(audioSource);
+    }
 
     emitTaskEvent({
       taskId: encodeTaskId,
@@ -2621,7 +4405,16 @@ const exportVideoInWorker = async ({
     await output.start();
     throwIfCanceled();
 
+    if (audioSource && audioMixSample) {
+      onProgress?.(0.12, 'Synthesizing audio mix...');
+      await audioSource.add(audioMixSample);
+      audioMixSample.close();
+      audioSource.close();
+    }
+
     const progressStep = Math.max(1, Math.floor(totalFrames / 150));
+    const renderProgressBase = audioSource ? 0.16 : 0.1;
+    const renderProgressSpan = audioSource ? 0.79 : 0.85;
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
       const timestamp = frameIndex / FPS;
       const scene = getSceneAtTime(timestamp, timeline, puzzles, settings);
@@ -2633,17 +4426,30 @@ const exportVideoInWorker = async ({
       }
 
       const renderStart = performance.now();
-      drawFrame(
-        ctx as unknown as CanvasRenderingContext2D,
-        width,
-        height,
-        puzzles,
-        loadedImages,
-        brandLogo,
-        settings,
-        generatedBackgroundPack,
-        scene
-      );
+      let drewIntro = false;
+      if (scene.segment.phase === 'intro' && introVideoResource) {
+        drewIntro = await drawIntroVideoFrame(
+          ctx as unknown as CanvasRenderingContext2D,
+          introVideoResource,
+          scene.phaseElapsed,
+          width,
+          height
+        );
+      }
+      if (!drewIntro) {
+        drawFrame(
+          ctx as unknown as CanvasRenderingContext2D,
+          width,
+          height,
+          puzzles,
+          loadedImages,
+          brandLogo,
+          settings,
+          generatedBackgroundPack,
+          scene,
+          timestamp
+        );
+      }
       telemetry.totalRenderMs += Math.max(0, performance.now() - renderStart);
       const encodeStart = performance.now();
       await videoSource.add(timestamp, 1 / FPS);
@@ -2652,7 +4458,7 @@ const exportVideoInWorker = async ({
       throwIfCanceled();
 
       if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
-        const exportProgress = 0.1 + ((frameIndex + 1) / totalFrames) * 0.85;
+        const exportProgress = renderProgressBase + ((frameIndex + 1) / totalFrames) * renderProgressSpan;
         onProgress?.(exportProgress, `Encoding frame ${frameIndex + 1}/${totalFrames}`);
       }
 
@@ -2750,6 +4556,8 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
               puzzles: message.payload.puzzles,
               settings: message.payload.settings,
               generatedBackgroundPack: message.payload.generatedBackgroundPack,
+              audioAssets: message.payload.audioAssets,
+              introVideoFile: message.payload.introVideoFile,
               streamOutput: message.payload.streamOutput,
               onProgress: (progress, status) => {
                 postMessageToMain({ type: 'progress', progress, status });
@@ -2760,6 +4568,8 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
               puzzles: message.payload.puzzles,
               settings: message.payload.settings,
               generatedBackgroundPack: message.payload.generatedBackgroundPack,
+              audioAssets: message.payload.audioAssets,
+              introVideoFile: message.payload.introVideoFile,
               streamOutput: message.payload.streamOutput,
               onProgress: (progress, status) => {
                 postMessageToMain({ type: 'progress', progress, status });

@@ -1,20 +1,18 @@
-import type { GeneratedBackgroundPack, GeneratedBackgroundPaletteId, GeneratedBackgroundPattern, GeneratedBackgroundSceneKind } from '../types';
-import { createStarterGeneratedBackgroundPack } from './generatedBackgrounds';
+import type { GeneratedBackgroundPack, GeneratedBackgroundPaletteId } from '../types';
+import {
+  GENERATED_BACKGROUND_PACK_SIZE,
+  coerceGeneratedBackgroundRecipe,
+  createGeneratedBackgroundPack,
+  createStarterGeneratedBackgroundPack
+} from './generatedBackgrounds';
 
-const BACKGROUND_PACKS_KEY = 'spotitnow.generated-background-packs.v1';
-const BACKGROUND_PACKS_LEGACY_KEYS = ['spotdiff.generated-background-packs.v1'];
-
-const SCENE_KINDS: GeneratedBackgroundSceneKind[] = [
-  'arcade',
-  'studio',
-  'forest',
-  'city',
-  'seaside',
-  'dreamscape'
+const BACKGROUND_PACKS_KEY = 'spotitnow.generated-background-packs.v2';
+const BACKGROUND_PACKS_LEGACY_KEYS = [
+  'spotitnow.generated-background-packs.v1',
+  'spotdiff.generated-background-packs.v1'
 ];
 
 const PALETTE_IDS: GeneratedBackgroundPaletteId[] = ['sunrise', 'mint', 'midnight', 'candy', 'ocean', 'amber'];
-const PATTERNS: GeneratedBackgroundPattern[] = ['dots', 'grid', 'sparkle', 'waves'];
 const ASPECT_RATIOS: Array<GeneratedBackgroundPack['aspectRatio']> = ['16:9', '9:16', '1:1', '4:3'];
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
@@ -40,44 +38,6 @@ const writeStoredValue = (packs: GeneratedBackgroundPack[]) => {
 
 const sanitizePack = (value: unknown): GeneratedBackgroundPack | null => {
   if (!isObjectRecord(value)) return null;
-  const backgrounds = Array.isArray(value.backgrounds)
-    ? value.backgrounds
-        .map((background, index) => {
-          if (!isObjectRecord(background)) return null;
-          const sceneKind = SCENE_KINDS.includes(background.sceneKind as GeneratedBackgroundSceneKind)
-            ? (background.sceneKind as GeneratedBackgroundSceneKind)
-            : 'arcade';
-          const paletteId = PALETTE_IDS.includes(background.paletteId as GeneratedBackgroundPaletteId)
-            ? (background.paletteId as GeneratedBackgroundPaletteId)
-            : 'sunrise';
-          const pattern = PATTERNS.includes(background.pattern as GeneratedBackgroundPattern)
-            ? (background.pattern as GeneratedBackgroundPattern)
-            : 'dots';
-          return {
-            id:
-              typeof background.id === 'string' && background.id.trim()
-                ? background.id.trim()
-                : `${String(value.id ?? 'background-pack')}-background-${index + 1}`,
-            name:
-              typeof background.name === 'string' && background.name.trim()
-                ? background.name.trim()
-                : `Background ${index + 1}`,
-            seed: Math.max(1, Math.floor(Number(background.seed) || index + 1)),
-            sceneKind,
-            paletteId,
-            horizon: Math.min(0.9, Math.max(0.2, Number(background.horizon) || 0.52)),
-            density: Math.min(1, Math.max(0.1, Number(background.density) || 0.5)),
-            accentScale: Math.min(1, Math.max(0.1, Number(background.accentScale) || 0.5)),
-            pattern
-          };
-        })
-        .filter((entry): entry is GeneratedBackgroundPack['backgrounds'][number] => Boolean(entry))
-    : [];
-
-  if (!backgrounds.length) {
-    return null;
-  }
-
   const aspectRatio = ASPECT_RATIOS.includes(value.aspectRatio as GeneratedBackgroundPack['aspectRatio'])
     ? (value.aspectRatio as GeneratedBackgroundPack['aspectRatio'])
     : '16:9';
@@ -87,14 +47,35 @@ const sanitizePack = (value: unknown): GeneratedBackgroundPack | null => {
     typeof value.id === 'string' && value.id.trim()
       ? value.id.trim()
       : `background-pack-${createdAt}`;
+  const name =
+    typeof value.name === 'string' && value.name.trim()
+      ? value.name.trim()
+      : `Background Pack ${new Date(createdAt).toLocaleDateString()}`;
+  const description = typeof value.description === 'string' ? value.description.trim() : '';
+  const fallbackPaletteId = PALETTE_IDS.includes(value.defaultPaletteId as GeneratedBackgroundPaletteId)
+    ? (value.defaultPaletteId as GeneratedBackgroundPaletteId)
+    : 'sunrise';
+  const parsedBackgrounds = Array.isArray(value.backgrounds)
+    ? value.backgrounds
+        .map((background, index) => coerceGeneratedBackgroundRecipe(background, createdAt + index * 17, 'confetti_field', fallbackPaletteId))
+        .filter((entry): entry is GeneratedBackgroundPack['backgrounds'][number] => Boolean(entry))
+    : [];
+  const fallbackPack = createGeneratedBackgroundPack({
+    name,
+    description,
+    aspectRatio,
+    baseSeed: createdAt
+  });
+  const backgrounds = [...parsedBackgrounds, ...fallbackPack.backgrounds].slice(0, GENERATED_BACKGROUND_PACK_SIZE);
+
+  if (!backgrounds.length) {
+    return null;
+  }
 
   return {
     id,
-    name:
-      typeof value.name === 'string' && value.name.trim()
-        ? value.name.trim()
-        : `Background Pack ${new Date(createdAt).toLocaleDateString()}`,
-    description: typeof value.description === 'string' ? value.description.trim() : '',
+    name,
+    description,
     aspectRatio,
     createdAt,
     updatedAt,
@@ -151,6 +132,25 @@ export const deleteGeneratedBackgroundPack = (packId: string) => {
   const next = loadGeneratedBackgroundPacks().filter((entry) => entry.id !== packId);
   const safeNext = ensureStarterPack(next);
   writeStoredValue(safeNext);
+  return safeNext;
+};
+
+export const renameGeneratedBackgroundPack = (packId: string, nextName: string) => {
+  const safeName = nextName.trim();
+  if (!safeName) {
+    return loadGeneratedBackgroundPacks();
+  }
+
+  const next = loadGeneratedBackgroundPacks().map((entry) =>
+    entry.id === packId
+      ? {
+          ...entry,
+          name: safeName,
+          updatedAt: Date.now()
+        }
+      : entry
+  );
+  const safeNext = replaceGeneratedBackgroundPacks(next);
   return safeNext;
 };
 

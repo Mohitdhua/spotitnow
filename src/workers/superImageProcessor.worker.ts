@@ -5,7 +5,7 @@ import {
   splitCombinedBlobFromSelectionToCanvas,
   splitCombinedBlobSmartToCanvas
 } from '../services/imageSplitter';
-import { canvasToBlob } from '../services/canvasRuntime';
+import { canvasToBlob, decodeRuntimeImageBitmapFromBlob } from '../services/canvasRuntime';
 import {
   removeWatermark,
   removeWatermarkWithRegions,
@@ -98,7 +98,7 @@ const releaseProcessedCanvasResult = (
 };
 
 const readBlobImageSize = async (blob: Blob): Promise<{ width: number; height: number }> => {
-  const bitmap = await createImageBitmap(blob);
+  const bitmap = await decodeRuntimeImageBitmapFromBlob(blob);
   try {
     return {
       width: bitmap.width,

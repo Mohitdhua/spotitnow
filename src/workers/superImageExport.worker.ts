@@ -6,7 +6,7 @@ import {
   splitCombinedBlobFromSelectionToCanvas,
   splitCombinedBlobSmartToCanvas
 } from '../services/imageSplitter';
-import { canvasToBlob } from '../services/canvasRuntime';
+import { canvasToBlob, decodeRuntimeImageBitmapFromBlob } from '../services/canvasRuntime';
 import { extractFramesStream, type ExtractFramesSummary } from '../services/frameExtractor';
 import type { SplitterSharedRegion } from '../services/appSettings';
 import {
@@ -182,11 +182,7 @@ const releaseProcessedCanvasResult = (
 };
 
 const readBlobImageSize = async (blob: Blob): Promise<{ width: number; height: number }> => {
-  if (typeof createImageBitmap !== 'function') {
-    throw new Error('ImageBitmap is unavailable in this worker.');
-  }
-
-  const bitmap = await createImageBitmap(blob);
+  const bitmap = await decodeRuntimeImageBitmapFromBlob(blob);
   try {
     return {
       width: bitmap.width,

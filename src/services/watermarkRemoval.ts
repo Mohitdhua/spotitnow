@@ -8,7 +8,8 @@ import {
   createRuntimeCanvas,
   getRuntimeCanvasContext,
   isRuntimeCanvas,
-  loadRuntimeImageFromSource
+  loadRuntimeImageFromSource,
+  readRuntimeBlobImageDimensions
 } from './canvasRuntime';
 
 export type WatermarkImageInput =
@@ -253,6 +254,14 @@ const addSignal = (
 const loadImageFromUrl = async (url: string): Promise<HTMLImageElement | ImageBitmap> =>
   await loadRuntimeImageFromSource(url);
 
+const readBlobAsDataUrl = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error('Failed to read image data.'));
+    reader.readAsDataURL(blob);
+  });
+
 const waitForImageElement = (image: HTMLImageElement): Promise<HTMLImageElement> => {
   if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
     return Promise.resolve(image);
@@ -295,14 +304,16 @@ const resolveWatermarkImageInput = async (
 
   if (typeof Blob !== 'undefined' && input instanceof Blob) {
     if (typeof createImageBitmap === 'function') {
-      return await createImageBitmap(input);
+      try {
+        return await createImageBitmap(input);
+      } catch {
+        // Fall through to the HTML image decoder below.
+      }
     }
-    const objectUrl = URL.createObjectURL(input);
-    try {
-      return await loadImageFromUrl(objectUrl);
-    } finally {
-      URL.revokeObjectURL(objectUrl);
-    }
+
+    await readRuntimeBlobImageDimensions(input);
+    const dataUrl = await readBlobAsDataUrl(input);
+    return await loadImageFromUrl(dataUrl);
   }
 
   if (isImageElement(input)) {

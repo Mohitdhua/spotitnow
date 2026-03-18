@@ -2,7 +2,29 @@ export type RuntimeCanvas = HTMLCanvasElement | OffscreenCanvas;
 export type RuntimeCanvasContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 export type RuntimeImageLike = HTMLImageElement | ImageBitmap;
 
+type RuntimeImageDecoderFrame = {
+  close?: () => void;
+};
+
+type RuntimeImageDecoderInstance = {
+  decode: (options?: { frameIndex?: number }) => Promise<{ image: RuntimeImageDecoderFrame }>;
+  close?: () => void;
+};
+
+type RuntimeImageDecoderCtor = new (init: { data: Blob; type: string }) => RuntimeImageDecoderInstance;
+
 const hasDocumentCanvas = () => typeof document !== 'undefined' && typeof document.createElement === 'function';
+const getImageDecoderCtor = () =>
+  (globalThis as unknown as { ImageDecoder?: RuntimeImageDecoderCtor }).ImageDecoder ?? null;
+
+const loadHtmlImage = (src: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = 'async';
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Failed to load image source'));
+    image.src = src;
+  });
 
 export const createRuntimeCanvas = (
   width: number,
@@ -47,12 +69,7 @@ export const isRuntimeImage = (value: unknown): value is RuntimeImageLike => {
 
 export const loadRuntimeImageFromSource = async (src: string): Promise<RuntimeImageLike> => {
   if (typeof Image !== 'undefined') {
-    return await new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error('Failed to load image source'));
-      image.src = src;
-    });
+    return await loadHtmlImage(src);
   }
 
   if (typeof fetch !== 'function' || typeof createImageBitmap !== 'function') {
@@ -65,7 +82,87 @@ export const loadRuntimeImageFromSource = async (src: string): Promise<RuntimeIm
   }
 
   const blob = await response.blob();
-  return await createImageBitmap(blob);
+  return await decodeRuntimeImageBitmapFromBlob(blob);
+};
+
+const decodeRuntimeImageBitmapWithImageDecoder = async (blob: Blob): Promise<ImageBitmap> => {
+  const ImageDecoderCtor = getImageDecoderCtor();
+  if (!ImageDecoderCtor || !blob.type || typeof createImageBitmap !== 'function') {
+    throw new Error('ImageDecoder fallback is unavailable for this image.');
+  }
+
+  const decoder = new ImageDecoderCtor({
+    data: blob,
+    type: blob.type
+  });
+
+  try {
+    const { image } = await decoder.decode({ frameIndex: 0 });
+    try {
+      return await createImageBitmap(image as any);
+    } finally {
+      image.close?.();
+    }
+  } finally {
+    decoder.close?.();
+  }
+};
+
+export const decodeRuntimeImageBitmapFromBlob = async (blob: Blob): Promise<ImageBitmap> => {
+  let lastError: unknown = null;
+
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await createImageBitmap(blob);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  try {
+    return await decodeRuntimeImageBitmapWithImageDecoder(blob);
+  } catch (error) {
+    lastError = error;
+  }
+
+  const detail =
+    lastError instanceof Error && lastError.message.trim()
+      ? ` ${lastError.message}`
+      : '';
+  throw new Error(`Failed to decode image data.${detail}`);
+};
+
+export const readRuntimeBlobImageDimensions = async (blob: Blob): Promise<{ width: number; height: number }> => {
+  try {
+    const bitmap = await decodeRuntimeImageBitmapFromBlob(blob);
+    try {
+      return {
+        width: bitmap.width,
+        height: bitmap.height
+      };
+    } finally {
+      if (typeof bitmap.close === 'function') {
+        bitmap.close();
+      }
+    }
+  } catch {
+    // Fall through to the HTML image decoder below.
+  }
+
+  if (typeof Image === 'undefined') {
+    throw new Error('Image decoding is not supported in this runtime.');
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = await loadHtmlImage(objectUrl);
+    return {
+      width: image.naturalWidth || image.width,
+      height: image.naturalHeight || image.height
+    };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 };
 
 export const canvasToBlob = async (

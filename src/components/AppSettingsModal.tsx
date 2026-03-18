@@ -11,14 +11,13 @@ import {
 } from '../services/appSettings';
 import { CustomVideoLayout, VideoSettings } from '../types';
 import { VIDEO_PACKAGE_PRESETS, VIDEO_REVEAL_BEHAVIOR_OPTIONS } from '../constants/videoPackages';
+import { SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES } from '../constants/superExportThumbnailCopyTemplates';
+import { VIDEO_TRANSITION_STYLE_OPTIONS } from '../constants/videoStyleModules';
+import { SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS } from '../constants/superExportThumbnailStyles';
 import { TimestampPresetPicker } from './TimestampPresetPicker';
 import { loadGameAudioMuted } from '../services/gameAudio';
 import { loadWatermarkPresets } from '../services/watermarkPresets';
 import type { WatermarkSelectionPreset } from '../services/watermarkRemoval';
-import {
-  loadVideoSceneCopyPresets,
-  type VideoSceneCopyPreset
-} from '../services/videoSceneCopyPresets';
 import { loadSavedVideoCustomLayout } from '../services/videoLayoutStorage';
 
 interface AppSettingsModalProps {
@@ -78,6 +77,29 @@ const labelize = (value: string) =>
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const buildThumbnailCopyText = (title: string, subtitle: string) =>
+  [title.trim(), subtitle.trim()].filter(Boolean).join('\n');
+
+const parseThumbnailCopyText = (value: string) => {
+  const lines = value
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return {
+      title: '',
+      subtitle: ''
+    };
+  }
+
+  return {
+    title: lines[0] ?? '',
+    subtitle: lines.slice(1).join(' ')
+  };
+};
+
 const SPLITTER_MODE_OPTIONS: Array<{ value: SplitterModePreference; label: string }> = [
   { value: 'shared_area', label: 'Shared Area' },
   { value: 'manual_pair', label: 'Manual Pair' }
@@ -94,6 +116,7 @@ const TEXT_TEMPLATE_FIELDS: Array<{
   { key: 'introSubtitle', label: 'Intro Subtitle', rows: 2, span: 'full' },
   { key: 'playTitle', label: 'Play Title' },
   { key: 'playSubtitle', label: 'Play Subtitle' },
+  { key: 'progressLabel', label: 'Progress Phrase', rows: 2, span: 'full' },
   { key: 'revealTitle', label: 'Reveal Title' },
   { key: 'transitionEyebrow', label: 'Transition Eyebrow' },
   { key: 'transitionTitle', label: 'Transition Title' },
@@ -116,7 +139,6 @@ export function AppSettingsModal({
   const [draft, setDraft] = useState<AppGlobalSettings>(settings);
   const [splitterCounterInput, setSplitterCounterInput] = useState(1);
   const [watermarkPresets, setWatermarkPresets] = useState<WatermarkSelectionPreset[]>([]);
-  const [sceneCopyPresets, setSceneCopyPresets] = useState<VideoSceneCopyPreset[]>([]);
   const [savedVideoLayout, setSavedVideoLayout] = useState<CustomVideoLayout | null>(null);
   const [gameAudioMuted, setGameAudioMuted] = useState(false);
   const [transferMessage, setTransferMessage] = useState('');
@@ -129,7 +151,6 @@ export function AppSettingsModal({
     setDraft(settings);
     setSplitterCounterInput(readSplitterNextSequence());
     setWatermarkPresets(loadWatermarkPresets());
-    setSceneCopyPresets(loadVideoSceneCopyPresets());
     setSavedVideoLayout(loadSavedVideoCustomLayout());
     setGameAudioMuted(loadGameAudioMuted());
   }, [isOpen, settings]);
@@ -181,6 +202,20 @@ export function AppSettingsModal({
       frameExtractorDefaults: {
         ...current.frameExtractorDefaults,
         ...patch
+      }
+    }));
+  };
+  const updateFrameExtractorThumbnailDefaults = (
+    patch: Partial<FrameExtractorDefaults['superExportThumbnail']>
+  ) => {
+    setDraft((current) => ({
+      ...current,
+      frameExtractorDefaults: {
+        ...current.frameExtractorDefaults,
+        superExportThumbnail: {
+          ...current.frameExtractorDefaults.superExportThumbnail,
+          ...patch
+        }
       }
     }));
   };
@@ -279,7 +314,7 @@ export function AppSettingsModal({
                 <div className="text-sm font-black uppercase">Backup + Sync</div>
                 <div className="mt-1 text-[11px] font-bold uppercase tracking-wide text-slate-600">
                   Export one JSON backup with app defaults, splitter setup, timestamp presets, watermark presets,
-                  scene copy presets, saved video layout, and game sound preference.
+                  video packages, saved background packs, the saved video layout snapshot, and game sound preference.
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -499,12 +534,12 @@ export function AppSettingsModal({
                   <input
                     type="number"
                     min={0.5}
-                    max={6}
+                    max={180}
                     step={0.5}
                     value={draft.videoDefaults.sceneSettings.introDuration}
                     onChange={(event) =>
                       updateVideoSceneSettings({
-                        introDuration: clamp(Number(event.target.value) || 0.5, 0.5, 6)
+                        introDuration: clamp(Number(event.target.value) || 0.5, 0.5, 180)
                       })
                     }
                     className="w-full p-2 border-2 border-black rounded-lg font-bold"
@@ -528,12 +563,12 @@ export function AppSettingsModal({
                   <input
                     type="number"
                     min={0.5}
-                    max={6}
+                    max={180}
                     step={0.5}
                     value={draft.videoDefaults.sceneSettings.outroDuration}
                     onChange={(event) =>
                       updateVideoSceneSettings({
-                        outroDuration: clamp(Number(event.target.value) || 0.5, 0.5, 6)
+                        outroDuration: clamp(Number(event.target.value) || 0.5, 0.5, 180)
                       })
                     }
                     className="w-full p-2 border-2 border-black rounded-lg font-bold"
@@ -655,9 +690,9 @@ export function AppSettingsModal({
                   }
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg bg-white font-bold"
                 >
-                  {(['fade', 'slide', 'none'] as const).map((option) => (
-                    <option key={option} value={option}>
-                      {labelize(option)}
+                  {VIDEO_TRANSITION_STYLE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
@@ -711,7 +746,7 @@ export function AppSettingsModal({
                 <div>
                   <div className="text-xs font-black uppercase text-slate-900">Layout Defaults</div>
                   <div className="mt-1 text-[11px] font-bold uppercase tracking-wide text-slate-600">
-                    Start video mode with the package layout or the latest saved custom layout snapshot.
+                    Set the default package baseline, then optionally reuse the latest saved custom layout snapshot.
                   </div>
                 </div>
                 <label className="text-xs font-black uppercase">
@@ -837,7 +872,12 @@ export function AppSettingsModal({
           </section>
 
           <section className="p-4 border-4 border-black rounded-xl bg-[#FFF7ED] shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] space-y-3">
-            <div className="text-sm font-black uppercase">Frame Extractor Defaults</div>
+            <div>
+              <div className="text-sm font-black uppercase">Frame Extractor Defaults</div>
+              <div className="mt-1 text-[11px] font-bold uppercase tracking-wide text-slate-600">
+                Super Export now follows the current video package and video mode settings. These defaults only cover extraction output, watermark cleanup, and thumbnail behavior.
+              </div>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <label className="text-xs font-black uppercase">
                 Format
@@ -946,63 +986,173 @@ export function AppSettingsModal({
                   ))}
                 </select>
               </label>
+            </div>
 
-              <label className="text-xs font-black uppercase">
-                Apply Scene Copy Preset
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateFrameExtractorDefaults({
-                      useSceneCopyPresetForSuperExport: !draft.frameExtractorDefaults.useSceneCopyPresetForSuperExport
-                    })
-                  }
-                  className={`mt-1 w-full rounded-lg border-2 border-black px-3 py-2 font-black uppercase ${
-                    draft.frameExtractorDefaults.useSceneCopyPresetForSuperExport ? 'bg-[#DBEAFE]' : 'bg-white'
-                  }`}
-                >
-                  {draft.frameExtractorDefaults.useSceneCopyPresetForSuperExport ? 'On' : 'Off'}
-                </button>
-              </label>
-
-              <label className="text-xs font-black uppercase">
-                Scene Copy Preset
-                <select
-                  value={draft.frameExtractorDefaults.sceneCopyPresetId}
-                  onChange={(event) =>
-                    updateFrameExtractorDefaults({
-                      sceneCopyPresetId: event.target.value
-                    })
-                  }
-                  className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-bold"
-                >
-                  <option value="">None</option>
-                  {sceneCopyPresets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="text-xs font-black uppercase">
-                Use Saved Video Layout
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateFrameExtractorDefaults({
-                      useSavedVideoLayoutForSuperExport: !draft.frameExtractorDefaults.useSavedVideoLayoutForSuperExport
-                    })
-                  }
-                  className={`mt-1 w-full rounded-lg border-2 border-black px-3 py-2 font-black uppercase ${
-                    draft.frameExtractorDefaults.useSavedVideoLayoutForSuperExport ? 'bg-[#FDE68A]' : 'bg-white'
-                  }`}
-                >
-                  {draft.frameExtractorDefaults.useSavedVideoLayoutForSuperExport ? 'On' : 'Off'}
-                </button>
-                <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-600">
-                  {hasSavedVideoLayout ? 'Saved layout detected.' : 'No saved layout found yet.'}
+            <div className="rounded-xl border-2 border-black bg-[#EFF6FF] p-3 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-black uppercase">Super Export Thumbnail</div>
+                  <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-600">
+                    Renders one thumbnail from the first puzzle of each Super Export batch with timer and progress hidden.
+                  </div>
                 </div>
-              </label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateFrameExtractorThumbnailDefaults({
+                      enabled: !draft.frameExtractorDefaults.superExportThumbnail.enabled
+                    })
+                  }
+                  className={`rounded-lg border-2 border-black px-3 py-2 text-xs font-black uppercase ${
+                    draft.frameExtractorDefaults.superExportThumbnail.enabled ? 'bg-[#BFDBFE]' : 'bg-white'
+                  }`}
+                >
+                  {draft.frameExtractorDefaults.superExportThumbnail.enabled ? 'On' : 'Off'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="text-xs font-black uppercase sm:col-span-2">
+                  Thumbnail Export Mode
+                  <select
+                    value={draft.frameExtractorDefaults.superExportThumbnail.exportMode}
+                    onChange={(event) =>
+                      updateFrameExtractorThumbnailDefaults({
+                        exportMode: event.target.value as typeof draft.frameExtractorDefaults.superExportThumbnail.exportMode
+                      })
+                    }
+                    className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-bold"
+                  >
+                    <option value="with_video">Video + Thumbnail</option>
+                    <option value="thumbnail_only">Thumbnail Only</option>
+                  </select>
+                </label>
+
+                <label className="text-xs font-black uppercase sm:col-span-2">
+                  Thumbnail Style
+                  <select
+                    value={draft.frameExtractorDefaults.superExportThumbnail.stylePreset}
+                    onChange={(event) =>
+                      updateFrameExtractorThumbnailDefaults({
+                        stylePreset: event.target.value as typeof draft.frameExtractorDefaults.superExportThumbnail.stylePreset
+                      })
+                    }
+                    className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-bold"
+                  >
+                    {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-600">
+                    {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.find(
+                      (preset) => preset.id === draft.frameExtractorDefaults.superExportThumbnail.stylePreset
+                    )?.description ?? 'Use the selected thumbnail preset.'}
+                  </div>
+                </label>
+
+                <label className="text-xs font-black uppercase sm:col-span-2">
+                  Thumbnail Copy
+                  <textarea
+                    rows={3}
+                    value={buildThumbnailCopyText(
+                      draft.frameExtractorDefaults.superExportThumbnail.title,
+                      draft.frameExtractorDefaults.superExportThumbnail.subtitle
+                    )}
+                    onChange={(event) => {
+                      const next = parseThumbnailCopyText(event.target.value);
+                      updateFrameExtractorThumbnailDefaults(next);
+                    }}
+                    className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-bold"
+                    placeholder={'SPOT THE 3 DIFFERENCES\nCan you find them before the reveal?'}
+                  />
+                </label>
+                <div className="sm:col-span-2">
+                  <div className="mb-1 text-[10px] font-black uppercase tracking-wide text-slate-600">
+                    Quick Templates
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES.map((template) => (
+                      <button
+                        key={template.id}
+                        type="button"
+                        onClick={() => updateFrameExtractorThumbnailDefaults(parseThumbnailCopyText(template.text))}
+                        className="rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase hover:bg-slate-100"
+                      >
+                        {template.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="sm:col-span-2 rounded-lg border border-black bg-white p-3">
+                  <div className="mb-3 text-[10px] font-black uppercase tracking-wide text-slate-700">
+                    Default Text Layout
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <label className="text-xs font-black uppercase">
+                      <div className="mb-1 flex items-center justify-between">
+                        <span>Text Size</span>
+                        <span>{Math.round(draft.frameExtractorDefaults.superExportThumbnail.textScale * 100)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.6"
+                        max="2.4"
+                        step="0.05"
+                        value={draft.frameExtractorDefaults.superExportThumbnail.textScale}
+                        onChange={(event) =>
+                          updateFrameExtractorThumbnailDefaults({
+                            textScale: clamp(Number(event.target.value), 0.6, 2.4)
+                          })
+                        }
+                        className="w-full accent-slate-900"
+                      />
+                    </label>
+                    <label className="text-xs font-black uppercase">
+                      <div className="mb-1 flex items-center justify-between">
+                        <span>Text X</span>
+                        <span>{draft.frameExtractorDefaults.superExportThumbnail.textOffsetX}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="-320"
+                        max="320"
+                        step="4"
+                        value={draft.frameExtractorDefaults.superExportThumbnail.textOffsetX}
+                        onChange={(event) =>
+                          updateFrameExtractorThumbnailDefaults({
+                            textOffsetX: clamp(Math.round(Number(event.target.value)), -320, 320)
+                          })
+                        }
+                        className="w-full accent-slate-900"
+                      />
+                    </label>
+                    <label className="text-xs font-black uppercase">
+                      <div className="mb-1 flex items-center justify-between">
+                        <span>Text Y</span>
+                        <span>{draft.frameExtractorDefaults.superExportThumbnail.textOffsetY}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="-180"
+                        max="180"
+                        step="4"
+                        value={draft.frameExtractorDefaults.superExportThumbnail.textOffsetY}
+                        onChange={(event) =>
+                          updateFrameExtractorThumbnailDefaults({
+                            textOffsetY: clamp(Math.round(Number(event.target.value)), -180, 180)
+                          })
+                        }
+                        className="w-full accent-slate-900"
+                      />
+                    </label>
+                  </div>
+                </div>
+                <div className="sm:col-span-2 rounded-lg border border-black bg-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-600">
+                  One box controls the visible thumbnail copy. Press Enter if you want an optional second line. These defaults also control thumbnail text size and position.
+                </div>
+              </div>
             </div>
 
             <label className="block text-xs font-black uppercase">

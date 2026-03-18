@@ -1,5 +1,8 @@
 import {
   ALL_FORMATS,
+  AudioSample,
+  AudioSampleSink,
+  AudioSampleSource,
   BlobSource,
   BufferTarget,
   CanvasSink,
@@ -12,6 +15,7 @@ import {
   canEncodeVideo
 } from 'mediabunny';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
+import { decodeRuntimeImageBitmapFromBlob } from '../services/canvasRuntime';
 import type {
   OverlayBaseInput as WorkerBaseInput,
   OverlayBatchPhotoInput as WorkerBatchPhoto,
@@ -22,6 +26,7 @@ import type {
   OverlayLinkedPairLayout as WorkerLinkedPairLayout,
   OverlayLinkedPairStyle as WorkerLinkedPairStyle,
   OverlayMediaClipInput as WorkerOverlayMedia,
+  OverlaySoundtrackInput as WorkerSoundtrackInput,
   OverlayTimeline,
   OverlayWorkerOutputTarget,
   OverlayWorkerStartPayload
@@ -95,21 +100,31 @@ const RESOLUTION_HEIGHT: Record<OverlayExportSettings['exportResolution'], numbe
 
 const FORMAT_BY_CODEC: Record<
   OverlayExportSettings['exportCodec'],
-  { codec: 'avc' | 'av1'; extension: string; mimeType: string; outputFormat: Mp4OutputFormat | WebMOutputFormat }
+  {
+    codec: 'avc' | 'av1';
+    audioCodec: 'aac' | 'opus';
+    extension: string;
+    mimeType: string;
+    outputFormat: Mp4OutputFormat | WebMOutputFormat;
+  }
 > = {
   h264: {
     codec: 'avc',
+    audioCodec: 'aac',
     extension: 'mp4',
     mimeType: 'video/mp4',
     outputFormat: new Mp4OutputFormat()
   },
   av1: {
     codec: 'av1',
+    audioCodec: 'opus',
     extension: 'webm',
     mimeType: 'video/webm',
     outputFormat: new WebMOutputFormat()
   }
 };
+
+const AUDIO_BITRATE = 128_000;
 
 let isCanceled = false;
 let activeConversion: Conversion | null = null;
@@ -207,6 +222,129 @@ const normalizeCrop = (crop: OverlayCrop): OverlayCrop => {
   const width = clamp(Number.isFinite(crop.width) ? crop.width : 1, 0.02, 1 - x);
   const height = clamp(Number.isFinite(crop.height) ? crop.height : 1, 0.02, 1 - y);
   return { x, y, width, height };
+};
+
+const createOutputAudioSample = (
+  sample: AudioSample,
+  timestamp: number,
+  volume: number,
+  maxDuration: number
+): AudioSample | null => {
+  if (maxDuration <= 0) return null;
+
+  const maxFrames = Math.max(1, Math.floor(maxDuration * sample.sampleRate));
+  if (maxFrames <= 0) return null;
+
+  const frameCount = Math.min(sample.numberOfFrames, maxFrames);
+  if (frameCount <= 0) return null;
+
+  if (Math.abs(volume - 1) < 0.0001 && frameCount === sample.numberOfFrames) {
+    const cloned = sample.clone();
+    cloned.setTimestamp(timestamp);
+    return cloned;
+  }
+
+  const data = new Float32Array(frameCount * sample.numberOfChannels);
+  sample.copyTo(data, {
+    planeIndex: 0,
+    format: 'f32',
+    frameCount
+  });
+
+  if (Math.abs(volume - 1) >= 0.0001) {
+    for (let index = 0; index < data.length; index += 1) {
+      data[index] *= volume;
+    }
+  }
+
+  return new AudioSample({
+    data,
+    format: 'f32',
+    numberOfChannels: sample.numberOfChannels,
+    sampleRate: sample.sampleRate,
+    timestamp
+  });
+};
+
+const createAudioPump = async (options: {
+  output: Output;
+  file: File;
+  codec: 'aac' | 'opus';
+  outputDuration: number;
+  start: number;
+  trimStart: number;
+  volume: number;
+  loop: boolean;
+}) => {
+  const { output, file, codec, outputDuration, start, trimStart, volume, loop } = options;
+  if (start >= outputDuration) return null;
+
+  const input = new Input({
+    source: new BlobSource(file),
+    formats: ALL_FORMATS
+  });
+  const track = await input.getPrimaryAudioTrack();
+  if (!track) {
+    input.dispose();
+    return null;
+  }
+
+  const source = new AudioSampleSource({
+    codec,
+    bitrate: AUDIO_BITRATE
+  });
+  output.addAudioTrack(source);
+
+  const safeTrimStart = Math.max(0, trimStart);
+  const sourceDuration = await track.computeDuration().catch(() => 0);
+  const availableDuration = sourceDuration > safeTrimStart ? sourceDuration - safeTrimStart : 0;
+  const shouldLoop = loop && availableDuration > 0.001;
+
+  return async () => {
+    try {
+      let iteration = 0;
+      let timelineOffset = start;
+
+      while (timelineOffset < outputDuration) {
+        throwIfCanceled();
+
+        if (iteration > 0 && !shouldLoop) break;
+
+        const sink = new AudioSampleSink(track);
+        let sawSample = false;
+
+        for await (const sample of sink.samples(safeTrimStart, Infinity)) {
+          throwIfCanceled();
+          sawSample = true;
+
+          const sampleTimestamp = timelineOffset + Math.max(0, sample.timestamp - safeTrimStart);
+          const remainingDuration = outputDuration - sampleTimestamp;
+          const outputSample = createOutputAudioSample(sample, sampleTimestamp, volume, remainingDuration);
+          sample.close();
+
+          if (!outputSample) {
+            if (remainingDuration <= 0) break;
+            continue;
+          }
+
+          const outputSampleDuration = outputSample.duration;
+          await source.add(outputSample);
+          outputSample.close();
+
+          if (remainingDuration <= outputSampleDuration) break;
+        }
+
+        if (!sawSample) break;
+        if (!shouldLoop) break;
+
+        timelineOffset += availableDuration;
+        iteration += 1;
+      }
+    } finally {
+      source.close();
+      input.dispose();
+    }
+  };
 };
 
 const normalizeLinkedPairLayout = (
@@ -416,7 +554,7 @@ const renderOverlayResources = async (
 
 const prepareOverlayResource = async (clip: WorkerOverlayMedia): Promise<OverlayResource> => {
   if (clip.kind === 'image') {
-    const bitmap = await createImageBitmap(clip.file);
+    const bitmap = await decodeRuntimeImageBitmapFromBlob(clip.file);
     return {
       kind: 'image',
       clip,
@@ -451,8 +589,8 @@ const prepareOverlayResource = async (clip: WorkerOverlayMedia): Promise<Overlay
 
 const prepareLinkedPairResource = async (pair: WorkerLinkedPairInput): Promise<LinkedPairImageResource> => ({
   pair,
-  puzzleBitmap: await createImageBitmap(pair.puzzleFile),
-  diffBitmap: await createImageBitmap(pair.diffFile)
+  puzzleBitmap: await decodeRuntimeImageBitmapFromBlob(pair.puzzleFile),
+  diffBitmap: await decodeRuntimeImageBitmapFromBlob(pair.diffFile)
 });
 
 const releaseLinkedPairResource = (resource: LinkedPairImageResource) => {
@@ -493,10 +631,11 @@ const exportWithVideoBase = async (options: {
   base: WorkerBaseInput;
   outputLabel: string;
   overlayResources: OverlayResource[];
+  soundtrack?: WorkerSoundtrackInput;
   settings: OverlayExportSettings;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
-  const { base, outputLabel, overlayResources, settings, onProgress } = options;
+  const { base, outputLabel, overlayResources, soundtrack, settings, onProgress } = options;
   if (!base.videoFile) throw new Error('Missing base video file.');
 
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
@@ -534,22 +673,18 @@ const exportWithVideoBase = async (options: {
 
   throwIfCanceled();
 
-  const input = new Input({
-    source: new BlobSource(base.videoFile),
-    formats: ALL_FORMATS
-  });
+  const baseVideoResource = await prepareBaseVideoResource(base.videoFile);
+  const duration = Math.max(0.5, base.durationSeconds);
   const target = new BufferTarget();
   const output = new Output({
     format: codecConfig.outputFormat,
     target
   });
-  const overlayCanvas = new OffscreenCanvas(outputWidth, outputHeight);
-  const overlayCtx = overlayCanvas.getContext('2d');
-  if (!overlayCtx) {
-    throw new Error('Failed to initialize overlay canvas context.');
-  }
-  overlayCtx.imageSmoothingEnabled = true;
-  overlayCtx.imageSmoothingQuality = 'high';
+  const canvas = new OffscreenCanvas(outputWidth, outputHeight);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to initialize video export canvas context.');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
   const scratchCanvas = new OffscreenCanvas(2, 2);
   const scratchCtx = scratchCanvas.getContext('2d');
@@ -559,48 +694,63 @@ const exportWithVideoBase = async (options: {
   scratchCtx.imageSmoothingEnabled = true;
   scratchCtx.imageSmoothingQuality = 'high';
 
-  const conversion = await Conversion.init({
-    input,
-    output,
-    video: {
-      width: outputWidth,
-      height: outputHeight,
-      frameRate: FPS,
-      fit: 'cover',
-      codec: codecConfig.codec,
-      bitrate,
-      forceTranscode: true,
-      processedWidth: outputWidth,
-      processedHeight: outputHeight,
-      process: async (sample) => {
-        overlayCtx.clearRect(0, 0, outputWidth, outputHeight);
-        sample.draw(overlayCtx, 0, 0, outputWidth, outputHeight);
-        await renderOverlayResources(
-          overlayCtx,
-          overlayResources,
-          Math.max(0, sample.timestamp),
-          outputWidth,
-          outputHeight,
-          scratchCanvas,
-          scratchCtx
-        );
-        return overlayCanvas;
-      }
-    }
+  const videoSource = new CanvasSource(canvas, {
+    codec: codecConfig.codec,
+    bitrate,
+    bitrateMode: 'constant',
+    latencyMode: 'quality',
+    contentHint: 'detail'
   });
-  activeConversion = conversion;
+  output.addVideoTrack(videoSource, { frameRate: FPS });
+  const audioPump = await createAudioPump({
+    output,
+    file: soundtrack?.file ?? base.videoFile,
+    codec: codecConfig.audioCodec,
+    outputDuration: duration,
+    start: soundtrack?.start ?? 0,
+    trimStart: soundtrack?.trimStart ?? 0,
+    volume: soundtrack?.volume ?? 1,
+    loop: soundtrack?.loop ?? false
+  });
 
-  conversion.onProgress = (progress) => {
-    onProgress(clamp(progress, 0, 0.995), `Exporting ${outputLabel}`);
-  };
+  await output.start();
 
-  await conversion.execute();
+  const totalFrames = Math.max(1, Math.ceil(duration * FPS));
+  const progressStep = Math.max(1, Math.floor(totalFrames / 120));
+  const audioPromise = audioPump ? audioPump() : Promise.resolve();
+
+  for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+    throwIfCanceled();
+    const timestamp = frameIndex / FPS;
+    ctx.clearRect(0, 0, outputWidth, outputHeight);
+    await drawBaseFrame({
+      ctx,
+      base,
+      basePhotoBitmap: null,
+      baseVideoResource,
+      timestamp,
+      outputWidth,
+      outputHeight
+    });
+    await renderOverlayResources(ctx, overlayResources, timestamp, outputWidth, outputHeight, scratchCanvas, scratchCtx);
+    await videoSource.add(timestamp, 1 / FPS);
+
+    if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
+      const localProgress = (frameIndex + 1) / totalFrames;
+      onProgress(clamp(localProgress, 0, 0.995), `Rendering ${outputLabel} frame ${frameIndex + 1}/${totalFrames}`);
+    }
+  }
+
+  await audioPromise;
+  await output.finalize();
   throwIfCanceled();
 
   const buffer = target.buffer;
   if (!buffer) {
     throw new Error(`Failed to build output for ${outputLabel}.`);
   }
+
+  activeConversion = null;
 
   return {
     buffer,
@@ -694,12 +844,17 @@ const drawBaseFrame = async (options: {
   timestamp: number;
   outputWidth: number;
   outputHeight: number;
+  loopVideo?: boolean;
 }) => {
-  const { ctx, base, basePhotoBitmap, baseVideoResource, timestamp, outputWidth, outputHeight } = options;
+  const { ctx, base, basePhotoBitmap, baseVideoResource, timestamp, outputWidth, outputHeight, loopVideo = false } = options;
 
   if (base.mode === 'video' && baseVideoResource) {
     const safeDuration = baseVideoResource.duration > 0.01 ? baseVideoResource.duration : Math.max(0.5, base.durationSeconds);
-    const wrapped = await baseVideoResource.sink.getCanvas(timestamp % safeDuration);
+    const sampleTimestamp =
+      loopVideo && safeDuration > 0.01
+        ? timestamp % safeDuration
+        : Math.min(timestamp, Math.max(0, safeDuration - 1 / FPS));
+    const wrapped = await baseVideoResource.sink.getCanvas(sampleTimestamp);
     const canvas = (wrapped?.canvas as OffscreenCanvas | undefined) ?? null;
     if (canvas) {
       ctx.drawImage(canvas, 0, 0, outputWidth, outputHeight);
@@ -756,11 +911,12 @@ const exportWithStaticBase = async (options: {
   basePhotoBitmap: ImageBitmap | null;
   photo: WorkerBatchPhoto;
   overlayResources: OverlayResource[];
+  soundtrack?: WorkerSoundtrackInput;
   settings: OverlayExportSettings;
   outputLabel: string;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
-  const { base, basePhotoBitmap, photo, overlayResources, settings, outputLabel, onProgress } = options;
+  const { base, basePhotoBitmap, photo, overlayResources, soundtrack, settings, outputLabel, onProgress } = options;
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
 
   const maxTimelineEnd = overlayResources.reduce((acc, resource) => {
@@ -812,9 +968,23 @@ const exportWithStaticBase = async (options: {
     contentHint: 'detail'
   });
   output.addVideoTrack(videoSource, { frameRate: FPS });
+  const audioPump =
+    soundtrack
+      ? await createAudioPump({
+          output,
+          file: soundtrack.file,
+          codec: codecConfig.audioCodec,
+          outputDuration: duration,
+          start: soundtrack.start,
+          trimStart: soundtrack.trimStart,
+          volume: soundtrack.volume,
+          loop: soundtrack.loop
+        })
+      : null;
 
   await output.start();
   throwIfCanceled();
+  const audioPromise = audioPump ? audioPump() : Promise.resolve();
 
   const progressStep = Math.max(1, Math.floor(totalFrames / 120));
   const baseColor = base.color || '#ffffff';
@@ -843,6 +1013,7 @@ const exportWithStaticBase = async (options: {
     }
   }
 
+  await audioPromise;
   await output.finalize();
   throwIfCanceled();
 
@@ -866,6 +1037,7 @@ const encodeLinkedPairTimeline = async (options: {
   baseVideoResource: BaseVideoResource | null;
   segments: Array<{ pair: LinkedPairImageResource; start: number; end: number }>;
   overlayResources: OverlayResource[];
+  soundtrack?: WorkerSoundtrackInput;
   settings: OverlayExportSettings;
   linkedPairLayout: WorkerLinkedPairLayout;
   linkedPairStyle: WorkerLinkedPairStyle;
@@ -878,6 +1050,7 @@ const encodeLinkedPairTimeline = async (options: {
     baseVideoResource,
     segments,
     overlayResources,
+    soundtrack,
     settings,
     linkedPairLayout,
     linkedPairStyle,
@@ -934,9 +1107,34 @@ const encodeLinkedPairTimeline = async (options: {
     contentHint: 'detail'
   });
   output.addVideoTrack(videoSource, { frameRate: FPS });
+  const audioPump =
+    soundtrack
+      ? await createAudioPump({
+          output,
+          file: soundtrack.file,
+          codec: codecConfig.audioCodec,
+          outputDuration: duration,
+          start: soundtrack.start,
+          trimStart: soundtrack.trimStart,
+          volume: soundtrack.volume,
+          loop: soundtrack.loop
+        })
+      : base.mode === 'video' && base.videoFile
+        ? await createAudioPump({
+            output,
+            file: base.videoFile,
+            codec: codecConfig.audioCodec,
+            outputDuration: duration,
+            start: 0,
+            trimStart: 0,
+            volume: 1,
+            loop: true
+          })
+        : null;
 
   await output.start();
   throwIfCanceled();
+  const audioPromise = audioPump ? audioPump() : Promise.resolve();
 
   const progressStep = Math.max(1, Math.floor(totalFrames / 120));
 
@@ -951,7 +1149,8 @@ const encodeLinkedPairTimeline = async (options: {
       baseVideoResource,
       timestamp,
       outputWidth,
-      outputHeight
+      outputHeight,
+      loopVideo: base.mode === 'video'
     });
 
     const activeSegment = segments.find((segment) => timestamp >= segment.start && timestamp <= segment.end);
@@ -971,6 +1170,7 @@ const encodeLinkedPairTimeline = async (options: {
     }
   }
 
+  await audioPromise;
   await output.finalize();
   throwIfCanceled();
 
@@ -991,6 +1191,7 @@ const encodeLinkedPairTimeline = async (options: {
 const exportLinkedPairOutput = async (
   base: WorkerBaseInput,
   overlays: WorkerOverlayMedia[],
+  soundtrack: WorkerSoundtrackInput | undefined,
   settings: OverlayExportSettings,
   target: Extract<OverlayWorkerOutputTarget, { kind: 'linked_pairs' }>
 ) => {
@@ -1017,7 +1218,7 @@ const exportLinkedPairOutput = async (
     }
 
     if (base.mode === 'photo' && base.photoFile) {
-      basePhotoBitmap = await createImageBitmap(base.photoFile);
+      basePhotoBitmap = await decodeRuntimeImageBitmapFromBlob(base.photoFile);
     }
     if (base.mode === 'video' && base.videoFile) {
       baseVideoResource = await prepareBaseVideoResource(base.videoFile);
@@ -1033,6 +1234,7 @@ const exportLinkedPairOutput = async (
         end: segment.end
       })),
       overlayResources: commonOverlayResources,
+      soundtrack,
       settings,
       linkedPairLayout: target.linkedPairLayout ?? { x: 0.14, y: 0.18, size: 0.34, gap: 0.04 },
       linkedPairStyle: normalizeLinkedPairStyle(target.linkedPairStyle),
@@ -1058,6 +1260,7 @@ const exportLinkedPairOutput = async (
 const exportStandardOutput = async (
   base: WorkerBaseInput,
   overlays: WorkerOverlayMedia[],
+  soundtrack: WorkerSoundtrackInput | undefined,
   settings: OverlayExportSettings,
   target: Extract<OverlayWorkerOutputTarget, { kind: 'standard' }>
 ) => {
@@ -1078,7 +1281,7 @@ const exportStandardOutput = async (
     }
 
     if (base.mode === 'photo' && base.photoFile) {
-      basePhotoBitmap = await createImageBitmap(base.photoFile);
+      basePhotoBitmap = await decodeRuntimeImageBitmapFromBlob(base.photoFile);
     }
 
     const clipResources = [...commonOverlayResources];
@@ -1093,6 +1296,7 @@ const exportStandardOutput = async (
             base,
             outputLabel: target.outputLabel,
             overlayResources: clipResources,
+            soundtrack,
             settings,
             onProgress: (progress, status) => {
               postToMain({ type: 'progress', progress, status });
@@ -1103,6 +1307,7 @@ const exportStandardOutput = async (
             basePhotoBitmap,
             photo: target.photo as WorkerBatchPhoto,
             overlayResources: clipResources,
+            soundtrack,
             settings,
             outputLabel: target.outputLabel,
             onProgress: (progress, status) => {
@@ -1128,6 +1333,7 @@ const exportStandardOutput = async (
 const exportOverlayOutput = async (
   base: WorkerBaseInput,
   overlays: WorkerOverlayMedia[],
+  soundtrack: WorkerSoundtrackInput | undefined,
   settings: OverlayExportSettings,
   target: OverlayWorkerOutputTarget
 ) => {
@@ -1138,10 +1344,10 @@ const exportOverlayOutput = async (
   });
 
   if (target.kind === 'linked_pairs') {
-    return await exportLinkedPairOutput(base, overlays, settings, target);
+    return await exportLinkedPairOutput(base, overlays, soundtrack, settings, target);
   }
 
-  return await exportStandardOutput(base, overlays, settings, target);
+  return await exportStandardOutput(base, overlays, soundtrack, settings, target);
 };
 
 self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
@@ -1166,7 +1372,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 
   if (message.type !== 'start') return;
 
-  const { base, overlays, settings, target, workerSessionId } = message.payload;
+  const { base, overlays, soundtrack, settings, target, workerSessionId } = message.payload;
   currentWorkerSessionId = workerSessionId || 'primary';
   isCanceled = false;
   activeTaskId = target.taskId;
@@ -1187,7 +1393,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
     });
     emitStats({ queueSize: 0, runningTasks: 1 });
 
-    const result = await exportOverlayOutput(base, overlays, settings, target);
+    const result = await exportOverlayOutput(base, overlays, soundtrack, settings, target);
 
     emitTaskEvent({
       taskId: activeTaskId,

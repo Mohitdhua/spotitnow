@@ -71,6 +71,8 @@ interface NormalizedLinkedSplitPairSelection {
   gap: number;
 }
 
+type SplitterPreviewMode = 'outputs' | 'compare';
+
 interface ImageSplitterPanelProps {
   onBatchProcess: (files: File[]) => void;
   defaultMode: SplitterModePreference;
@@ -360,6 +362,43 @@ const readImageSize = (src: string): Promise<{ width: number; height: number }> 
 const isSplitReady = (item: SplitPreviewPair): item is SplitPreviewPair & { imageA: string; imageB: string } =>
   Boolean(item.imageA && item.imageB);
 
+const SplitCompareFrame: React.FC<{
+  item: SplitPreviewPair;
+  blinkVisible: boolean;
+  isAreaMode: boolean;
+}> = ({ item, blinkVisible, isAreaMode }) => (
+  <div className="relative h-40 border-2 border-black rounded-lg overflow-hidden bg-white">
+    {item.imageA && item.imageB ? (
+      <>
+        <img
+          src={item.imageB}
+          alt={`Puzzle ${item.sequence} diff comparison base`}
+          className="absolute inset-0 h-40 w-full object-contain"
+        />
+        <img
+          src={item.imageA}
+          alt={`Puzzle ${item.sequence} blinking comparison`}
+          className={`absolute inset-0 h-40 w-full object-contain transition-opacity duration-150 ${
+            blinkVisible ? 'opacity-100' : 'opacity-0'
+          }`}
+        />
+        <div className="absolute right-1 top-1 border border-black bg-white/90 px-1 py-0.5 text-[10px] font-black uppercase">
+          {blinkVisible ? 'Puzzle' : 'Diff'}
+        </div>
+      </>
+    ) : (
+      <div className="flex h-40 items-center justify-center p-4 text-center text-xs font-black uppercase text-slate-500">
+        {isAreaMode
+          ? 'Apply The Shared Area To Generate Compare Preview'
+          : 'Apply The Shared Pair To Generate Compare Preview'}
+      </div>
+    )}
+    <div className="absolute bottom-1 left-1 border border-black bg-[#DBEAFE] px-1 py-0.5 text-[10px] font-bold uppercase text-black">
+      Compare Blink
+    </div>
+  </div>
+);
+
 export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults }: ImageSplitterPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const setupInputRef = useRef<HTMLInputElement>(null);
@@ -386,6 +425,8 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
   const [sharedManualPair, setSharedManualPair] = useState<NormalizedLinkedSplitPairSelection | null>(
     () => readSplitterSharedPair()
   );
+  const [previewMode, setPreviewMode] = useState<SplitterPreviewMode>('outputs');
+  const [isCompareBlinkVisible, setIsCompareBlinkVisible] = useState(true);
 
   useEffect(() => {
     splitPairsRef.current = splitPairs;
@@ -442,6 +483,19 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
   const pendingPairCount = splitPairs.length - readyPairCount;
   const totalOutputFiles = readyPairCount * 2;
   const nextFilenames = buildSplitFilenames(nextSequence, namingDefaults);
+
+  useEffect(() => {
+    if (previewMode !== 'compare' || readyPairCount === 0) {
+      setIsCompareBlinkVisible(true);
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setIsCompareBlinkVisible((current) => !current);
+    }, 650);
+
+    return () => window.clearInterval(timer);
+  }, [previewMode, readyPairCount]);
 
   const handleSelectCombinedImages = async (files: FileList | File[] | null) => {
     if (isProcessing) return;
@@ -1441,59 +1495,80 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
                 {readyPairCount} ready | {pendingPairCount} waiting for setup | {totalOutputFiles} output file(s)
               </div>
             </div>
-            <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
-              <button
-                onClick={() => inputRef.current?.click()}
-                disabled={isProcessing}
-                className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
-                  isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'
-                }`}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Plus size={16} strokeWidth={2.5} />
-                  Add More
-                </span>
-              </button>
-              <button
-                onClick={handleDownloadSplitImages}
-                disabled={isProcessing || readyPairCount === 0}
-                className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
-                  isProcessing || readyPairCount === 0
-                    ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                    : 'bg-[#FDE68A] hover:bg-[#FCD34D]'
-                }`}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Download size={16} strokeWidth={2.5} />
-                  Download Images
-                </span>
-              </button>
-              <button
-                onClick={handleBatchProcess}
-                disabled={isProcessing || readyPairCount === 0}
-                className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
-                  isProcessing || readyPairCount === 0
-                    ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                    : 'bg-[#4ECDC4] hover:bg-[#3DBDB4]'
-                }`}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Layers size={16} strokeWidth={2.5} />
-                  Batch Process
-                </span>
-              </button>
-              <button
-                onClick={handleClear}
-                disabled={isProcessing}
-                className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
-                  isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-red-50'
-                }`}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Trash2 size={16} strokeWidth={2.5} />
-                  Clear
-                </span>
-              </button>
+            <div className="flex w-full flex-col gap-3 sm:w-auto">
+              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                <span className="text-[10px] font-black uppercase text-slate-500">Preview</span>
+                <button
+                  onClick={() => setPreviewMode('outputs')}
+                  className={`px-3 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase ${
+                    previewMode === 'outputs' ? 'bg-black text-white' : 'bg-white hover:bg-slate-100'
+                  }`}
+                >
+                  Outputs
+                </button>
+                <button
+                  onClick={() => setPreviewMode('compare')}
+                  className={`px-3 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase ${
+                    previewMode === 'compare' ? 'bg-[#DBEAFE]' : 'bg-white hover:bg-slate-100'
+                  }`}
+                >
+                  Compare Blink
+                </button>
+              </div>
+              <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+                <button
+                  onClick={() => inputRef.current?.click()}
+                  disabled={isProcessing}
+                  className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
+                    isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Plus size={16} strokeWidth={2.5} />
+                    Add More
+                  </span>
+                </button>
+                <button
+                  onClick={handleDownloadSplitImages}
+                  disabled={isProcessing || readyPairCount === 0}
+                  className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
+                    isProcessing || readyPairCount === 0
+                      ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                      : 'bg-[#FDE68A] hover:bg-[#FCD34D]'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Download size={16} strokeWidth={2.5} />
+                    Download Images
+                  </span>
+                </button>
+                <button
+                  onClick={handleBatchProcess}
+                  disabled={isProcessing || readyPairCount === 0}
+                  className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
+                    isProcessing || readyPairCount === 0
+                      ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                      : 'bg-[#4ECDC4] hover:bg-[#3DBDB4]'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Layers size={16} strokeWidth={2.5} />
+                    Batch Process
+                  </span>
+                </button>
+                <button
+                  onClick={handleClear}
+                  disabled={isProcessing}
+                  className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:w-auto ${
+                    isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-red-50'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Trash2 size={16} strokeWidth={2.5} />
+                    Clear
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1585,7 +1660,11 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div
+                    className={`grid grid-cols-1 gap-3 ${
+                      previewMode === 'compare' ? 'sm:grid-cols-2 xl:grid-cols-4' : 'sm:grid-cols-3'
+                    }`}
+                  >
                     <div className="relative border-2 border-black rounded-lg overflow-hidden bg-white">
                       <img src={item.sourcePreviewUrl} alt={item.baseName} className="w-full h-40 object-contain" />
                       <div className="absolute bottom-1 left-1 text-[10px] uppercase font-bold px-1 py-0.5 bg-black text-white">
@@ -1624,6 +1703,14 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
                         Puzzle Diff
                       </div>
                     </div>
+
+                    {previewMode === 'compare' && (
+                      <SplitCompareFrame
+                        item={item}
+                        blinkVisible={isCompareBlinkVisible}
+                        isAreaMode={isAreaMode}
+                      />
+                    )}
                   </div>
                 </div>
               );

@@ -1,8 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useState } from 'react';
 import { ArrowLeft, Check, Download, Pause, Play, Square } from 'lucide-react';
-import { VISUAL_THEMES } from '../constants/videoThemes';
 import { cancelProgressBarExport, exportProgressBarWithWebCodecs } from '../services/progressBarExport';
 import { VideoSettings } from '../types';
+import type { ProgressBarRenderMode } from '../services/progressBarExport';
+import {
+  PROGRESS_BAR_THEMES,
+  resolveProgressBarFillColors,
+  resolveProgressBarFillStyle,
+  type ProgressBarVisualStyle
+} from '../constants/progressBarThemes';
+import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
 
 type ProgressBarModeSettings = Pick<
   VideoSettings,
@@ -17,13 +24,89 @@ interface ProgressBarModeProps {
   onExportStateChange?: (state: { isExporting: boolean; progress: number; status: string }) => void;
 }
 
-const styleLabel = (style: VideoSettings['visualStyle']) =>
+const styleLabel = (style: ProgressBarVisualStyle) =>
   style
     .split('_')
     .map((chunk) => `${chunk.charAt(0).toUpperCase()}${chunk.slice(1)}`)
     .join(' ');
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const resolveTextProgressFillColors = (
+  remainingPercent: number,
+  style: ProgressBarVisualStyle,
+  theme: (typeof PROGRESS_BAR_THEMES)[ProgressBarVisualStyle]
+) => {
+  return resolveSmoothTextProgressFillColors(
+    remainingPercent,
+    theme,
+    resolveProgressBarFillColors(style, remainingPercent / 100)
+  );
+};
+
+const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
+  const safeText = text.trim() || 'PROGRESS';
+  const widthBound = width / Math.max(4.8, safeText.length * 0.68);
+  const heightBound = height * 0.78;
+  return clamp(Math.min(preferred, widthBound, heightBound), 12, 96);
+};
+
+const TextFillProgressPreview: React.FC<{
+  style: ProgressBarVisualStyle;
+  theme: (typeof PROGRESS_BAR_THEMES)[ProgressBarVisualStyle];
+  label: string;
+  remainingRatio: number;
+  width: number;
+  height: number;
+}> = ({ style, theme, label, remainingRatio, width, height }) => {
+  const svgId = useId().replace(/:/g, '');
+  const fillWidth = Math.max(0, Math.min(width, width * remainingRatio));
+  const safeLabel = label.trim() || 'PROGRESS';
+  const fontSize = resolveTextProgressFontSize(safeLabel, width, height, Math.max(16, height * 0.56));
+  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08));
+  const fillColors = resolveTextProgressFillColors(remainingRatio * 100, style, theme);
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="block h-full w-full overflow-visible" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={`${svgId}-gradient`} x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor={fillColors.start} />
+          <stop offset="58%" stopColor={fillColors.middle} />
+          <stop offset="100%" stopColor={fillColors.end} />
+        </linearGradient>
+        <clipPath id={`${svgId}-clip`}>
+          <text
+            x={width / 2}
+            y={height * 0.68}
+            textAnchor="middle"
+            fontFamily='"Arial Black", "Segoe UI", sans-serif'
+            fontWeight="900"
+            fontSize={fontSize}
+          >
+            {safeLabel}
+          </text>
+        </clipPath>
+      </defs>
+      <text
+        x={width / 2}
+        y={height * 0.68}
+        textAnchor="middle"
+        fontFamily='"Arial Black", "Segoe UI", sans-serif'
+        fontWeight="900"
+        fontSize={fontSize}
+        fill={TEXT_PROGRESS_EMPTY_FILL}
+        stroke="#111827"
+        strokeWidth={strokeWidth}
+        paintOrder="stroke fill"
+      >
+        {safeLabel}
+      </text>
+      <g clipPath={`url(#${svgId}-clip)`}>
+        <rect x="0" y="0" width={fillWidth} height={height} fill={`url(#${svgId}-gradient)`} />
+      </g>
+    </svg>
+  );
+};
 
 export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
   settings,
@@ -33,14 +116,16 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
   onExportStateChange
 }) => {
   const styleOptions = useMemo(
-    () => Object.keys(VISUAL_THEMES) as VideoSettings['visualStyle'][],
+    () => Object.keys(PROGRESS_BAR_THEMES) as ProgressBarVisualStyle[],
     []
   );
-  const [selectedStyles, setSelectedStyles] = useState<VideoSettings['visualStyle'][]>([settings.visualStyle]);
-  const [previewStyle, setPreviewStyle] = useState<VideoSettings['visualStyle']>(settings.visualStyle);
+  const [selectedStyles, setSelectedStyles] = useState<ProgressBarVisualStyle[]>([settings.visualStyle]);
+  const [previewStyle, setPreviewStyle] = useState<ProgressBarVisualStyle>(settings.visualStyle);
   const [durationSeconds, setDurationSeconds] = useState(8);
   const [previewTime, setPreviewTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(true);
+  const [renderMode, setRenderMode] = useState<ProgressBarRenderMode>('bar');
+  const [progressLabel, setProgressLabel] = useState('SPOT THE 3 DIFFERENCES');
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState('');
@@ -82,13 +167,13 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
     });
   }, [exportProgress, exportStatus, isExporting, onExportStateChange]);
 
-  const previewTheme = VISUAL_THEMES[previewStyle];
+  const previewTheme = PROGRESS_BAR_THEMES[previewStyle];
   const previewDuration = Math.max(0.5, durationSeconds);
   const previewProgress = clamp(previewTime / previewDuration, 0, 1);
   const remainingRatio = 1 - previewProgress;
   const remainingSeconds = Math.max(0, previewDuration - previewTime);
 
-  const toggleStyleSelection = (style: VideoSettings['visualStyle']) => {
+  const toggleStyleSelection = (style: ProgressBarVisualStyle) => {
     setSelectedStyles((current) => {
       if (current.includes(style)) {
         const next = current.filter((value) => value !== style);
@@ -126,6 +211,8 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
         await exportProgressBarWithWebCodecs({
           style,
           durationSeconds: previewDuration,
+          renderMode,
+          progressLabel,
           settings: {
             exportResolution: settings.exportResolution,
             exportBitrateMbps: settings.exportBitrateMbps,
@@ -164,7 +251,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
     <div className="w-full max-w-5xl mx-auto p-4 sm:p-6">
       <div className="bg-white border-4 border-black rounded-2xl shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] overflow-hidden">
         <div className="bg-[#B7F7D2] p-4 sm:p-6 border-b-4 border-black flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-start gap-3 sm:items-center">
+            <div className="flex items-start gap-3 sm:items-center">
             <button
               onClick={onBack}
               className="p-2 bg-white border-2 border-black rounded-lg hover:bg-black hover:text-white transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
@@ -175,7 +262,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
               <h2 className="text-2xl sm:text-3xl font-black font-display uppercase tracking-tight text-black">
                 Progress Bar Mode
               </h2>
-              <p className="text-sm font-bold text-slate-700">Export custom-duration bars for selected styles.</p>
+              <p className="text-sm font-bold text-slate-700">Export classic bars or text-fill countdowns for selected styles.</p>
             </div>
           </div>
           <div className="self-start px-3 py-1 bg-black text-white rounded-lg text-xs font-black uppercase sm:self-auto">
@@ -198,7 +285,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   </button>
                   <select
                     value={previewStyle}
-                    onChange={(event) => setPreviewStyle(event.target.value as VideoSettings['visualStyle'])}
+                    onChange={(event) => setPreviewStyle(event.target.value as ProgressBarVisualStyle)}
                     className="w-full px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase sm:w-auto"
                   >
                     {selectedStyles.map((style) => (
@@ -228,23 +315,41 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   </div>
                 </div>
 
-                <div
-                  className="w-full h-8 border-2 border-black overflow-hidden"
-                  style={{
-                    background: previewTheme.progressTrackBg,
-                    borderColor: previewTheme.progressTrackBorder,
-                    borderRadius: previewTheme.progressTrackClass.includes('rounded-none') ? 0 : 9999
-                  }}
-                >
+                {renderMode === 'text_fill' ? (
                   <div
-                    className="h-full transition-[width] duration-75"
+                    className="w-full h-16 border-2 border-black overflow-hidden rounded-xl bg-white/55 px-3 py-2"
                     style={{
-                      width: `${Math.max(0, Math.min(100, remainingRatio * 100))}%`,
-                      background: previewTheme.progressFill,
-                      boxShadow: previewTheme.progressFillGlow || 'none'
+                      borderColor: previewTheme.progressTrackBorder
                     }}
-                  />
-                </div>
+                  >
+                    <TextFillProgressPreview
+                      style={previewStyle}
+                      theme={previewTheme}
+                      label={progressLabel}
+                      remainingRatio={remainingRatio}
+                      width={720}
+                      height={56}
+                    />
+                  </div>
+                ) : (
+                  <div
+                    className="w-full h-8 border-2 border-black overflow-hidden"
+                    style={{
+                      background: previewTheme.progressTrackBg,
+                      borderColor: previewTheme.progressTrackBorder,
+                      borderRadius: previewTheme.progressTrackClass.includes('rounded-none') ? 0 : 9999
+                    }}
+                  >
+                    <div
+                      className="h-full transition-[width] duration-75"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, remainingRatio * 100))}%`,
+                        background: resolveProgressBarFillStyle(previewStyle, remainingRatio, previewTheme),
+                        boxShadow: previewTheme.progressFillGlow || 'none'
+                      }}
+                    />
+                  </div>
+                )}
 
                 <div className="text-center text-xs font-black uppercase tracking-wide" style={{ color: previewTheme.headerSubText }}>
                   {Math.round(remainingRatio * 100)}% Left
@@ -270,6 +375,47 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
 
             <div className="space-y-5 p-4 sm:p-6 bg-[#FFFDF5] border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
               <h3 className="text-lg font-black uppercase border-b-4 border-black pb-2">Duration + Export</h3>
+
+              <div className="space-y-3">
+                <label className="block font-bold uppercase text-sm">Bar Type</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setRenderMode('bar')}
+                    className={`py-2 px-2 rounded-lg border-2 border-black font-bold text-xs uppercase transition-all ${
+                      renderMode === 'bar'
+                        ? 'bg-[#4ECDC4] text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                        : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    Standard Bar
+                  </button>
+                  <button
+                    onClick={() => setRenderMode('text_fill')}
+                    className={`py-2 px-2 rounded-lg border-2 border-black font-bold text-xs uppercase transition-all ${
+                      renderMode === 'text_fill'
+                        ? 'bg-[#FFD93D] text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                        : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    Text Fill
+                  </button>
+                </div>
+                {renderMode === 'text_fill' && (
+                  <div className="space-y-2">
+                    <label className="block font-bold uppercase text-sm">Progress Phrase</label>
+                    <textarea
+                      value={progressLabel}
+                      onChange={(event) => setProgressLabel(event.target.value)}
+                      rows={2}
+                      className="w-full resize-none rounded-lg border-2 border-black bg-white px-3 py-2 font-bold uppercase"
+                      placeholder="SPOT THE 3 DIFFERENCES"
+                    />
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-600">
+                      Text Fill drains from right to left and shifts to warning colors near the end.
+                    </p>
+                  </div>
+                )}
+              </div>
 
               <div>
                 <div className="flex justify-between mb-2 font-bold">
@@ -417,7 +563,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {styleOptions.map((style) => {
-                const theme = VISUAL_THEMES[style];
+                const theme = PROGRESS_BAR_THEMES[style];
                 const isSelected = selectedStyles.includes(style);
                 return (
                   <button
@@ -434,23 +580,36 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                       <div className="text-sm font-black uppercase">{styleLabel(style)}</div>
                       {isSelected ? <Check size={16} strokeWidth={3} /> : <Square size={14} strokeWidth={3} />}
                     </div>
-                    <div
-                      className="h-4 border-2 border-black overflow-hidden"
-                      style={{
-                        background: theme.progressTrackBg,
-                        borderColor: theme.progressTrackBorder,
-                        borderRadius: theme.progressTrackClass.includes('rounded-none') ? 0 : 9999
-                      }}
-                    >
+                    {renderMode === 'text_fill' ? (
+                      <div className="h-10 rounded-lg border-2 border-black bg-white/80 px-2 py-1">
+                        <TextFillProgressPreview
+                          style={style}
+                          theme={theme}
+                          label={progressLabel}
+                          remainingRatio={0.72}
+                          width={220}
+                          height={34}
+                        />
+                      </div>
+                    ) : (
                       <div
-                        className="h-full"
+                        className="h-4 border-2 border-black overflow-hidden"
                         style={{
-                          width: '72%',
-                          background: theme.progressFill,
-                          boxShadow: theme.progressFillGlow || 'none'
+                          background: theme.progressTrackBg,
+                          borderColor: theme.progressTrackBorder,
+                          borderRadius: theme.progressTrackClass.includes('rounded-none') ? 0 : 9999
                         }}
-                      />
-                    </div>
+                      >
+                        <div
+                          className="h-full"
+                          style={{
+                            width: '72%',
+                            background: resolveProgressBarFillStyle(style, 0.72, theme),
+                            boxShadow: theme.progressFillGlow || 'none'
+                          }}
+                        />
+                      </div>
+                    )}
                     <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">Double-click to preview</div>
                   </button>
                 );

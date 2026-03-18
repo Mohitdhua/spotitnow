@@ -9,6 +9,7 @@ import {
 } from './videoHudLayoutSpec';
 import {
   type VideoPackagePreset,
+  type VideoSceneCardStyle,
   type VideoRevealBehavior,
   type VideoSceneSettings,
   type VideoSettings,
@@ -51,9 +52,9 @@ export interface VideoPackagePresetDefinition {
   hudLayout: HudLayoutSpec;
   frameDefaults: VideoPackageFrameDefaults;
   chrome: VideoPackageChrome;
-  introCardVariant: 'standard' | 'scoreboard' | 'storybook';
-  transitionCardVariant: 'standard' | 'scoreboard' | 'storybook';
-  outroCardVariant: 'standard' | 'scoreboard' | 'storybook';
+  introCardVariant: Exclude<VideoSceneCardStyle, 'package' | 'spotlight' | 'celebration'>;
+  transitionCardVariant: Exclude<VideoSceneCardStyle, 'package' | 'spotlight' | 'celebration'>;
+  outroCardVariant: Exclude<VideoSceneCardStyle, 'package' | 'spotlight' | 'celebration'>;
 }
 
 const STANDARD_FRAME_DEFAULTS: VideoPackageFrameDefaults = {
@@ -256,6 +257,7 @@ export const DEFAULT_VIDEO_TEXT_TEMPLATES: VideoTextTemplates = {
   introSubtitle: '{puzzleCount} puzzles',
   playTitle: 'Find Differences',
   playSubtitle: 'Puzzle {current} / {total}',
+  progressLabel: 'SPOT THE 3 DIFFERENCES',
   revealTitle: 'Solution',
   transitionEyebrow: 'Up Next',
   transitionTitle: 'Next Puzzle',

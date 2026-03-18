@@ -33,6 +33,14 @@ export interface OverlayTimeline {
   end: number;
 }
 
+export interface OverlaySoundtrackInput {
+  file: File;
+  start: number;
+  trimStart: number;
+  volume: number;
+  loop: boolean;
+}
+
 export interface OverlayMediaClipInput {
   id: string;
   name: string;
@@ -83,6 +91,7 @@ interface OverlayBatchExportOptions {
   base: OverlayBaseInput;
   batchPhotos: OverlayBatchPhotoInput[];
   overlays: OverlayMediaClipInput[];
+  soundtrack?: OverlaySoundtrackInput;
   linkedPairs?: OverlayLinkedPairInput[];
   linkedPairLayout?: OverlayLinkedPairLayout;
   linkedPairStyle?: OverlayLinkedPairStyle;
@@ -120,6 +129,7 @@ export type OverlayWorkerOutputTarget =
 export interface OverlayWorkerStartPayload {
   base: OverlayBaseInput;
   overlays: OverlayMediaClipInput[];
+  soundtrack?: OverlaySoundtrackInput;
   settings: OverlayExportSettings;
   target: OverlayWorkerOutputTarget;
   workerSessionId: string;
@@ -235,6 +245,7 @@ export const exportOverlayBatchWithWebCodecs = async ({
   base,
   batchPhotos,
   overlays,
+  soundtrack,
   linkedPairs = [],
   linkedPairLayout,
   linkedPairStyle,
@@ -350,6 +361,7 @@ export const exportOverlayBatchWithWebCodecs = async ({
                 payload: {
                   base,
                   overlays,
+                  soundtrack,
                   settings,
                   target,
                   workerSessionId
