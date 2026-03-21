@@ -63,6 +63,7 @@ interface OverlayExportPayload {
     cornerRadius: number;
   };
   linkedPairExportMode?: 'single_video' | 'one_per_pair';
+  linkedPairsPerVideo?: number;
 }
 
 export default function VideoOverlayPage() {
@@ -109,7 +110,24 @@ export default function VideoOverlayPage() {
         linkedPairLayout: payload.linkedPairLayout,
         linkedPairStyle: payload.linkedPairStyle,
         linkedPairExportMode: payload.linkedPairExportMode,
+        linkedPairsPerVideo: payload.linkedPairsPerVideo,
         settings: {
+          videoPackagePreset: videoSettings.videoPackagePreset,
+          visualStyle: videoSettings.visualStyle,
+          textStyle: videoSettings.textStyle,
+          headerStyle: videoSettings.headerStyle,
+          timerStyle: videoSettings.timerStyle,
+          progressStyle: videoSettings.progressStyle,
+          progressMotion: videoSettings.progressMotion,
+          generatedProgressEnabled: videoSettings.generatedProgressEnabled,
+          generatedProgressStyle: videoSettings.generatedProgressStyle,
+          generatedProgressRenderMode: videoSettings.generatedProgressRenderMode,
+          showProgress: videoSettings.showProgress,
+          introCardStyle: videoSettings.introCardStyle,
+          transitionCardStyle: videoSettings.transitionCardStyle,
+          outroCardStyle: videoSettings.outroCardStyle,
+          transitionStyle: videoSettings.transitionStyle,
+          textTemplates: videoSettings.textTemplates,
           exportResolution: videoSettings.exportResolution,
           exportBitrateMbps: videoSettings.exportBitrateMbps,
           exportCodec: videoSettings.exportCodec
@@ -142,6 +160,22 @@ export default function VideoOverlayPage() {
   return (
     <OverlayVideoEditor
       settings={{
+        videoPackagePreset: videoSettings.videoPackagePreset,
+        visualStyle: videoSettings.visualStyle,
+        textStyle: videoSettings.textStyle,
+        headerStyle: videoSettings.headerStyle,
+        timerStyle: videoSettings.timerStyle,
+        progressStyle: videoSettings.progressStyle,
+        progressMotion: videoSettings.progressMotion,
+        generatedProgressEnabled: videoSettings.generatedProgressEnabled,
+        generatedProgressStyle: videoSettings.generatedProgressStyle,
+        generatedProgressRenderMode: videoSettings.generatedProgressRenderMode,
+        showProgress: videoSettings.showProgress,
+        introCardStyle: videoSettings.introCardStyle,
+        transitionCardStyle: videoSettings.transitionCardStyle,
+        outroCardStyle: videoSettings.outroCardStyle,
+        transitionStyle: videoSettings.transitionStyle,
+        textTemplates: videoSettings.textTemplates,
         exportResolution: videoSettings.exportResolution,
         exportBitrateMbps: videoSettings.exportBitrateMbps,
         exportCodec: videoSettings.exportCodec

@@ -46,18 +46,8 @@ export default function ProgressPage() {
 
   return (
     <ProgressBarMode
-      settings={{
-        visualStyle: videoSettings.visualStyle,
-        exportResolution: videoSettings.exportResolution,
-        exportBitrateMbps: videoSettings.exportBitrateMbps,
-        exportCodec: videoSettings.exportCodec
-      }}
-      onSettingsChange={(patch) =>
-        setVideoSettings((current) => ({
-          ...current,
-          ...patch
-        }))
-      }
+      settings={videoSettings}
+      onSettingsChange={setVideoSettings}
       onBack={() => navigate('/')}
       hasActiveAppExport={hasActiveAppExport}
       onExportStateChange={handleExportStateChange}

@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { OverlayTransform, Puzzle, VideoModeTransferFrame, VideoSettings } from '../types';
 import type {
+  OverlayExportSettings,
   OverlayBackgroundFill,
   OverlayBaseInput,
   OverlayBatchPhotoInput,
@@ -40,8 +41,14 @@ import { buildOverlayEditorTimeline } from './editorTimeline/overlayTimelineAdap
 import { createSeededEditorTimeline } from './editorTimeline/seededDemo';
 import type { EditorTimelineClip, EditorTimelineClipChange, EditorTimelineTrack } from './editorTimeline/types';
 import { applyTimelineClipChange } from './editorTimeline/utils';
-
-type OverlayExportSettings = Pick<VideoSettings, 'exportResolution' | 'exportBitrateMbps' | 'exportCodec'>;
+import {
+  PROGRESS_BAR_THEMES,
+  resolveProgressBarFillColors,
+  resolveProgressBarFillStyle
+} from '../constants/progressBarThemes';
+import { VISUAL_THEMES } from '../constants/videoThemes';
+import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
+import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
 
 interface DragState {
   pointerId: number;
@@ -121,6 +128,7 @@ interface OverlayVideoEditorExportPayload {
   linkedPairLayout?: OverlayLinkedPairLayout;
   linkedPairStyle?: OverlayLinkedPairStyle;
   linkedPairExportMode?: OverlayLinkedPairExportMode;
+  linkedPairsPerVideo?: number;
 }
 
 interface OverlayVideoEditorProps {
@@ -140,6 +148,23 @@ interface OverlayVideoEditorProps {
 }
 
 type LinkedPairOutputMode = 'video' | 'thumbnail';
+
+const GENERATED_PROGRESS_STYLE_OPTIONS = Object.keys(PROGRESS_BAR_THEMES) as Array<VideoSettings['generatedProgressStyle']>;
+
+const VIDEO_PROGRESS_MOTION_OPTIONS: Array<{
+  value: VideoSettings['progressMotion'];
+  label: string;
+}> = [
+  { value: 'countdown', label: 'Countdown' },
+  { value: 'intro_fill', label: 'Intro Fill' },
+  { value: 'intro_sweep', label: 'Intro Sweep' }
+];
+
+const formatGeneratedProgressStyleLabel = (style: VideoSettings['generatedProgressStyle']) =>
+  style
+    .split('_')
+    .map((chunk) => `${chunk.charAt(0).toUpperCase()}${chunk.slice(1)}`)
+    .join(' ');
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -307,6 +332,67 @@ const readAudioMetadata = (url: string) =>
     audio.onloadedmetadata = handleDone;
     audio.onerror = handleDone;
   });
+
+const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
+  const safeText = text.trim() || 'PROGRESS';
+  const widthBound = width / Math.max(4.8, safeText.length * 0.68);
+  const heightBound = height * 0.78;
+  return clamp(Math.min(preferred, widthBound, heightBound), 12, 96);
+};
+
+const OverlayTextFillProgress: React.FC<{
+  fillRatio: number;
+  label: string;
+  start: string;
+  middle: string;
+  end: string;
+}> = ({ fillRatio, label, start, middle, end }) => {
+  const safeLabel = label.trim() || 'SPOT THE 3 DIFFERENCES';
+  const svgId = React.useId().replace(/:/g, '');
+  const fillWidth = 320 * clamp(fillRatio, 0, 1);
+  const fontSize = resolveTextProgressFontSize(safeLabel, 320, 54, 30);
+
+  return (
+    <svg viewBox="0 0 320 54" className="block h-full w-full overflow-visible" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={`${svgId}-gradient`} x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor={start} />
+          <stop offset="58%" stopColor={middle} />
+          <stop offset="100%" stopColor={end} />
+        </linearGradient>
+        <clipPath id={`${svgId}-clip`}>
+          <text
+            x="160"
+            y="36"
+            textAnchor="middle"
+            fontFamily='"Arial Black", "Segoe UI", sans-serif'
+            fontWeight="900"
+            fontSize={fontSize}
+          >
+            {safeLabel}
+          </text>
+        </clipPath>
+      </defs>
+      <text
+        x="160"
+        y="36"
+        textAnchor="middle"
+        fontFamily='"Arial Black", "Segoe UI", sans-serif'
+        fontWeight="900"
+        fontSize={fontSize}
+        fill={TEXT_PROGRESS_EMPTY_FILL}
+        stroke="#111827"
+        strokeWidth={Math.max(2, Math.round(fontSize * 0.08))}
+        paintOrder="stroke fill"
+      >
+        {safeLabel}
+      </text>
+      <g clipPath={`url(#${svgId}-clip)`}>
+        <rect x="0" y="0" width={fillWidth} height="54" fill={`url(#${svgId}-gradient)`} />
+      </g>
+    </svg>
+  );
+};
 
 const getCroppedStyle = (crop: OverlayCrop): React.CSSProperties => {
   const normalized = normalizeCrop(crop);
@@ -958,6 +1044,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
   const [linkedPairLayout, setLinkedPairLayout] = useState<OverlayLinkedPairLayout>(createDefaultLinkedPairLayout);
   const [linkedPairStyle, setLinkedPairStyle] = useState<OverlayLinkedPairStyle>(createDefaultLinkedPairStyle);
   const [linkedPairExportMode, setLinkedPairExportMode] = useState<OverlayLinkedPairExportMode>('one_per_pair');
+  const [linkedPairsPerVideo, setLinkedPairsPerVideo] = useState<number | null>(null);
   const [overlays, setOverlays] = useState<OverlayDraft[]>([]);
   const [soundtrack, setSoundtrack] = useState<SoundtrackDraft | null>(null);
   const [activeClip, setActiveClip] = useState<ActiveClipRef | null>(null);
@@ -1074,6 +1161,15 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       })),
     [linkedPairSegmentDuration, linkedPairs]
   );
+  const effectiveLinkedPairsPerVideo = useMemo(() => {
+    if (linkedPairs.length === 0) return 1;
+    if (!Number.isFinite(linkedPairsPerVideo)) return linkedPairs.length;
+    return Math.min(linkedPairs.length, Math.max(1, Math.round(linkedPairsPerVideo as number)));
+  }, [linkedPairs.length, linkedPairsPerVideo]);
+  const linkedPairChunkCount = useMemo(
+    () => Math.max(1, Math.ceil(linkedPairs.length / effectiveLinkedPairsPerVideo)),
+    [effectiveLinkedPairsPerVideo, linkedPairs.length]
+  );
 
   const timelineDuration = useMemo(() => {
     const maxBatchEnd =
@@ -1184,6 +1280,108 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
     }
     return selectedLinkedPair;
   }, [editorMode, linkedPairExportMode, linkedPairSegments, linkedPairs.length, previewTime, selectedLinkedPair]);
+  const previewProgressWindow = useMemo(() => {
+    if (!settings.showProgress) return null;
+    if (editorMode === 'linked_pairs') {
+      if (linkedPairOutputMode !== 'video' || !previewLinkedPair) return null;
+      if (linkedPairExportMode === 'single_video') {
+        return (
+          linkedPairSegments.find((segment) => segment.pair.id === previewLinkedPair.id) ?? {
+            pair: previewLinkedPair,
+            start: 0,
+            end: baseDuration
+          }
+        );
+      }
+
+      return {
+        pair: previewLinkedPair,
+        start: 0,
+        end: baseDuration
+      };
+    }
+
+    const currentProgressPhoto = editorMode === 'standard' ? activeBatchPhoto ?? batchPhotos[0] ?? null : null;
+    if (currentProgressPhoto) {
+      const timeline = normalizeTimeline(currentProgressPhoto.timeline);
+      return {
+        pair: null,
+        start: timeline.start,
+        end: timeline.end
+      };
+    }
+
+    return {
+      pair: null,
+      start: 0,
+      end: baseDuration
+    };
+  }, [
+    baseDuration,
+    editorMode,
+    linkedPairExportMode,
+    linkedPairOutputMode,
+    linkedPairSegments,
+    previewLinkedPair,
+    activeBatchPhoto,
+    batchPhotos,
+    settings.showProgress
+  ]);
+  const previewProgressTheme = useMemo(
+    () =>
+      settings.generatedProgressEnabled
+        ? PROGRESS_BAR_THEMES[settings.generatedProgressStyle]
+        : VISUAL_THEMES[settings.visualStyle],
+    [settings.generatedProgressEnabled, settings.generatedProgressStyle, settings.visualStyle]
+  );
+  const previewProgressPresentation = useMemo(() => {
+    if (!previewProgressWindow) return null;
+
+    const duration = Math.max(0.25, previewProgressWindow.end - previewProgressWindow.start);
+    const elapsed = clamp(previewTime - previewProgressWindow.start, 0, duration);
+    const timeLeft = Math.max(0, duration - elapsed);
+    const motionState = resolveVideoProgressMotionState({
+      mode: settings.progressMotion,
+      phase: 'showing',
+      phaseDuration: duration,
+      timeLeft
+    });
+    const fillRatio = clamp(motionState.fillRatio, 0, 1);
+    const renderMode =
+      settings.generatedProgressEnabled
+        ? settings.generatedProgressRenderMode
+        : settings.progressStyle === 'text_fill'
+          ? 'text_fill'
+          : 'bar';
+    const generatedColors = settings.generatedProgressEnabled
+      ? resolveProgressBarFillColors(settings.generatedProgressStyle, fillRatio)
+      : null;
+    const textFillColors = resolveSmoothTextProgressFillColors(fillRatio * 100, previewProgressTheme, generatedColors);
+
+    return {
+      renderMode,
+      fillRatio,
+      fillPercent: fillRatio * 100,
+      label: settings.textTemplates.progressLabel || 'SPOT THE 3 DIFFERENCES',
+      trackBg: previewProgressTheme.progressTrackBg,
+      trackBorder: previewProgressTheme.progressTrackBorder,
+      fillStyle: settings.generatedProgressEnabled
+        ? resolveProgressBarFillStyle(settings.generatedProgressStyle, fillRatio, previewProgressTheme)
+        : previewProgressTheme.progressFill,
+      glow: previewProgressTheme.progressFillGlow,
+      textFillColors
+    };
+  }, [
+    previewProgressTheme,
+    previewProgressWindow,
+    previewTime,
+    settings.generatedProgressEnabled,
+    settings.generatedProgressRenderMode,
+    settings.generatedProgressStyle,
+    settings.progressMotion,
+    settings.progressStyle,
+    settings.textTemplates.progressLabel
+  ]);
 
   const shouldUseDemoTimeline =
     baseMode === 'color' &&
@@ -2468,7 +2666,11 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
           : [],
       linkedPairLayout: editorMode === 'linked_pairs' ? normalizedLinkedPairLayout : undefined,
       linkedPairStyle: editorMode === 'linked_pairs' ? linkedPairStyle : undefined,
-      linkedPairExportMode: editorMode === 'linked_pairs' ? linkedPairExportMode : undefined
+      linkedPairExportMode: editorMode === 'linked_pairs' ? linkedPairExportMode : undefined,
+      linkedPairsPerVideo:
+        editorMode === 'linked_pairs' && linkedPairExportMode === 'single_video'
+          ? effectiveLinkedPairsPerVideo
+          : undefined
     };
 
     await onExport(payload);
@@ -2487,7 +2689,7 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
           : 0
         : linkedPairs.length > 0
           ? linkedPairExportMode === 'single_video'
-            ? 1
+            ? linkedPairChunkCount
             : linkedPairs.length
           : 0
       : batchPhotos.length > 0
@@ -2840,26 +3042,50 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                       />
                     </div>
                     {linkedPairOutputMode === 'video' ? (
-                      <div>
-                        <label className="block text-xs font-black uppercase mb-1">Export Style</label>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <button
-                            onClick={() => setLinkedPairExportMode('one_per_pair')}
-                            className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                              linkedPairExportMode === 'one_per_pair' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                            }`}
-                          >
-                            One Video Per Pair
-                          </button>
-                          <button
-                            onClick={() => setLinkedPairExportMode('single_video')}
-                            className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                              linkedPairExportMode === 'single_video' ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
-                            }`}
-                          >
-                            All Pairs In One
-                          </button>
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-xs font-black uppercase mb-1">Export Style</label>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <button
+                              onClick={() => setLinkedPairExportMode('one_per_pair')}
+                              className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                                linkedPairExportMode === 'one_per_pair' ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                              }`}
+                            >
+                              One Video Per Pair
+                            </button>
+                            <button
+                              onClick={() => setLinkedPairExportMode('single_video')}
+                              className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
+                                linkedPairExportMode === 'single_video' ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                              }`}
+                            >
+                              Bundle Pairs Into Videos
+                            </button>
+                          </div>
                         </div>
+
+                        {linkedPairExportMode === 'single_video' && (
+                          <div>
+                            <label className="block text-xs font-black uppercase mb-1">
+                              Pairs Per Video: {effectiveLinkedPairsPerVideo}
+                            </label>
+                            <input
+                              type="range"
+                              min={1}
+                              max={Math.max(1, linkedPairs.length)}
+                              step={1}
+                              value={effectiveLinkedPairsPerVideo}
+                              onChange={(event) => setLinkedPairsPerVideo(Number(event.target.value))}
+                              className="w-full h-4 border-2 border-black rounded-full accent-black"
+                            />
+                            <div className="mt-2 rounded-lg border-2 border-black bg-[#EEF9FF] px-3 py-2 text-[10px] font-black uppercase text-slate-700">
+                              {linkedPairs.length > 0
+                                ? `${linkedPairChunkCount} export video${linkedPairChunkCount === 1 ? '' : 's'} from ${linkedPairs.length} pair${linkedPairs.length === 1 ? '' : 's'}.`
+                                : 'Upload linked pairs to split bundled exports.'}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="rounded-lg border-2 border-black bg-[#EEF9FF] px-3 py-2 text-[10px] font-black uppercase text-slate-700">
@@ -3303,6 +3529,38 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                     </div>
                   );
                 })}
+
+                {previewProgressPresentation && (
+                  <div className="pointer-events-none absolute inset-x-[6%] bottom-[5%] z-30">
+                    {previewProgressPresentation.renderMode === 'text_fill' ? (
+                      <div className="mx-auto h-12 max-w-[320px] rounded-xl border-2 border-black bg-black/72 px-3 py-1 shadow-[0_10px_24px_rgba(0,0,0,0.28)]">
+                        <OverlayTextFillProgress
+                          fillRatio={previewProgressPresentation.fillRatio}
+                          label={previewProgressPresentation.label}
+                          start={previewProgressPresentation.textFillColors.start}
+                          middle={previewProgressPresentation.textFillColors.middle}
+                          end={previewProgressPresentation.textFillColors.end}
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        className="mx-auto h-5 max-w-[280px] overflow-hidden rounded-full border-2 border-black shadow-[0_10px_24px_rgba(0,0,0,0.22)]"
+                        style={{ background: previewProgressPresentation.trackBg, borderColor: previewProgressPresentation.trackBorder }}
+                      >
+                        <div
+                          className="h-full rounded-full transition-[width]"
+                          style={{
+                            width: `${previewProgressPresentation.fillPercent}%`,
+                            background: previewProgressPresentation.fillStyle,
+                            boxShadow: previewProgressPresentation.glow
+                              ? `0 0 18px ${previewProgressPresentation.glow}`
+                              : undefined
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -4013,6 +4271,126 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                   }
                   className="w-full h-4 border-2 border-black rounded-full accent-black"
                 />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div className="space-y-3 rounded-xl border-2 border-black bg-white p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-black uppercase">Progress Bar</div>
+                    <div className="text-[10px] font-bold uppercase text-slate-600">Preview and export use the same setting.</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onSettingsChange({ showProgress: !settings.showProgress })}
+                    className={`rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                      settings.showProgress ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    {settings.showProgress ? 'On' : 'Off'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onSettingsChange({ generatedProgressEnabled: false })}
+                    className={`rounded-lg border-2 border-black px-3 py-2 text-xs font-black uppercase ${
+                      !settings.generatedProgressEnabled ? 'bg-[#DBEAFE]' : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    Package Source
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onSettingsChange({ generatedProgressEnabled: true })}
+                    className={`rounded-lg border-2 border-black px-3 py-2 text-xs font-black uppercase ${
+                      settings.generatedProgressEnabled ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                    }`}
+                  >
+                    Generated Source
+                  </button>
+                </div>
+
+                {settings.generatedProgressEnabled ? (
+                  <>
+                    <label className="block">
+                      <span className="block text-xs font-black uppercase mb-1">Generated Theme</span>
+                      <select
+                        value={settings.generatedProgressStyle}
+                        onChange={(event) =>
+                          onSettingsChange({
+                            generatedProgressStyle: event.target.value as OverlayExportSettings['generatedProgressStyle']
+                          })
+                        }
+                        className="w-full px-3 py-2 border-2 border-black rounded-lg font-bold bg-white"
+                      >
+                        {GENERATED_PROGRESS_STYLE_OPTIONS.map((style) => (
+                          <option key={style} value={style}>
+                            {formatGeneratedProgressStyleLabel(style)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <div>
+                      <label className="block text-xs font-black uppercase mb-1">Generated Type</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {[
+                          { value: 'bar' as const, label: 'Bar' },
+                          { value: 'text_fill' as const, label: 'Text Fill' }
+                        ].map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() =>
+                              onSettingsChange({
+                                generatedProgressRenderMode: option.value
+                              })
+                            }
+                            className={`rounded-lg border-2 border-black px-3 py-2 text-xs font-black uppercase ${
+                              settings.generatedProgressRenderMode === option.value
+                                ? 'bg-[#A7F3D0]'
+                                : 'bg-white hover:bg-slate-100'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="rounded-lg border-2 border-black bg-[#F8FAFC] px-3 py-2 text-[10px] font-black uppercase text-slate-700">
+                    Package style: {settings.progressStyle}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3 rounded-xl border-2 border-black bg-white p-3">
+                <div>
+                  <div className="text-xs font-black uppercase">Progress Motion</div>
+                  <div className="text-[10px] font-bold uppercase text-slate-600">Choose how the fill animates when a clip starts.</div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {VIDEO_PROGRESS_MOTION_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => onSettingsChange({ progressMotion: option.value })}
+                      className={`rounded-lg border-2 border-black px-3 py-2 text-xs font-black uppercase ${
+                        settings.progressMotion === option.value ? 'bg-[#FDE68A]' : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="rounded-lg border-2 border-black bg-[#F8FAFC] px-3 py-2 text-[10px] font-black uppercase text-slate-700">
+                  Label: {settings.textTemplates.progressLabel || 'SPOT THE 3 DIFFERENCES'}
+                </div>
               </div>
             </div>
           </div>

@@ -8,6 +8,7 @@ import {
 import type { VisualTheme } from '../constants/videoThemes';
 import { DESIGNER_TIMER_COMPONENTS } from './timers';
 import {
+  DESIGNER_TIMER_MIN_SIZE,
   isDesignerTimerStyle,
   resolveDesignerTimerPalette
 } from '../utils/timerPackShared';
@@ -122,7 +123,7 @@ export const VideoTimerDisplay: React.FC<VideoTimerDisplayProps> = ({
     const endingSoon =
       isAlert || (typeof safeProgress === 'number' ? safeProgress <= 0.2 : false);
     const size = Math.max(
-      48,
+      DESIGNER_TIMER_MIN_SIZE,
       Math.round(
         Math.max(
           fontSize * 2.15,
@@ -164,9 +165,23 @@ export const VideoTimerDisplay: React.FC<VideoTimerDisplayProps> = ({
   const badgeTextColor = isStudioTone ? '#EEF6FF' : accentColor;
   const labelPanelTextColor = isStudioTone ? '#EEF6FF' : '#111827';
   const indicatorNeutral = isStudioTone ? 'rgba(238,246,255,0.74)' : '#FFFFFF';
-  const estimatedTextWidth = Math.round(valueText.length * fontSize * 0.62);
+  const measuredTextWidth = React.useMemo(() => {
+    const fallbackWidth = Math.round(valueText.length * fontSize * 0.62);
+    if (typeof document === 'undefined') {
+      return fallbackWidth;
+    }
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return fallbackWidth;
+    }
+
+    ctx.font = `${style.canvasFontWeight} ${fontSize}px ${style.canvasFontFamily}`;
+    return Math.max(fallbackWidth, ctx.measureText(valueText).width);
+  }, [fontSize, style.canvasFontFamily, style.canvasFontWeight, valueText]);
   const metrics = measureResolvedTimerBox(style, {
-    textWidth: estimatedTextWidth,
+    textWidth: measuredTextWidth,
     fontSize,
     padX,
     padY,

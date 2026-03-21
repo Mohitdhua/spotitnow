@@ -381,7 +381,7 @@ export function AppSettingsModal({
                   onChange={(event) => updateVideo('aspectRatio', event.target.value as VideoSettings['aspectRatio'])}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg bg-white font-bold"
                 >
-                  {(['16:9', '9:16', '1:1', '4:3'] as const).map((option) => (
+                  {(['16:9', '9:16'] as const).map((option) => (
                     <option key={option} value={option}>
                       {option}
                     </option>

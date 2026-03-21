@@ -10,6 +10,7 @@ import { PROGRESS_BAR_THEMES, resolveProgressBarFillColors, type ProgressBarVisu
 import { VideoSettings } from '../types';
 import type { ProgressBarRenderMode } from '../services/progressBarExport';
 import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
 
 type ProgressBarExportSettings = Pick<
   VideoSettings,
@@ -76,6 +77,21 @@ const FORMAT_BY_CODEC = {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
+const hexToRgba = (hex: string, alpha: number) => {
+  const sanitized = hex.replace('#', '');
+  const normalized =
+    sanitized.length === 3
+      ? sanitized
+          .split('')
+          .map((char) => char + char)
+          .join('')
+      : sanitized.padEnd(6, '0').slice(0, 6);
+  const value = Number.parseInt(normalized, 16);
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
 
 const extractHexColors = (input: string): string[] =>
   (input.match(/#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})/g) ?? []).map((value) =>
@@ -157,6 +173,50 @@ const roundRectPath = (ctx: CanvasRenderingContext2D, rect: Rect) => {
   ctx.lineTo(rect.x, rect.y + radius);
   ctx.quadraticCurveTo(rect.x, rect.y, rect.x + radius, rect.y);
   ctx.closePath();
+};
+
+const drawProgressPulseOverlay = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  pulseOpacity: number
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || pulseOpacity <= 0) return;
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.clip();
+  ctx.globalAlpha = clamp(pulseOpacity, 0, 1);
+  const pulseWidth = Math.max(22, rect.width * 0.28);
+  const pulseX = rect.x + rect.width - pulseWidth;
+  const gradient = ctx.createLinearGradient(pulseX, 0, pulseX + pulseWidth, 0);
+  gradient.addColorStop(0, 'rgba(255,255,255,0)');
+  gradient.addColorStop(0.45, 'rgba(255,255,255,0.08)');
+  gradient.addColorStop(0.78, 'rgba(255,255,255,0.32)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0.84)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(pulseX, rect.y, pulseWidth, rect.height);
+  ctx.restore();
+};
+
+const drawProgressPulseGlow = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  pulseGlowOpacity: number,
+  glowColor: string,
+  blurBase: number,
+  lineWidth: number,
+  strokeColor = 'rgba(255,255,255,0.82)'
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || pulseGlowOpacity <= 0) return;
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur = Math.max(blurBase, Math.round(blurBase * (1 + pulseGlowOpacity * 1.8)));
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
+  ctx.restore();
 };
 
 const drawRoundedRect = (
@@ -266,6 +326,12 @@ const drawFrame = (
   const theme = PROGRESS_BAR_THEMES[style];
   const progress = clamp(timestamp / Math.max(0.001, durationSeconds), 0, 1);
   const remaining = 1 - progress;
+  const motionState = resolveVideoProgressMotionState({
+    mode: 'countdown',
+    phase: 'showing',
+    phaseDuration: durationSeconds,
+    timeLeft: Math.max(0, durationSeconds - timestamp)
+  });
   ctx.clearRect(0, 0, width, height);
 
   const barWidth = Math.round(width * 0.82);
@@ -333,6 +399,15 @@ const drawFrame = (
     roundRectPath(ctx, shimmerRect);
     ctx.fillStyle = shimmerGradient;
     ctx.fill();
+    drawProgressPulseOverlay(ctx, fillRect, motionState.pulseOverlayOpacity);
+    drawProgressPulseGlow(
+      ctx,
+      fillRect,
+      motionState.pulseGlowOpacity,
+      hexToRgba(dynamicFillColors?.middle ?? theme.timerDot, 0.16 + motionState.pulseGlowOpacity * 0.36),
+      Math.max(10, Math.round(width * 0.006)),
+      Math.max(2, Math.round(width * 0.0018))
+    );
   }
 };
 

@@ -170,7 +170,7 @@ export const resolveVideoLayoutSettings = (
       padY: clamp(Math.round(custom.timerPadY), 1, 40),
       dotSize: clamp(Math.round(custom.timerDotSize), 2, 64),
       gap: clamp(Math.round(custom.timerGap), 2, 40),
-      fontSize: clamp(Math.round(custom.timerFontSize), 10, 96),
+      fontSize: clamp(Math.round(custom.timerFontSize), 0, 96),
       minWidth: clamp(Math.round(custom.timerMinWidth), 24, stage.width)
     },
     progress: {

@@ -106,7 +106,7 @@ export const VIDEO_PACKAGE_PRESETS: Record<VideoPackagePreset, VideoPackagePrese
   shorts_clean: {
     label: 'Shorts Clean',
     description: 'Minimal framing for fast vertical and square social exports.',
-    recommendedAspectRatios: ['9:16', '1:1'],
+    recommendedAspectRatios: ['9:16'],
     defaultVisualStyle: 'ivory',
     defaultRevealBehavior: 'marker_only',
     imageArrangement: 'auto',
@@ -142,7 +142,7 @@ export const VIDEO_PACKAGE_PRESETS: Record<VideoPackagePreset, VideoPackagePrese
   storybook_plus: {
     label: 'Storybook Plus',
     description: 'Illustrated framing with page-turn pacing and warm cards.',
-    recommendedAspectRatios: ['16:9', '4:3'],
+    recommendedAspectRatios: ['16:9'],
     defaultVisualStyle: 'storybook',
     defaultRevealBehavior: 'cinematic_sequential',
     imageArrangement: 'horizontal',
@@ -209,7 +209,7 @@ export const VIDEO_PACKAGE_PRESETS: Record<VideoPackagePreset, VideoPackagePrese
   editorial: {
     label: 'Editorial',
     description: 'Clean text-first packaging for polished branded exports.',
-    recommendedAspectRatios: ['16:9', '4:3', '1:1'],
+    recommendedAspectRatios: ['16:9'],
     defaultVisualStyle: 'slate',
     defaultRevealBehavior: 'spotlight',
     imageArrangement: 'horizontal',
@@ -287,5 +287,5 @@ export const resolvePackageImageArrangement = (
 ) => {
   if (preset.imageArrangement === 'horizontal') return false;
   if (preset.imageArrangement === 'vertical') return true;
-  return aspectRatio === '9:16' || aspectRatio === '1:1';
+  return aspectRatio === '9:16';
 };

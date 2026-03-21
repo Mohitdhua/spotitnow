@@ -14,6 +14,19 @@ import {
   WebMOutputFormat,
   canEncodeVideo
 } from 'mediabunny';
+import { VIDEO_PACKAGE_PRESETS } from '../constants/videoPackages';
+import { VISUAL_THEMES, resolveVisualThemeStyle, type VisualTheme } from '../constants/videoThemes';
+import {
+  PROGRESS_BAR_THEMES,
+  resolveProgressBarFillColors,
+  resolveProgressBarFillStyle
+} from '../constants/progressBarThemes';
+import {
+  applyTextTransform,
+  buildProgressFillDefinition,
+  radiusTokenToPx,
+  resolveVideoStyleModules
+} from '../constants/videoStyleModules';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
 import { decodeRuntimeImageBitmapFromBlob } from '../services/canvasRuntime';
 import type {
@@ -31,6 +44,8 @@ import type {
   OverlayWorkerOutputTarget,
   OverlayWorkerStartPayload
 } from '../services/overlayVideoExport';
+import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
 
 interface WorkerStartMessage {
   type: 'start';
@@ -87,6 +102,24 @@ interface ExportResult {
   mimeType: string;
   extension: string;
 }
+
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  radius?: number;
+}
+
+interface OverlayProgressWindow {
+  start: number;
+  end: number;
+  current: number;
+  total: number;
+  themeIndex: number;
+}
+
+type ProgressCanvasContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 const FPS = 30;
 
@@ -222,6 +255,470 @@ const normalizeCrop = (crop: OverlayCrop): OverlayCrop => {
   const width = clamp(Number.isFinite(crop.width) ? crop.width : 1, 0.02, 1 - x);
   const height = clamp(Number.isFinite(crop.height) ? crop.height : 1, 0.02, 1 - y);
   return { x, y, width, height };
+};
+
+const fillTemplate = (template: string, values: Record<string, string | number>) =>
+  template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => String(values[key] ?? ''));
+
+const hexToRgba = (hex: string, alpha: number) => {
+  if (!hex.startsWith('#')) return hex;
+  const normalized =
+    hex.length === 4 ? `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}` : hex;
+  const r = Number.parseInt(normalized.slice(1, 3), 16);
+  const g = Number.parseInt(normalized.slice(3, 5), 16);
+  const b = Number.parseInt(normalized.slice(5, 7), 16);
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
+const extractHexColors = (input: string): string[] =>
+  (input.match(/#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})/g) ?? []).map((value) =>
+    value.length === 4
+      ? `#${value[1]}${value[1]}${value[2]}${value[2]}${value[3]}${value[3]}`
+      : value
+  );
+
+const createRepeatingStripePattern = (
+  ctx: ProgressCanvasContext,
+  colors: string[]
+): CanvasPattern | null => {
+  const tileSize = 24;
+  const patternCanvas = new OffscreenCanvas(tileSize, tileSize);
+  const patternCtx = patternCanvas.getContext('2d');
+  if (!patternCtx) return null;
+
+  patternCtx.fillStyle = colors[0];
+  patternCtx.fillRect(0, 0, tileSize, tileSize);
+  patternCtx.translate(tileSize / 2, tileSize / 2);
+  patternCtx.rotate(-Math.PI / 4);
+  const stripeWidth = 8;
+  const stripeLength = tileSize * 2;
+  for (let index = -3; index < colors.length + 3; index += 1) {
+    const color = colors[(index + colors.length) % colors.length];
+    patternCtx.fillStyle = color;
+    patternCtx.fillRect(index * stripeWidth, -stripeLength / 2, stripeWidth, stripeLength);
+  }
+  return ctx.createPattern(patternCanvas, 'repeat');
+};
+
+const resolveProgressFill = (
+  ctx: ProgressCanvasContext,
+  rect: Rect,
+  fillDefinition: string,
+  fallbackColor: string
+): CanvasGradient | CanvasPattern | string => {
+  const colors = extractHexColors(fillDefinition);
+  if (colors.length === 0) return fallbackColor;
+
+  if (fillDefinition.includes('repeating-linear-gradient')) {
+    return createRepeatingStripePattern(ctx, colors) ?? colors[0];
+  }
+
+  const angleMatch = fillDefinition.match(/(-?\d+(?:\.\d+)?)deg/);
+  const angleDeg = angleMatch ? Number.parseFloat(angleMatch[1]) : 90;
+  const normalizedAngle = ((angleDeg % 360) + 360) % 360;
+  const horizontal = normalizedAngle === 90 || normalizedAngle === 270;
+  const vertical = normalizedAngle === 0 || normalizedAngle === 180;
+
+  const gradient = horizontal
+    ? ctx.createLinearGradient(rect.x, rect.y, rect.x + rect.width, rect.y)
+    : vertical
+      ? ctx.createLinearGradient(rect.x, rect.y, rect.x, rect.y + rect.height)
+      : ctx.createLinearGradient(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+
+  const denominator = Math.max(1, colors.length - 1);
+  colors.forEach((color, index) => {
+    gradient.addColorStop(index / denominator, color);
+  });
+  return gradient;
+};
+
+const roundRectPath = (ctx: ProgressCanvasContext, rect: Rect) => {
+  const radius = clamp(rect.radius ?? 0, 0, Math.min(rect.width, rect.height) / 2);
+  ctx.beginPath();
+  ctx.moveTo(rect.x + radius, rect.y);
+  ctx.lineTo(rect.x + rect.width - radius, rect.y);
+  ctx.quadraticCurveTo(rect.x + rect.width, rect.y, rect.x + rect.width, rect.y + radius);
+  ctx.lineTo(rect.x + rect.width, rect.y + rect.height - radius);
+  ctx.quadraticCurveTo(
+    rect.x + rect.width,
+    rect.y + rect.height,
+    rect.x + rect.width - radius,
+    rect.y + rect.height
+  );
+  ctx.lineTo(rect.x + radius, rect.y + rect.height);
+  ctx.quadraticCurveTo(rect.x, rect.y + rect.height, rect.x, rect.y + rect.height - radius);
+  ctx.lineTo(rect.x, rect.y + radius);
+  ctx.quadraticCurveTo(rect.x, rect.y, rect.x + radius, rect.y);
+  ctx.closePath();
+};
+
+const drawRoundedRect = (
+  ctx: ProgressCanvasContext,
+  rect: Rect,
+  options: {
+    fill?: string | CanvasGradient | CanvasPattern;
+    stroke?: string | CanvasGradient | CanvasPattern;
+    lineWidth?: number;
+  }
+) => {
+  roundRectPath(ctx, rect);
+  if (options.fill) {
+    ctx.fillStyle = options.fill;
+    ctx.fill();
+  }
+  if (options.stroke && (options.lineWidth ?? 0) > 0) {
+    ctx.lineWidth = options.lineWidth ?? 1;
+    ctx.strokeStyle = options.stroke;
+    ctx.stroke();
+  }
+};
+
+const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
+  const safeText = text.trim() || 'PROGRESS';
+  const widthBound = width / Math.max(4.8, safeText.length * 0.68);
+  const heightBound = height * 0.78;
+  return clamp(Math.min(preferred, widthBound, heightBound), 12, 256);
+};
+
+const drawTextProgressLabel = (
+  ctx: ProgressCanvasContext,
+  rect: Rect,
+  label: string,
+  fillPercent: number,
+  colorPercent: number,
+  styleModules: ReturnType<typeof resolveVideoStyleModules>,
+  visualTheme: VisualTheme,
+  scale: number,
+  dynamicFillColors?: ReturnType<typeof resolveProgressBarFillColors>,
+  sweep?: {
+    active: boolean;
+    progress: number;
+    opacity: number;
+  }
+) => {
+  const safeLabel = label.trim() || 'PROGRESS';
+  const width = Math.max(1, rect.width);
+  const height = Math.max(1, rect.height);
+  const fontSize = resolveTextProgressFontSize(
+    safeLabel,
+    width,
+    height,
+    Math.max(18, height * 1.24, width, 28 * scale)
+  );
+  const fillColors = resolveSmoothTextProgressFillColors(colorPercent, visualTheme, dynamicFillColors);
+  const textCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
+  const textCtx = textCanvas.getContext('2d');
+  if (!textCtx) return;
+
+  textCtx.clearRect(0, 0, width, height);
+  textCtx.textAlign = 'center';
+  textCtx.textBaseline = 'alphabetic';
+  textCtx.font = `${styleModules.text.titleCanvasWeight} ${fontSize}px ${styleModules.text.titleCanvasFamily}`;
+  const metrics = textCtx.measureText(safeLabel);
+  const textSpanWidth = Math.max(
+    1,
+    Math.min(width, Math.max(metrics.width, (metrics.actualBoundingBoxLeft || 0) + (metrics.actualBoundingBoxRight || 0)))
+  );
+  const fillX = Math.max(0, (width - textSpanWidth) / 2);
+  const fillWidth = Math.max(0, Math.min(textSpanWidth, (textSpanWidth * clamp(fillPercent, 0, 100)) / 100));
+  textCtx.fillStyle = '#000000';
+  textCtx.fillText(safeLabel, width / 2, height * 0.68);
+  textCtx.globalCompositeOperation = 'source-in';
+  const gradient = textCtx.createLinearGradient(0, 0, width, 0);
+  gradient.addColorStop(0, fillColors.start);
+  gradient.addColorStop(0.58, fillColors.middle);
+  gradient.addColorStop(1, fillColors.end);
+  textCtx.fillStyle = gradient;
+  textCtx.fillRect(fillX, 0, fillWidth, height);
+
+  if (sweep?.active && sweep.opacity > 0) {
+    const sweepWidth = Math.max(18, textSpanWidth * 0.18);
+    const sweepCenterX = fillX + textSpanWidth * sweep.progress;
+    const sweepX = sweepCenterX - sweepWidth / 2;
+    const sweepGradient = textCtx.createLinearGradient(sweepX, 0, sweepX + sweepWidth, 0);
+    sweepGradient.addColorStop(0, 'rgba(255,255,255,0)');
+    sweepGradient.addColorStop(0.3, 'rgba(255,255,255,0.06)');
+    sweepGradient.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+    sweepGradient.addColorStop(0.7, 'rgba(255,255,255,0.06)');
+    sweepGradient.addColorStop(1, 'rgba(255,255,255,0)');
+    textCtx.save();
+    textCtx.globalAlpha = clamp(sweep.opacity, 0, 1);
+    textCtx.fillStyle = sweepGradient;
+    textCtx.fillRect(sweepX, 0, sweepWidth, height);
+    textCtx.restore();
+  }
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `${styleModules.text.titleCanvasWeight} ${fontSize}px ${styleModules.text.titleCanvasFamily}`;
+  ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
+  ctx.strokeStyle = '#111827';
+  ctx.fillStyle = TEXT_PROGRESS_EMPTY_FILL;
+  ctx.strokeText(safeLabel, rect.x + width / 2, rect.y + height * 0.68);
+  ctx.fillText(safeLabel, rect.x + width / 2, rect.y + height * 0.68);
+  ctx.drawImage(textCanvas, rect.x, rect.y, width, height);
+  ctx.restore();
+};
+
+const drawProgressSweepOverlay = (
+  ctx: ProgressCanvasContext,
+  rect: Rect,
+  sweepProgress: number,
+  sweepOpacity: number
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || sweepOpacity <= 0) return;
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.clip();
+  ctx.globalAlpha = clamp(sweepOpacity, 0, 1);
+  const sweepWidth = Math.max(18, rect.width * 0.18);
+  const sweepCenterX = rect.x + rect.width * sweepProgress;
+  const sweepX = sweepCenterX - sweepWidth / 2;
+  const gradient = ctx.createLinearGradient(sweepX, 0, sweepX + sweepWidth, 0);
+  gradient.addColorStop(0, 'rgba(255,255,255,0)');
+  gradient.addColorStop(0.3, 'rgba(255,255,255,0.06)');
+  gradient.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+  gradient.addColorStop(0.7, 'rgba(255,255,255,0.06)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(sweepX, rect.y, sweepWidth, rect.height);
+  ctx.restore();
+};
+
+const drawProgressPulseOverlay = (
+  ctx: ProgressCanvasContext,
+  rect: Rect,
+  pulseOpacity: number
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || pulseOpacity <= 0) return;
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.clip();
+  ctx.globalAlpha = clamp(pulseOpacity, 0, 1);
+  const pulseWidth = Math.max(22, rect.width * 0.28);
+  const pulseX = rect.x + rect.width - pulseWidth;
+  const gradient = ctx.createLinearGradient(pulseX, 0, pulseX + pulseWidth, 0);
+  gradient.addColorStop(0, 'rgba(255,255,255,0)');
+  gradient.addColorStop(0.45, 'rgba(255,255,255,0.08)');
+  gradient.addColorStop(0.78, 'rgba(255,255,255,0.32)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0.84)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(pulseX, rect.y, pulseWidth, rect.height);
+  ctx.restore();
+};
+
+const drawProgressPulseGlow = (
+  ctx: ProgressCanvasContext,
+  rect: Rect,
+  pulseGlowOpacity: number,
+  glowColor: string,
+  blurBase: number,
+  lineWidth: number,
+  strokeColor = 'rgba(255,255,255,0.82)'
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || pulseGlowOpacity <= 0) return;
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur = Math.max(blurBase, Math.round(blurBase * (1 + pulseGlowOpacity * 1.8)));
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
+  ctx.restore();
+};
+
+const resolveOverlayProgressWindow = (options: {
+  timestamp: number;
+  duration: number;
+  target: OverlayWorkerOutputTarget;
+}): OverlayProgressWindow | null => {
+  const { timestamp, duration, target } = options;
+
+  if (target.kind === 'linked_pairs') {
+    const activeSegment =
+      target.segments.find(
+        (segment, index) =>
+          timestamp >= segment.start &&
+          (timestamp < segment.end || index === target.segments.length - 1)
+      ) ?? null;
+    if (!activeSegment) return null;
+    const segmentIndex = target.segments.findIndex((segment) => segment.pair.id === activeSegment.pair.id);
+    return {
+      start: activeSegment.start,
+      end: activeSegment.end,
+      current: segmentIndex + 1,
+      total: target.segments.length,
+      themeIndex: segmentIndex
+    };
+  }
+
+  if (target.photo) {
+    const timeline = normalizeTimeline(target.photo.timeline);
+    if (timestamp < timeline.start || timestamp > timeline.end) return null;
+    return {
+      start: timeline.start,
+      end: timeline.end,
+      current: 1,
+      total: 1,
+      themeIndex: target.outputIndex
+    };
+  }
+
+  return {
+    start: 0,
+    end: duration,
+    current: 1,
+    total: 1,
+    themeIndex: target.outputIndex
+  };
+};
+
+const drawOverlayProgressBar = (options: {
+  ctx: ProgressCanvasContext;
+  frameWidth: number;
+  frameHeight: number;
+  timestamp: number;
+  duration: number;
+  settings: OverlayExportSettings;
+  target: OverlayWorkerOutputTarget;
+}) => {
+  const { ctx, frameWidth, frameHeight, timestamp, duration, settings, target } = options;
+  if (settings.showProgress === false) return;
+
+  const progressWindow = resolveOverlayProgressWindow({ timestamp, duration, target });
+  if (!progressWindow) return;
+
+  const windowDuration = Math.max(0.5, progressWindow.end - progressWindow.start);
+  const elapsed = clamp(timestamp - progressWindow.start, 0, windowDuration);
+  const timeLeft = Math.max(0, windowDuration - elapsed);
+  const countdownPercent = clamp((timeLeft / windowDuration) * 100, 0, 100);
+  const packagePreset =
+    VIDEO_PACKAGE_PRESETS[settings.videoPackagePreset] ?? VIDEO_PACKAGE_PRESETS.gameshow;
+  const styleModules = resolveVideoStyleModules(settings, packagePreset);
+  const effectiveVisualStyle = resolveVisualThemeStyle(settings.visualStyle, progressWindow.themeIndex);
+  const visualTheme = settings.generatedProgressEnabled
+    ? PROGRESS_BAR_THEMES[settings.generatedProgressStyle]
+    : VISUAL_THEMES[effectiveVisualStyle];
+  const generatedFillColors = settings.generatedProgressEnabled
+    ? resolveProgressBarFillColors(settings.generatedProgressStyle, countdownPercent / 100)
+    : null;
+  const progressFillDefinition = settings.generatedProgressEnabled
+    ? resolveProgressBarFillStyle(settings.generatedProgressStyle, countdownPercent / 100, visualTheme)
+    : buildProgressFillDefinition(styleModules.progress, visualTheme);
+  const motionState = resolveVideoProgressMotionState({
+    mode: settings.progressMotion,
+    phase: 'showing',
+    phaseDuration: windowDuration,
+    timeLeft
+  });
+  const scale = clamp(Math.min(frameWidth, frameHeight) / 1080, 0.55, 2);
+  const baseWidth = Math.min(frameWidth * 0.72, 420 * scale);
+  const isTextFill =
+    settings.generatedProgressEnabled
+      ? settings.generatedProgressRenderMode === 'text_fill'
+      : styleModules.progress.variant === 'text_fill';
+  const progressRect: Rect = isTextFill
+    ? {
+        x: (frameWidth - baseWidth) / 2,
+        y: frameHeight - Math.max(64, 78 * scale),
+        width: baseWidth,
+        height: Math.max(34, 46 * scale)
+      }
+    : {
+        x: (frameWidth - baseWidth) / 2,
+        y: frameHeight - Math.max(42, 54 * scale),
+        width: baseWidth,
+        height: Math.max(18, 24 * scale),
+        radius: settings.generatedProgressEnabled
+          ? Math.max(10, Math.round(Math.max(18, 24 * scale) / 2))
+          : radiusTokenToPx(styleModules.progress.radiusToken, Math.max(18, 24 * scale), scale)
+      };
+  const templateValues = {
+    current: progressWindow.current,
+    next: Math.min(progressWindow.total, progressWindow.current + 1),
+    total: progressWindow.total,
+    puzzleCount: progressWindow.total,
+    remaining: Math.max(0, progressWindow.total - progressWindow.current),
+    preset: ''
+  };
+  const progressLabel = applyTextTransform(
+    fillTemplate(settings.textTemplates.progressLabel || settings.textTemplates.playTitle || 'Progress', templateValues),
+    styleModules.text.titleTransform
+  );
+
+  if (isTextFill) {
+    drawTextProgressLabel(
+      ctx,
+      progressRect,
+      progressLabel,
+      clamp(motionState.fillPercent, 0, 100),
+      countdownPercent,
+      styleModules,
+      visualTheme,
+      scale,
+      generatedFillColors,
+      {
+        active: motionState.sweepActive,
+        progress: motionState.sweepProgress,
+        opacity: motionState.sweepOpacity
+      }
+    );
+    return;
+  }
+
+  drawRoundedRect(ctx, progressRect, {
+    fill: visualTheme.progressTrackBg,
+    stroke: visualTheme.progressTrackBorder,
+    lineWidth: settings.generatedProgressEnabled
+      ? Math.max(2, Math.round(progressRect.height * 0.08))
+      : Math.max(1.5, Math.round(2 * scale * styleModules.progress.borderWidthScale))
+  });
+  const progressFillRect: Rect = {
+    x: progressRect.x,
+    y: progressRect.y,
+    width: (progressRect.width * clamp(motionState.fillPercent, 0, 100)) / 100,
+    height: progressRect.height,
+    radius: progressRect.radius
+  };
+  if (progressFillRect.width <= 0) return;
+
+  roundRectPath(ctx, progressFillRect);
+  ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, visualTheme.timerDot);
+  ctx.fill();
+
+  if (motionState.sweepActive) {
+    drawProgressSweepOverlay(ctx, progressFillRect, motionState.sweepProgress, motionState.sweepOpacity);
+  }
+  drawProgressPulseOverlay(ctx, progressFillRect, motionState.pulseOverlayOpacity);
+  drawProgressPulseGlow(
+    ctx,
+    progressFillRect,
+    motionState.pulseGlowOpacity,
+    hexToRgba(visualTheme.timerDot, 0.16 + motionState.pulseGlowOpacity * 0.38),
+    Math.max(6, Math.round(10 * scale)),
+    Math.max(1, Math.round(1.5 * scale))
+  );
+
+  const glowColor = settings.generatedProgressEnabled
+    ? visualTheme.progressFillGlow
+    : styleModules.progress.variant === 'glow'
+      ? visualTheme.progressFillGlow ?? visualTheme.timerDot
+      : null;
+  if (!glowColor) return;
+
+  ctx.save();
+  roundRectPath(ctx, progressFillRect);
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur = Math.max(6, Math.round(10 * scale));
+  ctx.strokeStyle = hexToRgba(visualTheme.timerDot, 0.85);
+  ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+  ctx.stroke();
+  ctx.restore();
 };
 
 const createOutputAudioSample = (
@@ -633,9 +1130,10 @@ const exportWithVideoBase = async (options: {
   overlayResources: OverlayResource[];
   soundtrack?: WorkerSoundtrackInput;
   settings: OverlayExportSettings;
+  target: Extract<OverlayWorkerOutputTarget, { kind: 'standard' }>;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
-  const { base, outputLabel, overlayResources, soundtrack, settings, onProgress } = options;
+  const { base, outputLabel, overlayResources, soundtrack, settings, target, onProgress } = options;
   if (!base.videoFile) throw new Error('Missing base video file.');
 
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
@@ -675,10 +1173,10 @@ const exportWithVideoBase = async (options: {
 
   const baseVideoResource = await prepareBaseVideoResource(base.videoFile);
   const duration = Math.max(0.5, base.durationSeconds);
-  const target = new BufferTarget();
+  const bufferTarget = new BufferTarget();
   const output = new Output({
     format: codecConfig.outputFormat,
-    target
+    target: bufferTarget
   });
   const canvas = new OffscreenCanvas(outputWidth, outputHeight);
   const ctx = canvas.getContext('2d');
@@ -733,6 +1231,15 @@ const exportWithVideoBase = async (options: {
       outputHeight
     });
     await renderOverlayResources(ctx, overlayResources, timestamp, outputWidth, outputHeight, scratchCanvas, scratchCtx);
+    drawOverlayProgressBar({
+      ctx,
+      frameWidth: outputWidth,
+      frameHeight: outputHeight,
+      timestamp,
+      duration,
+      settings,
+      target
+    });
     await videoSource.add(timestamp, 1 / FPS);
 
     if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
@@ -745,7 +1252,7 @@ const exportWithVideoBase = async (options: {
   await output.finalize();
   throwIfCanceled();
 
-  const buffer = target.buffer;
+  const buffer = bufferTarget.buffer;
   if (!buffer) {
     throw new Error(`Failed to build output for ${outputLabel}.`);
   }
@@ -914,9 +1421,10 @@ const exportWithStaticBase = async (options: {
   soundtrack?: WorkerSoundtrackInput;
   settings: OverlayExportSettings;
   outputLabel: string;
+  target: Extract<OverlayWorkerOutputTarget, { kind: 'standard' }>;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
-  const { base, basePhotoBitmap, photo, overlayResources, soundtrack, settings, outputLabel, onProgress } = options;
+  const { base, basePhotoBitmap, photo, overlayResources, soundtrack, settings, outputLabel, target, onProgress } = options;
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
 
   const maxTimelineEnd = overlayResources.reduce((acc, resource) => {
@@ -943,10 +1451,10 @@ const exportWithStaticBase = async (options: {
 
   throwIfCanceled();
 
-  const target = new BufferTarget();
+  const bufferTarget = new BufferTarget();
   const output = new Output({
     format: codecConfig.outputFormat,
-    target
+    target: bufferTarget
   });
   const canvas = new OffscreenCanvas(outputWidth, outputHeight);
   const ctx = canvas.getContext('2d');
@@ -1002,6 +1510,15 @@ const exportWithStaticBase = async (options: {
     }
 
     await renderOverlayResources(ctx, overlayResources, timestamp, outputWidth, outputHeight, scratchCanvas, scratchCtx);
+    drawOverlayProgressBar({
+      ctx,
+      frameWidth: outputWidth,
+      frameHeight: outputHeight,
+      timestamp,
+      duration,
+      settings,
+      target
+    });
     await videoSource.add(timestamp, 1 / FPS);
 
     if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
@@ -1017,7 +1534,7 @@ const exportWithStaticBase = async (options: {
   await output.finalize();
   throwIfCanceled();
 
-  const buffer = target.buffer;
+  const buffer = bufferTarget.buffer;
   if (!buffer) {
     throw new Error(`Failed to build output for ${photo.name}.`);
   }
@@ -1042,6 +1559,7 @@ const encodeLinkedPairTimeline = async (options: {
   linkedPairLayout: WorkerLinkedPairLayout;
   linkedPairStyle: WorkerLinkedPairStyle;
   outputLabel: string;
+  target: Extract<OverlayWorkerOutputTarget, { kind: 'linked_pairs' }>;
   onProgress: (progress: number, status: string) => void;
 }): Promise<ExportResult> => {
   const {
@@ -1055,6 +1573,7 @@ const encodeLinkedPairTimeline = async (options: {
     linkedPairLayout,
     linkedPairStyle,
     outputLabel,
+    target,
     onProgress
   } = options;
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
@@ -1082,10 +1601,10 @@ const encodeLinkedPairTimeline = async (options: {
 
   throwIfCanceled();
 
-  const target = new BufferTarget();
+  const bufferTarget = new BufferTarget();
   const output = new Output({
     format: codecConfig.outputFormat,
-    target
+    target: bufferTarget
   });
   const canvas = new OffscreenCanvas(outputWidth, outputHeight);
   const ctx = canvas.getContext('2d');
@@ -1159,6 +1678,15 @@ const encodeLinkedPairTimeline = async (options: {
     }
 
     await renderOverlayResources(ctx, overlayResources, timestamp, outputWidth, outputHeight, scratchCanvas, scratchCtx);
+    drawOverlayProgressBar({
+      ctx,
+      frameWidth: outputWidth,
+      frameHeight: outputHeight,
+      timestamp,
+      duration,
+      settings,
+      target
+    });
     await videoSource.add(timestamp, 1 / FPS);
 
     if (frameIndex % progressStep === 0 || frameIndex === totalFrames - 1) {
@@ -1174,7 +1702,7 @@ const encodeLinkedPairTimeline = async (options: {
   await output.finalize();
   throwIfCanceled();
 
-  const buffer = target.buffer;
+  const buffer = bufferTarget.buffer;
   if (!buffer) {
     throw new Error(`Failed to build output for ${outputLabel}.`);
   }
@@ -1239,6 +1767,7 @@ const exportLinkedPairOutput = async (
       linkedPairLayout: target.linkedPairLayout ?? { x: 0.14, y: 0.18, size: 0.34, gap: 0.04 },
       linkedPairStyle: normalizeLinkedPairStyle(target.linkedPairStyle),
       outputLabel: target.outputLabel,
+      target,
       onProgress: (progress, status) => {
         postToMain({ type: 'progress', progress, status });
       }
@@ -1298,6 +1827,7 @@ const exportStandardOutput = async (
             overlayResources: clipResources,
             soundtrack,
             settings,
+            target,
             onProgress: (progress, status) => {
               postToMain({ type: 'progress', progress, status });
             }
@@ -1310,6 +1840,7 @@ const exportStandardOutput = async (
             soundtrack,
             settings,
             outputLabel: target.outputLabel,
+            target,
             onProgress: (progress, status) => {
               postToMain({ type: 'progress', progress, status });
             }

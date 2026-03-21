@@ -6,6 +6,15 @@ import type {
   ProjectWorkspaceSnapshot,
   VideoSettings
 } from '../../types';
+import {
+  exportStoredImageAssetMap,
+  importStoredImageAssetMap
+} from '../imageAssetStore';
+import {
+  exportStoredAudioAssetMap,
+  importStoredAudioAssetMap
+} from '../audioAssetStore';
+import { VIDEO_AUDIO_POOL_KEYS } from '../../utils/videoAudioPools';
 
 const DB_NAME = 'spotitnow.projects';
 const STORE_NAME = 'projects';
@@ -16,6 +25,8 @@ interface StoredProjectEnvelope {
   kind: 'spotitnow-project';
   version: 1;
   project: ProjectRecord;
+  imageAssets?: Record<string, string>;
+  audioAssets?: Record<string, string>;
 }
 
 const supportsIndexedDb = () => typeof window !== 'undefined' && 'indexedDB' in window;
@@ -51,6 +62,39 @@ const createEmptyWorkspace = (): ProjectWorkspaceSnapshot => ({
 
 const createVideoSnapshot = (settings: VideoSettings): ProjectVideoSnapshot => ({
   settings
+});
+
+const collectProjectAudioSources = (settings: VideoSettings): Array<string | undefined> => [
+  settings.backgroundMusicSrc,
+  ...VIDEO_AUDIO_POOL_KEYS.flatMap((key) => settings.audioCuePools[key]?.sources ?? [])
+];
+
+const remapProjectVideoSettingsAssets = (
+  settings: VideoSettings,
+  restoredImageAssets: Map<string, string>,
+  restoredAudioAssets: Map<string, string>
+): VideoSettings => ({
+  ...settings,
+  logo:
+    typeof settings.logo === 'string'
+      ? restoredImageAssets.get(settings.logo) ?? settings.logo
+      : settings.logo,
+  backgroundMusicSrc:
+    typeof settings.backgroundMusicSrc === 'string'
+      ? restoredAudioAssets.get(settings.backgroundMusicSrc) ?? settings.backgroundMusicSrc
+      : settings.backgroundMusicSrc,
+  audioCuePools: VIDEO_AUDIO_POOL_KEYS.reduce<VideoSettings['audioCuePools']>(
+    (pools, key) => ({
+      ...pools,
+      [key]: {
+        ...settings.audioCuePools[key],
+        sources: settings.audioCuePools[key].sources.map(
+          (source) => restoredAudioAssets.get(source) ?? source
+        )
+      }
+    }),
+    settings.audioCuePools
+  )
 });
 
 export const getActiveProjectId = () =>
@@ -151,13 +195,23 @@ export const touchProject = (project: ProjectRecord, route: AppRoute): ProjectRe
   }
 });
 
-export const createProjectExport = (project: ProjectRecord): StoredProjectEnvelope => ({
-  kind: 'spotitnow-project',
-  version: 1,
-  project
-});
+export const createProjectExport = async (
+  project: ProjectRecord
+): Promise<StoredProjectEnvelope> => {
+  const imageAssets = await exportStoredImageAssetMap([project.video.settings.logo]);
+  const audioAssets = await exportStoredAudioAssetMap(
+    collectProjectAudioSources(project.video.settings)
+  );
+  return {
+    kind: 'spotitnow-project',
+    version: 1,
+    project,
+    imageAssets: Object.keys(imageAssets).length > 0 ? imageAssets : undefined,
+    audioAssets: Object.keys(audioAssets).length > 0 ? audioAssets : undefined
+  };
+};
 
-export const parseImportedProject = (raw: string): ProjectRecord => {
+export const parseImportedProject = async (raw: string): Promise<ProjectRecord> => {
   const parsed = JSON.parse(raw) as unknown;
   if (
     !parsed ||
@@ -173,12 +227,26 @@ export const parseImportedProject = (raw: string): ProjectRecord => {
     throw new Error('Project backup is missing project data.');
   }
 
+  const restoredImageAssets = await importStoredImageAssetMap(envelope.imageAssets);
+  const restoredAudioAssets = await importStoredAudioAssetMap(envelope.audioAssets);
+  const nextSettings = remapProjectVideoSettingsAssets(
+    envelope.project.video.settings,
+    restoredImageAssets,
+    restoredAudioAssets
+  );
+
   return {
     ...envelope.project,
     id: createProjectId(),
     name: envelope.project.name.trim() || 'Imported Project',
     updatedAt: Date.now(),
     lastOpenedAt: Date.now(),
+    video: {
+      ...envelope.project.video,
+      settings: {
+        ...nextSettings
+      }
+    },
     uiSnapshot: envelope.project.uiSnapshot ?? defaultUiSnapshot('/')
   };
 };

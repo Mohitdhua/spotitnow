@@ -11,14 +11,9 @@ import {
 } from '../constants/progressBarThemes';
 import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
 
-type ProgressBarModeSettings = Pick<
-  VideoSettings,
-  'visualStyle' | 'exportResolution' | 'exportBitrateMbps' | 'exportCodec'
->;
-
 interface ProgressBarModeProps {
-  settings: ProgressBarModeSettings;
-  onSettingsChange: (patch: Partial<ProgressBarModeSettings>) => void;
+  settings: VideoSettings;
+  onSettingsChange: (next: React.SetStateAction<VideoSettings>) => void;
   onBack: () => void;
   hasActiveAppExport?: boolean;
   onExportStateChange?: (state: { isExporting: boolean; progress: number; status: string }) => void;
@@ -119,13 +114,21 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
     () => Object.keys(PROGRESS_BAR_THEMES) as ProgressBarVisualStyle[],
     []
   );
-  const [selectedStyles, setSelectedStyles] = useState<ProgressBarVisualStyle[]>([settings.visualStyle]);
-  const [previewStyle, setPreviewStyle] = useState<ProgressBarVisualStyle>(settings.visualStyle);
+  const [selectedStyles, setSelectedStyles] = useState<ProgressBarVisualStyle[]>([
+    settings.generatedProgressStyle
+  ]);
+  const [previewStyle, setPreviewStyle] = useState<ProgressBarVisualStyle>(
+    settings.generatedProgressStyle
+  );
   const [durationSeconds, setDurationSeconds] = useState(8);
   const [previewTime, setPreviewTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(true);
-  const [renderMode, setRenderMode] = useState<ProgressBarRenderMode>('bar');
-  const [progressLabel, setProgressLabel] = useState('SPOT THE 3 DIFFERENCES');
+  const [renderMode, setRenderMode] = useState<ProgressBarRenderMode>(
+    settings.generatedProgressRenderMode
+  );
+  const [progressLabel, setProgressLabel] = useState(
+    settings.textTemplates.progressLabel || 'SPOT THE 3 DIFFERENCES'
+  );
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState('');
@@ -135,6 +138,31 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
       setPreviewStyle(styleOptions[0]);
     }
   }, [previewStyle, styleOptions]);
+
+  useEffect(() => {
+    if (styleOptions.includes(settings.generatedProgressStyle)) {
+      setPreviewStyle(settings.generatedProgressStyle);
+    }
+  }, [settings.generatedProgressStyle, styleOptions]);
+
+  useEffect(() => {
+    if (!styleOptions.includes(settings.generatedProgressStyle)) {
+      return;
+    }
+    setSelectedStyles((current) =>
+      current.includes(settings.generatedProgressStyle)
+        ? current
+        : [settings.generatedProgressStyle, ...current]
+    );
+  }, [settings.generatedProgressStyle, styleOptions]);
+
+  useEffect(() => {
+    setRenderMode(settings.generatedProgressRenderMode);
+  }, [settings.generatedProgressRenderMode]);
+
+  useEffect(() => {
+    setProgressLabel(settings.textTemplates.progressLabel || 'SPOT THE 3 DIFFERENCES');
+  }, [settings.textTemplates.progressLabel]);
 
   useEffect(() => {
     if (!isPreviewPlaying) return;
@@ -173,13 +201,43 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
   const remainingRatio = 1 - previewProgress;
   const remainingSeconds = Math.max(0, previewDuration - previewTime);
 
+  const applyGeneratedPreviewStyle = (style: ProgressBarVisualStyle) => {
+    setPreviewStyle(style);
+    onSettingsChange((current) => ({
+      ...current,
+      generatedProgressEnabled: true,
+      generatedProgressStyle: style
+    }));
+  };
+
+  const applyGeneratedRenderMode = (mode: ProgressBarRenderMode) => {
+    setRenderMode(mode);
+    onSettingsChange((current) => ({
+      ...current,
+      generatedProgressEnabled: true,
+      generatedProgressRenderMode: mode
+    }));
+  };
+
+  const applyProgressLabel = (label: string) => {
+    setProgressLabel(label);
+    onSettingsChange((current) => ({
+      ...current,
+      generatedProgressEnabled: true,
+      textTemplates: {
+        ...current.textTemplates,
+        progressLabel: label
+      }
+    }));
+  };
+
   const toggleStyleSelection = (style: ProgressBarVisualStyle) => {
     setSelectedStyles((current) => {
       if (current.includes(style)) {
         const next = current.filter((value) => value !== style);
         if (!next.length) return current;
         if (!next.includes(previewStyle)) {
-          setPreviewStyle(next[0]);
+          applyGeneratedPreviewStyle(next[0]);
         }
         return next;
       }
@@ -262,7 +320,9 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
               <h2 className="text-2xl sm:text-3xl font-black font-display uppercase tracking-tight text-black">
                 Progress Bar Mode
               </h2>
-              <p className="text-sm font-bold text-slate-700">Export classic bars or text-fill countdowns for selected styles.</p>
+              <p className="text-sm font-bold text-slate-700">
+                Export classic bars or text-fill countdowns for selected styles. Preview choices sync into the active video package as a generated progress source.
+              </p>
             </div>
           </div>
           <div className="self-start px-3 py-1 bg-black text-white rounded-lg text-xs font-black uppercase sm:self-auto">
@@ -285,7 +345,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   </button>
                   <select
                     value={previewStyle}
-                    onChange={(event) => setPreviewStyle(event.target.value as ProgressBarVisualStyle)}
+                    onChange={(event) => applyGeneratedPreviewStyle(event.target.value as ProgressBarVisualStyle)}
                     className="w-full px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase sm:w-auto"
                   >
                     {selectedStyles.map((style) => (
@@ -380,7 +440,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                 <label className="block font-bold uppercase text-sm">Bar Type</label>
                 <div className="grid grid-cols-2 gap-2">
                   <button
-                    onClick={() => setRenderMode('bar')}
+                    onClick={() => applyGeneratedRenderMode('bar')}
                     className={`py-2 px-2 rounded-lg border-2 border-black font-bold text-xs uppercase transition-all ${
                       renderMode === 'bar'
                         ? 'bg-[#4ECDC4] text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
@@ -390,7 +450,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                     Standard Bar
                   </button>
                   <button
-                    onClick={() => setRenderMode('text_fill')}
+                    onClick={() => applyGeneratedRenderMode('text_fill')}
                     className={`py-2 px-2 rounded-lg border-2 border-black font-bold text-xs uppercase transition-all ${
                       renderMode === 'text_fill'
                         ? 'bg-[#FFD93D] text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
@@ -405,7 +465,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                     <label className="block font-bold uppercase text-sm">Progress Phrase</label>
                     <textarea
                       value={progressLabel}
-                      onChange={(event) => setProgressLabel(event.target.value)}
+                      onChange={(event) => applyProgressLabel(event.target.value)}
                       rows={2}
                       className="w-full resize-none rounded-lg border-2 border-black bg-white px-3 py-2 font-bold uppercase"
                       placeholder="SPOT THE 3 DIFFERENCES"
@@ -448,7 +508,12 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   {(['720p', '1080p', '1440p', '2160p'] as const).map((value) => (
                     <button
                       key={value}
-                      onClick={() => onSettingsChange({ exportResolution: value })}
+                      onClick={() =>
+                        onSettingsChange((current) => ({
+                          ...current,
+                          exportResolution: value
+                        }))
+                      }
                       className={`py-2 px-2 rounded-lg border-2 border-black font-bold text-xs uppercase transition-all ${
                         settings.exportResolution === value
                           ? 'bg-[#4ECDC4] text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
@@ -467,7 +532,12 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   {(['h264', 'av1'] as const).map((codec) => (
                     <button
                       key={codec}
-                      onClick={() => onSettingsChange({ exportCodec: codec })}
+                      onClick={() =>
+                        onSettingsChange((current) => ({
+                          ...current,
+                          exportCodec: codec
+                        }))
+                      }
                       className={`py-2 px-2 rounded-lg border-2 border-black font-bold text-xs uppercase transition-all ${
                         settings.exportCodec === codec
                           ? 'bg-[#FFD93D] text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
@@ -494,7 +564,12 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   max="80"
                   step="0.5"
                   value={settings.exportBitrateMbps}
-                  onChange={(event) => onSettingsChange({ exportBitrateMbps: Number(event.target.value) })}
+                  onChange={(event) =>
+                    onSettingsChange((current) => ({
+                      ...current,
+                      exportBitrateMbps: Number(event.target.value)
+                    }))
+                  }
                   className="w-full h-4 bg-slate-200 rounded-full appearance-none cursor-pointer border-2 border-black accent-black"
                 />
               </div>
@@ -543,7 +618,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   onClick={() => {
                     setSelectedStyles(styleOptions);
                     if (!styleOptions.includes(previewStyle)) {
-                      setPreviewStyle(styleOptions[0]);
+                      applyGeneratedPreviewStyle(styleOptions[0]);
                     }
                   }}
                   className="px-3 py-2 bg-white border-2 border-black rounded-lg text-xs font-black uppercase hover:bg-slate-100"
@@ -569,7 +644,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   <button
                     key={style}
                     onClick={() => toggleStyleSelection(style)}
-                    onDoubleClick={() => setPreviewStyle(style)}
+                    onDoubleClick={() => applyGeneratedPreviewStyle(style)}
                     className={`p-3 border-2 border-black rounded-xl text-left transition-all ${
                       isSelected
                         ? 'bg-[#A7F3D0] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'

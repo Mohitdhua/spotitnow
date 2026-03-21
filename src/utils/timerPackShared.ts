@@ -116,6 +116,8 @@ export interface DesignerTimerState {
   numericLabel: string;
 }
 
+export const DESIGNER_TIMER_MIN_SIZE = 18;
+
 type Rgb = {
   r: number;
   g: number;
@@ -276,7 +278,7 @@ export const resolveDesignerTimerState = (
   const remainingTime = clampNumber(props.remainingTime ?? duration, 0, duration);
   const remainingRatio = getRemainingRatio(props.progress, remainingTime, duration);
   const elapsedRatio = 1 - remainingRatio;
-  const size = Math.max(44, Math.round(props.size ?? 72));
+  const size = Math.max(DESIGNER_TIMER_MIN_SIZE, Math.round(props.size ?? 72));
   const { width, height } = getDesignerTimerDimensions(styleId, size);
   const isEndingSoon = Boolean(props.isEndingSoon) || remainingRatio <= 0.2;
   return {

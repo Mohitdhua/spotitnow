@@ -41,7 +41,7 @@ const STORAGE_KEY = 'spotitnow.video-user-packages.v1';
 export const DEFAULT_VIDEO_USER_PACKAGE_ID = 'video-package-default';
 export const DEFAULT_VIDEO_USER_PACKAGE_NAME = 'Default Package';
 
-const ASPECT_RATIOS: VideoAspectRatio[] = ['16:9', '9:16', '1:1', '4:3'];
+const ASPECT_RATIOS: VideoAspectRatio[] = ['16:9', '9:16'];
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object';

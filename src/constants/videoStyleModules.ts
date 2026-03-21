@@ -10,6 +10,7 @@ import type {
 import type { VideoPackagePresetDefinition } from './videoPackages';
 import type { VisualTheme } from './videoThemes';
 import {
+  DESIGNER_TIMER_MIN_SIZE,
   DESIGNER_TIMER_STYLE_DEFINITIONS,
   getDesignerTimerDimensions,
   isDesignerTimerStyle
@@ -406,7 +407,7 @@ export const measureResolvedTimerBox = (
 ): TimerBoxMetrics => {
   if (isDesignerTimerStyle(style.id)) {
     const size = Math.max(
-      48,
+      DESIGNER_TIMER_MIN_SIZE,
       Math.round(
         Math.max(
           input.fontSize * 2.15,

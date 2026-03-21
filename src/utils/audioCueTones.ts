@@ -3,6 +3,7 @@ export type AudioCueKind =
   | 'reveal'
   | 'marker'
   | 'blink'
+  | 'typewriter'
   | 'play'
   | 'intro'
   | 'transition'
@@ -73,6 +74,19 @@ export const buildCueTones = (kind: AudioCueKind): AudioCueTone[] => {
           release: 0.02
         }
       ];
+    case 'typewriter':
+      return [
+        {
+          startOffset: 0,
+          duration: 0.026,
+          frequency: 1680,
+          endFrequency: 1240,
+          volume: 0.05,
+          type: 'square',
+          attack: 0.001,
+          release: 0.022
+        }
+      ];
     case 'play':
       return [
         {
@@ -103,12 +117,32 @@ export const buildCueTones = (kind: AudioCueKind): AudioCueTone[] => {
       return [
         {
           startOffset: 0,
-          duration: 0.08,
-          frequency: 820,
-          endFrequency: 640,
+          duration: 0.06,
+          frequency: 280,
+          endFrequency: 180,
+          volume: 0.08,
+          type: 'sine',
+          attack: 0.002,
+          release: 0.05
+        },
+        {
+          startOffset: 0.012,
+          duration: 0.13,
+          frequency: 420,
+          endFrequency: 690,
           volume: 0.12,
-          type: 'square',
-          attack: 0.006,
+          type: 'triangle',
+          attack: 0.004,
+          release: 0.1
+        },
+        {
+          startOffset: 0.024,
+          duration: 0.075,
+          frequency: 860,
+          endFrequency: 560,
+          volume: 0.035,
+          type: 'sine',
+          attack: 0.003,
           release: 0.06
         }
       ];

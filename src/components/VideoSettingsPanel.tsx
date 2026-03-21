@@ -13,9 +13,7 @@ import {
   Play,
   RefreshCcw,
   Save,
-  Shuffle,
   Smartphone,
-  Square,
   Sparkles,
   Upload,
   Volume2
@@ -25,6 +23,7 @@ import {
   GeneratedBackgroundMotifFamily,
   GeneratedBackgroundPaletteId,
   Puzzle,
+  type VideoAudioCuePoolKey,
   VideoSettings,
   VideoUserPackage
 } from '../types';
@@ -40,11 +39,11 @@ import {
   VIDEO_TIMER_STYLE_OPTIONS,
   VIDEO_TRANSITION_STYLE_OPTIONS
 } from '../constants/videoStyleModules';
+import { PROGRESS_BAR_THEMES } from '../constants/progressBarThemes';
 import { VideoPreviewCompare } from './VideoPreviewCompare';
 import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
 import { ConfirmDialog } from '../app/components/ConfirmDialog';
 import { TextPromptDialog } from '../app/components/TextPromptDialog';
-import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import { clampLogoZoom } from '../utils/logoProcessing';
 import {
   deleteGeneratedBackgroundPack,
@@ -60,24 +59,27 @@ import {
   resolveGeneratedBackgroundForIndex
 } from '../services/generatedBackgrounds';
 import { loadSavedVideoCustomLayout, saveVideoCustomLayout } from '../services/videoLayoutStorage';
+import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import {
   deleteStoredAudioAsset,
   deleteStoredAudioAssets,
   saveAudioAssetFromFile
 } from '../services/audioAssetStore';
+import { saveImageAssetFromFile } from '../services/imageAssetStore';
 import {
   deleteStoredVideoAsset,
   isStoredVideoAssetSource,
   saveVideoAssetFromFile
 } from '../services/videoAssetStore';
 import { readVideoFileMetadata } from '../services/frameExtractor';
+import { VIDEO_AUDIO_POOL_DEFINITIONS } from '../utils/videoAudioPools';
 
 interface VideoSettingsPanelProps {
   settings: VideoSettings;
   puzzles: Puzzle[];
   videoPackages: VideoUserPackage[];
   activeVideoPackageId: string;
-  onSettingsChange: (settings: VideoSettings) => void;
+  onSettingsChange: (settings: React.SetStateAction<VideoSettings>) => void;
   onAspectRatioChange: (aspectRatio: VideoSettings['aspectRatio']) => void;
   onSelectVideoPackage: (packageId: string) => void;
   onCreateVideoPackage: () => void;
@@ -130,9 +132,7 @@ const ASPECT_RATIO_OPTIONS: Array<{
   icon: React.ComponentType<{ size?: string | number; strokeWidth?: string | number }>;
 }> = [
   { value: '16:9', label: '16:9', subLabel: 'Landscape', icon: Monitor },
-  { value: '9:16', label: '9:16', subLabel: 'Portrait', icon: Smartphone },
-  { value: '1:1', label: '1:1', subLabel: 'Square', icon: Square },
-  { value: '4:3', label: '4:3', subLabel: 'Classic', icon: Layout }
+  { value: '9:16', label: '9:16', subLabel: 'Portrait', icon: Smartphone }
 ];
 
 const VISUAL_STYLE_OPTIONS: VisualStyleCard[] = [
@@ -160,6 +160,22 @@ const VISUAL_STYLE_OPTIONS: VisualStyleCard[] = [
 const REVEAL_COLORS = ['#FF0000', '#FF6B6B', '#4ECDC4', '#FFD93D', '#000000', '#FFFFFF'];
 const OUTLINE_COLORS = ['#000000', '#FFFFFF', '#FF0000', '#FFD93D', '#4ECDC4'];
 const IMAGE_PANEL_OUTLINE_SWATCHES = ['#CEC3A5', '#14B8A6', '#111827', '#FFFFFF', '#FACC15', '#FB7185'];
+const AUDIO_POOL_BADGE_CLASSES: Record<VideoAudioCuePoolKey, string> = {
+  progress_fill_intro: 'bg-[#DBEAFE] text-sky-900',
+  puzzle_play: 'bg-[#DCFCE7] text-emerald-900',
+  low_time_warning: 'bg-[#FDE68A] text-amber-900',
+  marker_reveal: 'bg-[#E0F2FE] text-cyan-900',
+  blink: 'bg-[#FCE7F3] text-pink-900',
+  transition: 'bg-[#FECACA] text-rose-900'
+};
+const AUDIO_POOL_SELECTION_LABELS: Record<VideoAudioCuePoolKey, string> = {
+  progress_fill_intro: 'Cycle by puzzle',
+  puzzle_play: 'Cycle by puzzle',
+  low_time_warning: 'Cycle by puzzle',
+  marker_reveal: 'Random per reveal',
+  blink: 'Random per blink',
+  transition: 'Random per transition'
+};
 
 const TEXT_TEMPLATE_GROUPS: Array<{
   title: string;
@@ -461,7 +477,14 @@ const PALETTE_FOCUS_OPTIONS: Array<{ value: PaletteFocus; label: string; descrip
   { value: 'night', label: 'Night', description: 'Midnight-heavy packs with brighter contrast.' }
 ];
 
-const ASPECT_RATIOS: VideoSettings['aspectRatio'][] = ['16:9', '9:16', '1:1', '4:3'];
+const ASPECT_RATIOS: VideoSettings['aspectRatio'][] = ['16:9', '9:16'];
+const GENERATED_BACKGROUND_COVERAGE_OPTIONS: Array<{
+  value: VideoSettings['generatedBackgroundCoverage'];
+  label: string;
+}> = [
+  { value: 'game_area', label: 'Below Header' },
+  { value: 'full_board', label: 'Full Board' }
+];
 
 const BOX_VARIANTS: Array<{ value: VideoSettings['revealVariant']; label: string; hint: string }> = [
   { value: 'box_classic', label: 'Classic', hint: 'Clean double-line frame' },
@@ -498,10 +521,55 @@ const EXPORT_RESOLUTION_OPTIONS: Array<{
   { value: '2160p', label: '4K', subLabel: 'UHD' }
 ];
 
-type PanelTab = 'package' | 'theme' | 'text' | 'motion' | 'layout' | 'export';
-type LayoutPanelKey = 'frame' | 'imagePanels' | 'logo' | 'title' | 'timer' | 'progress';
+type PanelTab = 'package' | 'theme' | 'text' | 'motion' | 'layout' | 'audio' | 'export';
+type LayoutPanelKey = 'frame' | 'logo' | 'title' | 'timer' | 'progress';
+type DeferredLayoutSliderKey =
+  | 'headerHeight'
+  | 'contentPadding'
+  | 'gamePadding'
+  | 'panelGap'
+  | 'panelRadius'
+  | 'logoLeft'
+  | 'logoTop'
+  | 'logoSize'
+  | 'titleLeft'
+  | 'titleTop'
+  | 'titleFontSize'
+  | 'subtitleSize'
+  | 'subtitleGap'
+  | 'timerLeft'
+  | 'timerTop'
+  | 'timerFontSize'
+  | 'timerMinWidth'
+  | 'timerPadX'
+  | 'timerPadY'
+  | 'timerDotSize'
+  | 'timerGap'
+  | 'progressLeft'
+  | 'progressTop'
+  | 'progressWidth'
+  | 'progressHeight'
+  | 'progressRadius';
 
 const sliderClass = 'w-full h-3 border-2 border-black rounded-full accent-black';
+
+const GENERATED_PROGRESS_STYLE_OPTIONS = Object.keys(PROGRESS_BAR_THEMES) as Array<VideoSettings['generatedProgressStyle']>;
+
+const VIDEO_PROGRESS_MOTION_OPTIONS: Array<{
+  value: VideoSettings['progressMotion'];
+  label: string;
+  hint: string;
+}> = [
+  { value: 'countdown', label: 'Countdown', hint: 'Drains during the play phase.' },
+  { value: 'intro_fill', label: 'Intro Fill', hint: 'Fills in first, then counts down.' },
+  { value: 'intro_sweep', label: 'Intro Sweep', hint: 'Runs an entry sweep before countdown.' }
+];
+
+const formatGeneratedProgressStyleLabel = (style: VideoSettings['generatedProgressStyle']) =>
+  style
+    .split('_')
+    .map((chunk) => `${chunk.charAt(0).toUpperCase()}${chunk.slice(1)}`)
+    .join(' ');
 
 const pickGeneratedValue = <T extends string,>(
   current: T,
@@ -569,7 +637,6 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   const [activeTab, setActiveTab] = useState<PanelTab>('package');
   const [layoutPanels, setLayoutPanels] = useState<Record<LayoutPanelKey, boolean>>({
     frame: true,
-    imagePanels: false,
     logo: true,
     title: true,
     timer: false,
@@ -580,6 +647,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   const [packAspectRatio, setPackAspectRatio] = useState<VideoSettings['aspectRatio']>(settings.aspectRatio);
   const [motifFocus, setMotifFocus] = useState<MotifFocus>('balanced');
   const [paletteFocus, setPaletteFocus] = useState<PaletteFocus>('mixed');
+  const [layoutSliderDrafts, setLayoutSliderDrafts] = useState<Partial<Record<DeferredLayoutSliderKey, number>>>({});
   const [backgroundBaseSeed, setBackgroundBaseSeed] = useState(() =>
     Math.max(1, Math.floor(Date.now() % 100000))
   );
@@ -596,6 +664,53 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   const updateSetting = <K extends keyof VideoSettings>(key: K, value: VideoSettings[K]) => {
     onSettingsChange((previous) => ({ ...previous, [key]: value }));
   };
+  type DeferredSliderKey =
+    | 'showDuration'
+    | 'revealDuration'
+    | 'sequentialRevealStep'
+    | 'transitionDuration'
+    | 'blinkSpeed'
+    | 'circleThickness'
+    | 'outlineThickness'
+    | 'imagePanelOutlineThickness'
+    | 'logoZoom';
+  const [sliderDrafts, setSliderDrafts] = useState<Partial<Record<DeferredSliderKey, number>>>({});
+  const getDeferredSliderValue = <K extends DeferredSliderKey>(key: K) =>
+    sliderDrafts[key] ?? Number(settings[key]);
+  const updateDeferredSlider = <K extends DeferredSliderKey>(key: K, value: number) => {
+    setSliderDrafts((previous) => {
+      if (previous[key] === value) {
+        return previous;
+      }
+      return {
+        ...previous,
+        [key]: value
+      };
+    });
+  };
+  const commitDeferredSlider = <K extends DeferredSliderKey>(key: K) => {
+    const draftValue = sliderDrafts[key];
+    if (typeof draftValue !== 'number') return;
+    if (Number(settings[key]) !== draftValue) {
+      updateSetting(key, draftValue as VideoSettings[K]);
+    }
+    setSliderDrafts((previous) => {
+      const next = { ...previous };
+      delete next[key];
+      return next;
+    });
+  };
+  const buildDeferredSliderHandlers = <K extends DeferredSliderKey>(key: K) => ({
+    value: getDeferredSliderValue(key),
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+      updateDeferredSlider(key, Number(event.target.value));
+    },
+    onPointerUp: () => commitDeferredSlider(key),
+    onMouseUp: () => commitDeferredSlider(key),
+    onTouchEnd: () => commitDeferredSlider(key),
+    onKeyUp: () => commitDeferredSlider(key),
+    onBlur: () => commitDeferredSlider(key)
+  });
   const updateSceneSettings = (patch: Partial<VideoSettings['sceneSettings']>) => {
     onSettingsChange((previous) => ({
       ...previous,
@@ -669,44 +784,36 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
       });
     }
   };
-  const applyVideoPackagePreset = (presetKey: VideoSettings['videoPackagePreset']) => {
-    const preset = VIDEO_PACKAGE_PRESETS[presetKey];
-    onSettingsChange({
-      ...settings,
-      videoPackagePreset: presetKey,
-      visualStyle: preset.defaultVisualStyle,
-      textStyle: 'package',
-      headerStyle: 'package',
-      timerStyle: 'package',
-      progressStyle: 'package',
-      introCardStyle: 'package',
-      transitionCardStyle: 'package',
-      outroCardStyle: 'package',
-      revealBehavior: preset.defaultRevealBehavior,
-      useCustomLayout: false,
-      customLayout: buildDefaultCustomVideoLayout(presetKey, settings.aspectRatio)
-    });
-  };
-
   const selectedStyleOption =
     VISUAL_STYLE_OPTIONS.find((option) => option.value === settings.visualStyle) ?? VISUAL_STYLE_OPTIONS[0];
-  const selectedPackagePreset =
-    VIDEO_PACKAGE_PRESETS[settings.videoPackagePreset] ?? VIDEO_PACKAGE_PRESETS.gameshow;
   const selectedRevealBehaviorOption =
     VIDEO_REVEAL_BEHAVIOR_OPTIONS.find((option) => option.value === settings.revealBehavior) ??
     VIDEO_REVEAL_BEHAVIOR_OPTIONS[0];
-  const selectedTextStyleOption =
-    VIDEO_TEXT_STYLE_OPTIONS.find((option) => option.value === settings.textStyle) ??
-    VIDEO_TEXT_STYLE_OPTIONS[0];
-  const selectedHeaderStyleOption =
-    VIDEO_HEADER_STYLE_OPTIONS.find((option) => option.value === settings.headerStyle) ??
-    VIDEO_HEADER_STYLE_OPTIONS[0];
-  const selectedTimerStyleOption =
-    VIDEO_TIMER_STYLE_OPTIONS.find((option) => option.value === settings.timerStyle) ??
-    VIDEO_TIMER_STYLE_OPTIONS[0];
+  const compactRevealBehaviorOptions = useMemo(() => {
+    const visibleOptions = new Set(['marker_only', 'pulse', 'spotlight', 'freeze_ring', settings.revealBehavior]);
+    return VIDEO_REVEAL_BEHAVIOR_OPTIONS.filter((option) => visibleOptions.has(option.value));
+  }, [settings.revealBehavior]);
+  const compactBoxVariants = useMemo(() => {
+    const visibleVariants = new Set(['box_classic', 'box_glow', 'box_corners', settings.revealVariant]);
+    return BOX_VARIANTS.filter((variant) => visibleVariants.has(variant.value));
+  }, [settings.revealVariant]);
+  const compactCircleVariants = useMemo(() => {
+    const visibleVariants = new Set([
+      'circle_classic',
+      'circle_crosshair',
+      'circle_ring',
+      'circle_red_black',
+      settings.revealVariant
+    ]);
+    return CIRCLE_VARIANTS.filter((variant) => visibleVariants.has(variant.value));
+  }, [settings.revealVariant]);
+  const compactHighlightVariants = HIGHLIGHT_VARIANTS;
   const selectedProgressStyleOption =
     VIDEO_PROGRESS_STYLE_OPTIONS.find((option) => option.value === settings.progressStyle) ??
     VIDEO_PROGRESS_STYLE_OPTIONS[0];
+  const selectedProgressMotionOption =
+    VIDEO_PROGRESS_MOTION_OPTIONS.find((option) => option.value === settings.progressMotion) ??
+    VIDEO_PROGRESS_MOTION_OPTIONS[0];
   const selectedIntroCardStyleOption =
     VIDEO_SCENE_CARD_STYLE_OPTIONS.find((option) => option.value === settings.introCardStyle) ??
     VIDEO_SCENE_CARD_STYLE_OPTIONS[0];
@@ -719,6 +826,16 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   const selectedTransitionStyleOption =
     VIDEO_TRANSITION_STYLE_OPTIONS.find((option) => option.value === settings.transitionStyle) ??
     VIDEO_TRANSITION_STYLE_OPTIONS[0];
+  const previewPackageOptions = videoPackages.map((videoPackage) => ({
+    id: videoPackage.id,
+    name: videoPackage.name
+  }));
+  const previewThemeOptions = VISUAL_STYLE_OPTIONS.map((option) => ({
+    value: option.value,
+    label: option.label
+  }));
+  const workspaceSelectClass =
+    'h-10 min-w-0 w-full rounded-xl border-2 border-black bg-white px-4 text-sm font-black text-slate-900 outline-none';
   const backgroundPackPreview = useMemo(
     () =>
       settings.generatedBackgroundsEnabled
@@ -738,23 +855,15 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   const customLayout = settings.customLayout ?? customLayoutSeed;
   const previewStage = BASE_STAGE_SIZE[settings.aspectRatio];
   const livePreviewHeightStyle =
-    activeTab === 'text'
-      ? settings.aspectRatio === '9:16'
-        ? 'clamp(320px, 56vh, 560px)'
-        : settings.aspectRatio === '1:1'
-          ? 'clamp(220px, 42vw, 420px)'
-          : 'clamp(180px, 30vw, 320px)'
-      : settings.aspectRatio === '9:16'
-        ? 'clamp(420px, 72vh, 720px)'
-        : settings.aspectRatio === '1:1'
-          ? 'clamp(260px, 56vw, 620px)'
-          : 'clamp(220px, 46vw, 500px)';
+    settings.aspectRatio === '9:16'
+      ? 'clamp(420px, 66vh, 680px)'
+      : 'clamp(280px, 35vh, 430px)';
   const processedLogoSrc = useProcessedLogoSrc(settings.logo, {
     enabled: settings.logoChromaKeyEnabled,
     color: settings.logoChromaKeyColor,
     tolerance: settings.logoChromaKeyTolerance
   });
-  const logoZoom = clampLogoZoom(settings.logoZoom);
+  const logoZoom = clampLogoZoom(getDeferredSliderValue('logoZoom'));
 
   const defaultVariantByStyle: Record<VideoSettings['revealStyle'], VideoSettings['revealVariant']> = {
     box: 'box_glow',
@@ -836,28 +945,21 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
     });
   };
 
-  const handleLogoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (readerEvent) => {
-      if (readerEvent.target?.result) {
-        updateSetting('logo', readerEvent.target.result as string);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const storedSource = await saveImageAssetFromFile(file);
+      updateSetting('logo', storedSource);
+    } catch (error) {
+      console.error('Failed to store logo image', error);
+      alert('Failed to load that logo image.');
+    } finally {
+      event.target.value = '';
+    }
   };
 
-  type AudioSrcKey =
-    | 'countdownSoundSrc'
-    | 'revealSoundSrc'
-    | 'markerSoundSrc'
-    | 'blinkSoundSrc'
-    | 'playSoundSrc'
-    | 'introSoundSrc'
-    | 'transitionSoundSrc'
-    | 'outroSoundSrc'
-    | 'backgroundMusicSrc';
+  type AudioSrcKey = 'backgroundMusicSrc';
 
   const clearAudioSource = (key: AudioSrcKey) => {
     const current = settings[key];
@@ -889,6 +991,62 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
       } finally {
         event.target.value = '';
       }
+  };
+
+  const updateAudioCuePool = (
+    key: VideoAudioCuePoolKey,
+    patch: Partial<VideoSettings['audioCuePools'][VideoAudioCuePoolKey]>
+  ) => {
+    onSettingsChange((previous) => ({
+      ...previous,
+      audioCuePools: {
+        ...previous.audioCuePools,
+        [key]: {
+          ...previous.audioCuePools[key],
+          ...patch
+        }
+      }
+    }));
+  };
+
+  const handleAudioPoolUpload =
+    (key: VideoAudioCuePoolKey) => async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = event.target.files ? Array.from(event.target.files as FileList) : [];
+      if (!files.length) return;
+      const audioFiles = files.filter((file) => file.type.startsWith('audio/'));
+      if (!audioFiles.length) {
+        alert('Choose audio files.');
+        event.target.value = '';
+        return;
+      }
+      try {
+        const storedSources = await Promise.all(audioFiles.map((file) => saveAudioAssetFromFile(file)));
+        const nextSources = [...settings.audioCuePools[key].sources, ...storedSources];
+        updateAudioCuePool(key, { sources: nextSources });
+      } catch (error) {
+        console.error('Failed to load audio pool files', error);
+        alert('Failed to load one or more audio files.');
+      } finally {
+        event.target.value = '';
+      }
+    };
+
+  const clearAudioPoolSources = async (key: VideoAudioCuePoolKey) => {
+    const currentSources = settings.audioCuePools[key].sources;
+    if (currentSources.length > 0) {
+      await deleteStoredAudioAssets(currentSources);
+    }
+    updateAudioCuePool(key, { sources: [] });
+  };
+
+  const removeAudioPoolSource = async (key: VideoAudioCuePoolKey, sourceIndex: number) => {
+    const currentSources = settings.audioCuePools[key].sources;
+    const targetSource = currentSources[sourceIndex];
+    if (!targetSource) return;
+    await deleteStoredAudioAsset(targetSource);
+    updateAudioCuePool(key, {
+      sources: currentSources.filter((_, index) => index !== sourceIndex)
+    });
   };
 
   const handleIntroVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -957,27 +1115,6 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
     }));
   };
 
-  const handleRevealVariantsUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files ? Array.from(event.target.files as FileList) : [];
-    if (!files.length) return;
-    const audioFiles = files.filter((file) => file.type.startsWith('audio/'));
-    if (!audioFiles.length) {
-      alert('Choose audio files for reveal variants.');
-      event.target.value = '';
-      return;
-    }
-    try {
-      const storedSources = await Promise.all(audioFiles.map((file) => saveAudioAssetFromFile(file)));
-      const nextVariants = [...(settings.revealSoundVariantSrcs ?? []), ...storedSources];
-      updateSetting('revealSoundVariantSrcs', nextVariants);
-    } catch (error) {
-      console.error('Failed to load reveal variants', error);
-      alert('Failed to load one or more audio files.');
-    } finally {
-      event.target.value = '';
-    }
-  };
-
   const renderModuleGenerator = <T extends string,>(
     label: string,
     value: T,
@@ -985,7 +1122,6 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
     onChange: (value: T) => void,
     onGenerate: () => void
   ) => {
-    const selected = options.find((option) => option.value === value) ?? options[0];
     return (
       <div className="space-y-3 rounded-2xl border-2 border-black bg-[#FFFDF8] p-3">
         <div className="flex items-center justify-between gap-3">
@@ -1001,59 +1137,15 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
         <select
           value={value}
           onChange={(event) => onChange(event.target.value as T)}
-          className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
+          className={workspaceSelectClass}
         >
           {options.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
-          ))}
-        </select>
-        <div className="rounded-xl border-2 border-black bg-[#F8FDFF] px-3 py-2 text-[10px] font-bold uppercase text-slate-600">
-          {selected.description}
-        </div>
+            ))}
+          </select>
       </div>
-    );
-  };
-
-  const renderStylePreviewTile = (option: VisualStyleCard) => {
-    const isSelected = settings.visualStyle === option.value;
-    return (
-      <button
-        key={option.value}
-        type="button"
-        onClick={() => updateSetting('visualStyle', option.value)}
-        className={`border-2 border-black rounded-xl p-3 text-left transition-all ${
-          isSelected
-            ? 'bg-[#FFF5CC] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
-            : 'bg-white hover:bg-slate-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5'
-        }`}
-      >
-        <div className="mb-2 flex items-start justify-between gap-2">
-          <div>
-            <div className="text-sm font-black uppercase leading-none">{option.label}</div>
-            <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">{option.hint}</div>
-          </div>
-          <div
-            className={`rounded-full border-2 border-black px-2 py-1 text-[9px] font-black uppercase ${
-              isSelected ? 'bg-[#4ECDC4] text-black' : 'bg-white text-slate-500'
-            }`}
-          >
-            {isSelected ? 'Active' : 'Use'}
-          </div>
-        </div>
-        <div className="overflow-hidden rounded-lg border-2 border-black" style={{ background: option.swatch }}>
-          <div className="flex h-5 items-center justify-between border-b-2 border-black bg-white/70 px-2">
-            <span className="text-[8px] font-black uppercase">Spot It</span>
-            <span className="text-[8px] font-black">07s</span>
-          </div>
-          <div className="p-2">
-            <div className="h-1.5 overflow-hidden rounded-full border border-black bg-white/70">
-              <div className="h-full" style={{ width: '65%', background: option.meter }} />
-            </div>
-          </div>
-        </div>
-      </button>
     );
   };
 
@@ -1222,378 +1314,362 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   };
 
   return (
-    <div className="w-full max-w-[1360px] mx-auto p-3 sm:p-4 md:p-6">
-      <div className="bg-[#FFFDF3] border-4 border-black rounded-3xl shadow-[10px_10px_0px_0px_rgba(0,0,0,1)] overflow-hidden">
-        <div className="bg-[#FFD93D] border-b-4 border-black p-4 sm:p-5 md:p-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-start gap-3 sm:items-center">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#F6F2E8]">
+      <div className="sticky top-0 z-20 shrink-0 border-b-2 border-black bg-[#FFD93D] px-2 py-2.5 sm:px-3">
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-2.5 sm:items-center">
             <button
               onClick={onBack}
-              className="w-12 h-12 inline-flex items-center justify-center rounded-xl border-2 border-black bg-white hover:bg-black hover:text-white transition-colors"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border-2 border-black bg-white transition-colors hover:bg-black hover:text-white"
             >
-              <ArrowLeft size={24} strokeWidth={3} />
+              <ArrowLeft size={16} strokeWidth={3} />
             </button>
             <div className="min-w-0">
-              <div className="text-xs md:text-sm font-black uppercase tracking-wider text-slate-700">Video Mode</div>
-              <h2 className="text-xl sm:text-2xl md:text-3xl font-black uppercase leading-none">Production Setup</h2>
+              <div className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.18em] text-slate-700">Video Mode</div>
+              <h2 className="text-[1.35rem] sm:text-[1.55rem] md:text-[1.7rem] font-black uppercase leading-none">Production Setup</h2>
             </div>
           </div>
 
-            <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
-            <div className="px-4 py-2 bg-black text-white rounded-xl border-2 border-black text-xs font-black uppercase tracking-wider">
+            <div className="flex w-full flex-col gap-1.5 sm:w-auto sm:flex-row sm:items-center">
+            <div className="rounded-xl border-2 border-black bg-black px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.14em] text-white sm:text-[10px]">
               {puzzles.length} Puzzle{puzzles.length === 1 ? '' : 's'}
             </div>
             <button
               onClick={onStart}
               disabled={puzzles.length === 0}
-              className={`w-full justify-center px-6 py-3 rounded-xl border-4 border-black text-sm font-black uppercase tracking-wide inline-flex items-center gap-2 sm:w-auto ${
+              className={`inline-flex w-full items-center justify-center gap-1.5 rounded-xl border-4 border-black px-3.5 py-1.5 text-[12px] font-black uppercase tracking-wide sm:w-auto ${
                 puzzles.length === 0
                   ? 'bg-slate-300 text-slate-700 cursor-not-allowed'
                   : 'bg-black text-white hover:bg-slate-900 shadow-[4px_4px_0px_0px_rgba(255,255,255,1)]'
               }`}
             >
-              <Play size={18} strokeWidth={3} />
+              <Play size={14} strokeWidth={3} />
               Start Video
             </button>
           </div>
           </div>
-        </div>
+      </div>
 
-        <div className="p-4 md:p-6 space-y-6">
-          <VideoPreviewCompare puzzles={puzzles} settings={settings} heightStyle={livePreviewHeightStyle} />
-
-          <section className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5">
-            <div className="grid grid-cols-2 lg:grid-cols-6 gap-2">
-              {([
-                { value: 'package', label: 'Package' },
-                { value: 'theme', label: 'Theme' },
-                { value: 'text', label: 'Text' },
-                { value: 'motion', label: 'Motion' },
-                { value: 'layout', label: 'Layout' },
-                { value: 'export', label: 'Export' }
-              ] as Array<{ value: PanelTab; label: string }>).map((tab) => (
-                <button
-                  key={tab.value}
-                  type="button"
-                  onClick={() => setActiveTab(tab.value)}
-                  className={`py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                    activeTab === tab.value
-                      ? 'bg-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
-                      : 'bg-white hover:bg-slate-100'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-          </section>
+      <div className="min-h-0 flex-1 overflow-hidden">
+          <VideoPreviewCompare
+            puzzles={puzzles}
+            settings={settings}
+            heightStyle={livePreviewHeightStyle}
+            activeTab={activeTab}
+            onSelectTab={setActiveTab}
+            activeVideoPackageId={activeVideoPackageId}
+            packageOptions={previewPackageOptions}
+            onSelectVideoPackage={onSelectVideoPackage}
+            themeOptions={previewThemeOptions}
+            onVisualStyleChange={(style) => updateSetting('visualStyle', style)}
+            onShowProgressChange={(show) => updateSetting('showProgress', show)}
+            onGeneratedProgressEnabledChange={(enabled) => updateSetting('generatedProgressEnabled', enabled)}
+            selectedStyleLabel={selectedStyleOption.label}
+            selectedProgressStyleLabel={selectedProgressStyleOption.label}
+            selectedProgressMotionLabel={selectedProgressMotionOption.label}
+          >
 
           {activeTab === 'package' && (
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <div className="space-y-6">
-                <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <Film size={20} strokeWidth={3} />
-                    <h3 className="text-lg font-black uppercase">Package Library</h3>
-                  </div>
+            <div className="space-y-4">
+              <div className="space-y-4">
+                <div className="space-y-3 border-b border-black/15 pb-4">
+                  <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-600">Package</div>
 
-                  <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4">
-                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto_auto]">
-                      <label className="block lg:col-span-1">
-                        <span className="block text-[10px] font-black uppercase text-slate-600">Active Package</span>
-                        <select
-                          value={activeVideoPackageId}
-                          onChange={(event) => onSelectVideoPackage(event.target.value)}
-                          className="mt-1 w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
-                        >
-                          {videoPackages.map((videoPackage) => (
-                            <option key={videoPackage.id} value={videoPackage.id}>
-                              {videoPackage.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <button
-                        type="button"
-                        onClick={onCreateVideoPackage}
-                        className="rounded-xl border-2 border-black bg-[#A7F3D0] px-4 py-3 text-[10px] font-black uppercase hover:bg-[#86EFAC]"
-                      >
-                        New
-                      </button>
-                      <button
-                        type="button"
-                        onClick={onDuplicateVideoPackage}
-                        className="rounded-xl border-2 border-black bg-[#DBEAFE] px-4 py-3 text-[10px] font-black uppercase hover:bg-[#BFDBFE]"
-                      >
-                        Duplicate
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => selectedVideoPackage && onRenameVideoPackage(selectedVideoPackage.id)}
-                        disabled={!selectedVideoPackage}
-                        className={`rounded-xl border-2 border-black px-4 py-3 text-[10px] font-black uppercase ${
-                          selectedVideoPackage ? 'bg-[#FDE68A] hover:bg-[#FCD34D]' : 'bg-slate-200 text-slate-500'
-                        }`}
-                      >
-                        Rename
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => selectedVideoPackage && onDeleteVideoPackage(selectedVideoPackage.id)}
-                        disabled={!selectedVideoPackage || selectedVideoPackage.id === 'video-package-default'}
-                        className={`rounded-xl border-2 border-black px-4 py-3 text-[10px] font-black uppercase ${
-                          selectedVideoPackage && selectedVideoPackage.id !== 'video-package-default'
-                            ? 'bg-[#FECACA] hover:bg-[#FCA5A5]'
-                            : 'bg-slate-200 text-slate-500'
-                        }`}
-                      >
-                        Delete
-                      </button>
-                    </div>
-
-                    <div className="mt-3 rounded-xl border-2 border-black bg-white px-3 py-2 text-[10px] font-bold uppercase text-slate-600">
-                      Every change in Video Mode autosaves into the selected package. Each package also keeps a separate layout snapshot for every aspect ratio.
-                    </div>
-                  </div>
-
-                  <div className="p-4 border-2 border-black rounded-xl bg-[#FFFDF8]">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <div className="text-[10px] font-black uppercase text-slate-600">Current Package</div>
-                        <div className="text-lg font-black uppercase leading-none mt-1">
-                          {selectedVideoPackage?.name ?? 'Video Package'}
-                        </div>
-                        <div className="text-[10px] font-bold uppercase text-slate-600 mt-2">
-                          Base template: {selectedPackagePreset.label}. Preferred ratio: {selectedVideoPackage?.preferredAspectRatio ?? settings.aspectRatio}.
-                        </div>
-                      </div>
-                      <span className="px-3 py-1 rounded-full border-2 border-black bg-white text-[10px] font-black uppercase">
-                        {selectedVideoPackage?.id === 'video-package-default' ? 'Default Package' : 'User Package'}
-                      </span>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <div className="p-3 border-2 border-black rounded-xl bg-white">
-                        <div className="text-[10px] font-black uppercase text-slate-600">Template</div>
-                        <div className="text-xs font-black uppercase mt-1">{selectedPackagePreset.label}</div>
-                      </div>
-                      <div className="p-3 border-2 border-black rounded-xl bg-white">
-                        <div className="text-[10px] font-black uppercase text-slate-600">Theme</div>
-                        <div className="text-xs font-black uppercase mt-1">{selectedStyleOption.label}</div>
-                      </div>
-                      <div className="p-3 border-2 border-black rounded-xl bg-white">
-                        <div className="text-[10px] font-black uppercase text-slate-600">Progress</div>
-                        <div className="text-xs font-black uppercase mt-1">{selectedProgressStyleOption.label}</div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {selectedPackagePreset.recommendedAspectRatios.map((ratio) => (
-                        <span
-                          key={ratio}
-                          className="px-2 py-1 rounded-full border-2 border-black bg-white text-[10px] font-black uppercase"
-                        >
-                          {ratio}
-                        </span>
+                  <label className="block">
+                    <span className="block text-[10px] font-black uppercase text-slate-600">Active</span>
+                    <select
+                      value={activeVideoPackageId}
+                      onChange={(event) => onSelectVideoPackage(event.target.value)}
+                      className={`mt-1 ${workspaceSelectClass}`}
+                    >
+                      {videoPackages.map((videoPackage) => (
+                        <option key={videoPackage.id} value={videoPackage.id}>
+                          {videoPackage.name}
+                        </option>
                       ))}
-                      <span className="px-2 py-1 rounded-full border-2 border-black bg-[#FFE9A8] text-[10px] font-black uppercase">
-                        Theme: {selectedStyleOption.label}
-                      </span>
-                      <span className="px-2 py-1 rounded-full border-2 border-black bg-[#E0F2FE] text-[10px] font-black uppercase">
-                        Reveal: {selectedRevealBehaviorOption.label}
-                      </span>
-                      <span className="px-2 py-1 rounded-full border-2 border-black bg-[#DCFCE7] text-[10px] font-black uppercase">
-                        Timer: {settings.showTimer ? 'On' : 'Off'}
-                      </span>
-                      <span className="px-2 py-1 rounded-full border-2 border-black bg-[#DBEAFE] text-[10px] font-black uppercase">
-                        Progress: {settings.showProgress ? 'On' : 'Off'}
-                      </span>
-                    </div>
+                    </select>
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={onCreateVideoPackage}
+                      className="rounded-xl border-2 border-black bg-[#A7F3D0] px-3 py-2 text-[10px] font-black uppercase hover:bg-[#86EFAC]"
+                    >
+                      New
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onDuplicateVideoPackage}
+                      className="rounded-xl border-2 border-black bg-[#DBEAFE] px-3 py-2 text-[10px] font-black uppercase hover:bg-[#BFDBFE]"
+                    >
+                      Duplicate
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectedVideoPackage && onRenameVideoPackage(selectedVideoPackage.id)}
+                      disabled={!selectedVideoPackage}
+                      className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                        selectedVideoPackage ? 'bg-[#FDE68A] hover:bg-[#FCD34D]' : 'bg-slate-200 text-slate-500'
+                      }`}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectedVideoPackage && onDeleteVideoPackage(selectedVideoPackage.id)}
+                      disabled={!selectedVideoPackage || selectedVideoPackage.id === 'video-package-default'}
+                      className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                        selectedVideoPackage && selectedVideoPackage.id !== 'video-package-default'
+                          ? 'bg-[#FECACA] hover:bg-[#FCA5A5]'
+                          : 'bg-slate-200 text-slate-500'
+                      }`}
+                    >
+                      Delete
+                    </button>
                   </div>
 
-                  <div className="space-y-3">
-                    <div className="text-xs font-black uppercase">Base Template</div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {(
-                        Object.entries(VIDEO_PACKAGE_PRESETS) as Array<
-                          [VideoSettings['videoPackagePreset'], (typeof VIDEO_PACKAGE_PRESETS)[VideoSettings['videoPackagePreset']]]
-                        >
-                      ).map(([presetKey, preset]) => {
-                        const isSelected = settings.videoPackagePreset === presetKey;
-                        return (
-                          <button
-                            key={presetKey}
-                            type="button"
-                            onClick={() => applyVideoPackagePreset(presetKey)}
-                            className={`p-3 border-2 border-black rounded-xl text-left ${
-                              isSelected
-                                ? 'bg-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
-                                : 'bg-white hover:bg-slate-50'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="font-black uppercase text-sm">{preset.label}</div>
-                              <span className="text-[9px] font-black uppercase px-2 py-1 rounded-full border-2 border-black bg-white">
-                                {isSelected ? 'Active' : 'Use'}
-                              </span>
-                            </div>
-                            <div className="text-[10px] font-bold uppercase text-slate-600 mt-2">{preset.description}</div>
-                            <div className="mt-3 grid grid-cols-1 gap-1 text-[10px] font-black uppercase text-slate-700">
-                              <div>Images: {preset.layoutSummary.images}</div>
-                              <div>Title: {preset.layoutSummary.title}</div>
-                              <div>Timer: {preset.layoutSummary.timer}</div>
-                            </div>
-                          </button>
-                        );
-                      })}
+                  <div className="space-y-2 border-t border-black/15 pt-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-black uppercase text-slate-600">Ratio</div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('layout')}
+                        className="rounded-full border border-black px-2.5 py-1 text-[9px] font-black uppercase hover:bg-slate-100"
+                      >
+                        Layout
+                      </button>
                     </div>
-                  </div>
-
-                </div>
-
-                <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <Clock size={20} strokeWidth={3} />
-                    <h3 className="text-lg font-black uppercase">Package Progress</h3>
-                  </div>
-
-                  <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4 space-y-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-xs font-black uppercase">Progress Visibility</div>
-                        <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                          This saves directly into the active package and affects preview plus export.
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        {[
-                          { value: true, label: 'Show' },
-                          { value: false, label: 'Hide' }
-                        ].map((option) => (
-                          <button
-                            key={option.label}
-                            type="button"
-                            onClick={() => updateSetting('showProgress', option.value)}
-                            className={`rounded-xl border-2 border-black px-4 py-2 text-[10px] font-black uppercase ${
-                              settings.showProgress === option.value
-                                ? 'bg-[#A7F3D0] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
-                                : 'bg-white hover:bg-slate-100'
-                            }`}
-                          >
-                            {option.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {renderModuleGenerator(
-                      'Progress Bar',
-                      settings.progressStyle,
-                      VIDEO_PROGRESS_STYLE_OPTIONS,
-                      (value) => updateSetting('progressStyle', value),
-                      () => updateSetting('progressStyle', pickGeneratedValue(settings.progressStyle, VIDEO_PROGRESS_STYLE_OPTIONS, 53, ['package']))
-                    )}
-
-                    <div className="flex flex-wrap gap-2">
-                      <span className="rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase">
-                        {selectedProgressStyleOption.label}
-                      </span>
-                      <span className="rounded-full border-2 border-black bg-[#DBEAFE] px-3 py-1 text-[10px] font-black uppercase">
-                        {settings.showProgress ? 'Visible' : 'Hidden'}
-                      </span>
-                    </div>
-
-                    <div className="rounded-xl border-2 border-black bg-white px-3 py-2 text-[10px] font-bold uppercase text-slate-600">
-                      Progress phrase for `Text Fill` still comes from the Text tab and is saved into this same package.
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <Layout size={20} strokeWidth={3} />
-                    <h3 className="text-lg font-black uppercase">Canvas Layout</h3>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-black uppercase mb-2">Aspect Ratio</label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 gap-2">
                       {ASPECT_RATIO_OPTIONS.map((ratio) => (
                         <button
                           key={ratio.value}
                           type="button"
                           onClick={() => onAspectRatioChange(ratio.value)}
-                          className={`p-3 border-2 border-black rounded-xl text-left ${
-                            settings.aspectRatio === ratio.value
-                              ? 'bg-[#4ECDC4] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
-                              : 'bg-white hover:bg-slate-50'
+                          className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                            settings.aspectRatio === ratio.value ? 'bg-[#4ECDC4]' : 'bg-white hover:bg-slate-50'
                           }`}
                         >
-                          <div className="flex items-center gap-2">
-                            <ratio.icon size={16} strokeWidth={2.8} />
-                            <span className="font-black text-sm">{ratio.label}</span>
-                          </div>
-                          <div className="text-[10px] font-bold uppercase text-slate-700 mt-1">{ratio.subLabel}</div>
+                          {ratio.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-600">Package Progress</div>
+
+                  <div className="space-y-1.5">
+                    <div className="text-[10px] font-black uppercase text-slate-600">Visibility</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { value: true, label: 'On' },
+                        { value: false, label: 'Off' }
+                      ].map((option) => (
+                        <button
+                          key={option.label}
+                          type="button"
+                          onClick={() => updateSetting('showProgress', option.value)}
+                          className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                            settings.showProgress === option.value ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                          }`}
+                        >
+                          {option.label}
                         </button>
                       ))}
                     </div>
                   </div>
 
-                  <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF] text-[10px] font-bold uppercase text-slate-700">
-                    Switching ratio loads the saved layout snapshot for that ratio inside the active package. If no custom snapshot exists yet, the package falls back to its current base template.
+                  <div className="space-y-1.5 border-t border-black/15 pt-3">
+                    <div className="text-[10px] font-black uppercase text-slate-600">Source</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => updateSetting('generatedProgressEnabled', false)}
+                        className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                          !settings.generatedProgressEnabled ? 'bg-[#DBEAFE]' : 'bg-white hover:bg-slate-100'
+                        }`}
+                      >
+                        Package
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateSetting('generatedProgressEnabled', true)}
+                        className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                          settings.generatedProgressEnabled ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                        }`}
+                      >
+                        Generated
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 border-t border-black/15 pt-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-black uppercase text-slate-600">Progress Bar</div>
+                      {settings.generatedProgressEnabled ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSetting(
+                              'progressStyle',
+                              pickGeneratedValue(settings.progressStyle, VIDEO_PROGRESS_STYLE_OPTIONS, 53, ['package'])
+                            )
+                          }
+                          className="rounded-full border border-black bg-[#FFF2B3] px-2.5 py-1 text-[9px] font-black uppercase hover:bg-[#FDE68A]"
+                        >
+                          Generate
+                        </button>
+                      ) : null}
+                    </div>
+                    <select
+                      value={settings.progressStyle}
+                      onChange={(event) => updateSetting('progressStyle', event.target.value as VideoSettings['progressStyle'])}
+                      className={workspaceSelectClass}
+                    >
+                      {VIDEO_PROGRESS_STYLE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {settings.generatedProgressEnabled ? (
+                    <div className="space-y-3 border-t border-black/15 pt-3">
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-black uppercase text-slate-600">Generated Theme</div>
+                        <select
+                          value={settings.generatedProgressStyle}
+                          onChange={(event) =>
+                            updateSetting('generatedProgressStyle', event.target.value as VideoSettings['generatedProgressStyle'])
+                          }
+                          className={workspaceSelectClass}
+                        >
+                          {GENERATED_PROGRESS_STYLE_OPTIONS.map((style) => (
+                            <option key={style} value={style}>
+                              {formatGeneratedProgressStyleLabel(style)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-black uppercase text-slate-600">Generated Type</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[
+                            { value: 'bar' as const, label: 'Bar' },
+                            { value: 'text_fill' as const, label: 'Text Fill' }
+                          ].map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => updateSetting('generatedProgressRenderMode', option.value)}
+                              className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                                settings.generatedProgressRenderMode === option.value ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                              }`}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="space-y-1.5 border-t border-black/15 pt-3">
+                    <div className="text-[10px] font-black uppercase text-slate-600">Motion</div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {VIDEO_PROGRESS_MOTION_OPTIONS.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => updateSetting('progressMotion', option.value)}
+                          className={`rounded-xl border-2 border-black px-2 py-2 text-[8px] font-black uppercase ${
+                            settings.progressMotion === option.value ? 'bg-[#FDE68A]' : 'bg-white hover:bg-slate-100'
+                          }`}
+                          title={option.hint}
+                        >
+                          {option.label}
+                        </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 border-t border-black/15 pt-3">
+                      <div className="text-[10px] font-black uppercase text-slate-600">Logo</div>
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-lg border-2 border-black bg-white">
+                          {processedLogoSrc ? (
+                            <img
+                              src={processedLogoSrc}
+                              alt="Logo preview"
+                              className="h-full w-full object-contain"
+                            />
+                          ) : (
+                            <ImageIcon size={18} className="text-slate-300" />
+                          )}
+                        </div>
+                        <div className="flex flex-1 flex-wrap gap-2">
+                          <label className="cursor-pointer rounded-lg border-2 border-black bg-black px-3 py-2 text-[10px] font-black uppercase text-white hover:bg-slate-800">
+                            Upload
+                            <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
+                          </label>
+                          {settings.logo ? (
+                            <button
+                              type="button"
+                              onClick={() => updateSetting('logo', undefined)}
+                              className="rounded-lg border-2 border-black bg-white px-3 py-2 text-[10px] font-black uppercase hover:bg-red-50"
+                            >
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                      {settings.logo ? (
+                        <div>
+                          <div className="flex justify-between text-[10px] font-black uppercase">
+                            <span>Zoom</span>
+                            <span>{logoZoom.toFixed(2)}x</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0.5"
+                            max="4"
+                            step="0.05"
+                            {...buildDeferredSliderHandlers('logoZoom')}
+                            className={`${sliderClass} mt-2`}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-2 border-t border-black/15 pt-3">
+                      <div className="text-[10px] font-black uppercase text-slate-600">Intro Clip</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label className="cursor-pointer rounded-lg border-2 border-black bg-white px-3 py-2 text-[10px] font-black uppercase hover:bg-slate-100">
+                          Upload
+                          <input type="file" accept="video/*" onChange={handleIntroVideoUpload} className="hidden" />
+                        </label>
+                        {introClipActive ? (
+                          <button
+                            type="button"
+                            onClick={clearIntroVideo}
+                            className="rounded-lg border-2 border-black bg-white px-3 py-2 text-[10px] font-black uppercase hover:bg-red-50"
+                          >
+                            Remove
+                          </button>
+                        ) : null}
+                        {introClipActive && introClipDuration > 0 ? (
+                          <span className="rounded-full border border-black px-2 py-1 text-[9px] font-black uppercase">
+                            {introClipDuration.toFixed(2)}s
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-
-              <div className="space-y-6">
-                <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <Eye size={20} strokeWidth={3} />
-                    <h3 className="text-lg font-black uppercase">Package Guide</h3>
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="p-3 border-2 border-black rounded-xl bg-[#FFF5CC]">
-                      <div className="text-xs font-black uppercase">What A Package Owns</div>
-                      <div className="text-[10px] font-bold uppercase text-slate-600 mt-1">
-                        Theme, copy, timer and progress styles, motion cards, timing, reveal behavior, logo, backgrounds, image outlines, and per-ratio layouts.
-                      </div>
-                    </div>
-                    <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF]">
-                      <div className="text-xs font-black uppercase">How Autosave Works</div>
-                      <div className="text-[10px] font-bold uppercase text-slate-600 mt-1">
-                        Edit any tab and the active package updates immediately. Selecting another package restores its own full setup.
-                      </div>
-                    </div>
-                    <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF]">
-                      <div className="text-xs font-black uppercase">Need Pixel Control?</div>
-                      <div className="text-[10px] font-bold uppercase text-slate-600 mt-1">
-                        Use the layout tab after picking the closest base template. That fine tuning also gets stored back into the active package.
-                      </div>
-                    </div>
-                    {selectedVideoPackage ? (
-                      <div className="p-3 border-2 border-black rounded-xl bg-[#ECFEFF]">
-                        <div className="text-xs font-black uppercase">Active Snapshot</div>
-                        <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                          Last used {new Date(selectedVideoPackage.lastUsedAt).toLocaleString()}.
-                        </div>
-                        <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                          Updated {new Date(selectedVideoPackage.updatedAt).toLocaleString()}.
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('layout')}
-                    className="w-full px-4 py-3 rounded-xl border-2 border-black bg-white hover:bg-slate-100 text-xs font-black uppercase"
-                  >
-                    Open Layout Designer
-                  </button>
-                </div>
-              </div>
             </div>
           )}
 
@@ -1620,6 +1696,43 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   <button type="button" onClick={handleSaveCustomLayout} className="px-2 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase bg-white hover:bg-slate-100">Save</button>
                   <button type="button" onClick={handleLoadCustomLayout} className="px-2 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase bg-white hover:bg-slate-100">Load</button>
                   <button type="button" onClick={handleResetCustomLayout} className="px-2 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase bg-white hover:bg-red-50">Reset</button>
+                </div>
+
+                <div className="rounded-2xl border-2 border-black bg-[#FFFDF8] p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs font-black uppercase">Image Panel Outline</div>
+                    <input
+                      type="color"
+                      value={settings.imagePanelOutlineColor}
+                      onChange={(event) => updateSetting('imagePanelOutlineColor', event.target.value)}
+                      className="h-10 w-16 rounded-lg border-2 border-black bg-white p-1"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-xs font-black uppercase">
+                      <span>Thickness</span>
+                      <span>{getDeferredSliderValue('imagePanelOutlineThickness')}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="24"
+                      step="1"
+                      {...buildDeferredSliderHandlers('imagePanelOutlineThickness')}
+                      className="mt-2 h-3 w-full rounded-full border-2 border-black accent-black"
+                    />
+                  </div>
+                  <div className="grid grid-cols-6 gap-2">
+                    {IMAGE_PANEL_OUTLINE_SWATCHES.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        onClick={() => updateSetting('imagePanelOutlineColor', color)}
+                        className={`h-8 rounded-lg border-2 border-black ${settings.imagePanelOutlineColor === color ? 'ring-2 ring-slate-500 ring-offset-2' : ''}`}
+                        style={{ backgroundColor: color }}
+                      />
+                    ))}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -1656,85 +1769,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                     </button>
                     {layoutPanels.logo && (
                       <div className="mt-3 space-y-3">
-                        <div className="text-[10px] font-bold uppercase text-slate-600">
-                          Works when a brand logo is uploaded. Adjusting these values turns on custom layout.
-                        </div>
                         <div><div className="flex justify-between text-xs font-black"><span>Logo X</span><span>{Math.round(customLayout.logoLeft)}</span></div><input type="range" min="0" max={String(previewStage.width)} value={customLayout.logoLeft} onChange={(event) => updateCustomLayout({ logoLeft: Number(event.target.value) })} className={sliderClass} /></div>
                         <div><div className="flex justify-between text-xs font-black"><span>Logo Y</span><span>{Math.round(customLayout.logoTop)}</span></div><input type="range" min="0" max="300" value={customLayout.logoTop} onChange={(event) => updateCustomLayout({ logoTop: Number(event.target.value) })} className={sliderClass} /></div>
                         <div><div className="flex justify-between text-xs font-black"><span>Logo Size</span><span>{Math.round(customLayout.logoSize)}</span></div><input type="range" min="12" max="240" value={customLayout.logoSize} onChange={(event) => updateCustomLayout({ logoSize: Number(event.target.value) })} className={sliderClass} /></div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="p-3 border-2 border-black rounded-lg bg-[#FFFDF8]">
-                    <button
-                      type="button"
-                      onClick={() => toggleLayoutPanel('imagePanels')}
-                      aria-expanded={layoutPanels.imagePanels}
-                      className="w-full flex items-center justify-between gap-2"
-                    >
-                      <span className="text-[10px] font-black uppercase text-slate-600">Image Panels</span>
-                      <span className="text-[10px] font-black uppercase text-slate-700">{layoutPanels.imagePanels ? 'Hide' : 'Show'}</span>
-                    </button>
-                    {layoutPanels.imagePanels && (
-                      <div className="mt-3 space-y-3">
-                        <div className="rounded-xl border-2 border-black bg-white p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="text-xs font-black uppercase">Outline</div>
-                              <div className="text-[10px] font-bold uppercase text-slate-600 mt-1">
-                                Shared stroke around both puzzle panels in preview and export.
-                              </div>
-                            </div>
-                            <div
-                              className="h-12 w-16 rounded-xl bg-[#F8FDFF]"
-                              style={{
-                                boxShadow:
-                                  settings.imagePanelOutlineThickness > 0
-                                    ? `inset 0 0 0 ${settings.imagePanelOutlineThickness}px ${settings.imagePanelOutlineColor}`
-                                    : undefined
-                              }}
-                            />
-                          </div>
-                        </div>
-                        <div>
-                          <div className="flex justify-between text-xs font-black">
-                            <span>Thickness</span>
-                            <span>{settings.imagePanelOutlineThickness}px</span>
-                          </div>
-                          <input
-                            type="range"
-                            min="0"
-                            max="24"
-                            step="1"
-                            value={settings.imagePanelOutlineThickness}
-                            onChange={(event) => updateSetting('imagePanelOutlineThickness', Number(event.target.value))}
-                            className={sliderClass}
-                          />
-                        </div>
-                        <div className="grid grid-cols-6 gap-2">
-                          {IMAGE_PANEL_OUTLINE_SWATCHES.map((color) => (
-                            <button
-                              key={color}
-                              type="button"
-                              onClick={() => updateSetting('imagePanelOutlineColor', color)}
-                              className={`h-9 rounded-xl border-2 border-black ${settings.imagePanelOutlineColor === color ? 'ring-2 ring-slate-500 ring-offset-2' : ''}`}
-                              style={{ backgroundColor: color }}
-                              aria-label={`Set image panel outline color to ${color}`}
-                            />
-                          ))}
-                        </div>
-                        <div className="grid grid-cols-[96px_minmax(0,1fr)] gap-2">
-                          <input
-                            type="color"
-                            value={settings.imagePanelOutlineColor}
-                            onChange={(event) => updateSetting('imagePanelOutlineColor', event.target.value)}
-                            className="h-11 w-full rounded-xl border-2 border-black bg-white p-1"
-                          />
-                          <div className="flex items-center rounded-xl border-2 border-black bg-white px-3 text-xs font-black uppercase tracking-wide text-slate-600">
-                            {settings.imagePanelOutlineColor}
-                          </div>
-                        </div>
                       </div>
                     )}
                   </div>
@@ -1779,7 +1816,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                       <div className="mt-3 space-y-3">
                         <div><div className="flex justify-between text-xs font-black"><span>Timer X</span><span>{Math.round(customLayout.timerLeft)}</span></div><input type="range" min="0" max={String(previewStage.width)} value={customLayout.timerLeft} onChange={(event) => updateCustomLayout({ timerLeft: Number(event.target.value) })} className={sliderClass} /></div>
                         <div><div className="flex justify-between text-xs font-black"><span>Timer Y</span><span>{Math.round(customLayout.timerTop)}</span></div><input type="range" min="0" max="300" value={customLayout.timerTop} onChange={(event) => updateCustomLayout({ timerTop: Number(event.target.value) })} className={sliderClass} /></div>
-                        <div><div className="flex justify-between text-xs font-black"><span>Timer Size</span><span>{Math.round(customLayout.timerFontSize)}</span></div><input type="range" min="10" max="96" value={customLayout.timerFontSize} onChange={(event) => updateCustomLayout({ timerFontSize: Number(event.target.value) })} className={sliderClass} /></div>
+                        <div><div className="flex justify-between text-xs font-black"><span>Timer Size</span><span>{Math.round(customLayout.timerFontSize)}</span></div><input type="range" min="0" max="96" value={customLayout.timerFontSize} onChange={(event) => updateCustomLayout({ timerFontSize: Number(event.target.value) })} className={sliderClass} /></div>
                         <div><div className="flex justify-between text-xs font-black"><span>Min Width</span><span>{Math.round(customLayout.timerMinWidth)}</span></div><input type="range" min="24" max={String(previewStage.width)} value={customLayout.timerMinWidth} onChange={(event) => updateCustomLayout({ timerMinWidth: Number(event.target.value) })} className={sliderClass} /></div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <div><div className="flex justify-between text-[10px] font-black"><span>Pad X</span><span>{Math.round(customLayout.timerPadX)}</span></div><input type="range" min="2" max="40" value={customLayout.timerPadX} onChange={(event) => updateCustomLayout({ timerPadX: Number(event.target.value) })} className={sliderClass} /></div>
@@ -1824,169 +1861,68 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
           )}
 
           {activeTab === 'theme' && (
-            <div className="grid grid-cols-1 xl:grid-cols-[0.95fr_1.05fr] gap-6">
-              <div className="space-y-6">
-                <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Palette size={20} strokeWidth={3} />
-                      <h3 className="text-lg font-black uppercase">Theme Foundation</h3>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={generateWholeVideoStyle}
-                      className="rounded-xl border-2 border-black bg-black px-4 py-2 text-[10px] font-black uppercase text-white hover:bg-slate-900"
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        <Sparkles size={14} />
-                        Generate Whole Style
-                      </span>
-                    </button>
-                  </div>
-
-                  <div className="rounded-xl border-2 border-black bg-[#F8FDFF] p-4">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <div className="text-[10px] font-black uppercase text-slate-600">Current Palette</div>
-                        <div className="mt-1 text-lg font-black uppercase leading-none">{selectedStyleOption.label}</div>
-                        <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">{selectedStyleOption.hint}</div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={resetStyleStackToPackage}
-                        className="rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase hover:bg-slate-100"
-                      >
-                        Reset To Package
-                      </button>
-                    </div>
-                    <div className="mt-3 h-2 overflow-hidden rounded-full border border-black bg-white">
-                      <div className="h-full" style={{ width: '72%', background: selectedStyleOption.meter }} />
-                    </div>
-                  </div>
-
-                  <div className="max-h-[420px] overflow-y-auto pr-1">
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {VISUAL_STYLE_OPTIONS.map((option) => renderStylePreviewTile(option))}
-                    </div>
-                  </div>
+            <div className="space-y-6">
+              <div className="space-y-4 border-b border-black/15 pb-4">
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={generateWholeVideoStyle}
+                    className="rounded-xl border-2 border-black bg-black px-3 py-2 text-[10px] font-black uppercase text-white hover:bg-slate-900"
+                  >
+                    Generate Style
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetStyleStackToPackage}
+                    className="rounded-xl border-2 border-black bg-white px-3 py-2 text-[10px] font-black uppercase hover:bg-slate-100"
+                  >
+                    Reset
+                  </button>
                 </div>
 
-                <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Layout size={20} strokeWidth={3} />
-                      <h3 className="text-lg font-black uppercase">UI Style Stack</h3>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={generateUiStack}
-                      className="rounded-xl border-2 border-black bg-black px-4 py-2 text-[10px] font-black uppercase text-white hover:bg-slate-900"
-                    >
-                      Generate UI Stack
-                    </button>
-                  </div>
+              </div>
 
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {renderModuleGenerator(
-                      'Text Style',
-                      settings.textStyle,
-                      VIDEO_TEXT_STYLE_OPTIONS,
-                      (value) => updateSetting('textStyle', value),
-                      () => updateSetting('textStyle', pickGeneratedValue(settings.textStyle, VIDEO_TEXT_STYLE_OPTIONS, 11, ['package']))
-                    )}
-                    {renderModuleGenerator(
-                      'Header Style',
-                      settings.headerStyle,
-                      VIDEO_HEADER_STYLE_OPTIONS,
-                      (value) => updateSetting('headerStyle', value),
-                      () => updateSetting('headerStyle', pickGeneratedValue(settings.headerStyle, VIDEO_HEADER_STYLE_OPTIONS, 23, ['package']))
-                    )}
-                    {renderModuleGenerator(
-                      'Timer Style',
-                      settings.timerStyle,
-                      VIDEO_TIMER_STYLE_OPTIONS,
-                      (value) => updateSetting('timerStyle', value),
-                      () => updateSetting('timerStyle', pickGeneratedValue(settings.timerStyle, VIDEO_TIMER_STYLE_OPTIONS, 37, ['package']))
-                    )}
-                    {renderModuleGenerator(
-                      'Progress Style',
-                      settings.progressStyle,
-                      VIDEO_PROGRESS_STYLE_OPTIONS,
-                      (value) => updateSetting('progressStyle', value),
-                      () => updateSetting('progressStyle', pickGeneratedValue(settings.progressStyle, VIDEO_PROGRESS_STYLE_OPTIONS, 53, ['package']))
-                    )}
-                  </div>
+              <div className="space-y-3 border-b border-black/15 pb-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-600">Style Stack</div>
+                  <button
+                    type="button"
+                    onClick={generateUiStack}
+                    className="rounded-full border border-black bg-[#FFF2B3] px-2.5 py-1 text-[9px] font-black uppercase hover:bg-[#FDE68A]"
+                  >
+                    Generate
+                  </button>
+                </div>
 
-                  <div className="rounded-2xl border-2 border-black bg-[#FFFDF8] p-4">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                      <div>
-                        <div className="text-xs font-black uppercase">Image Panel Outline</div>
-                        <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                          Shared outline around both puzzle images in preview and export.
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-2 lg:w-[300px]">
-                        <input
-                          type="color"
-                          value={settings.imagePanelOutlineColor}
-                          onChange={(event) => updateSetting('imagePanelOutlineColor', event.target.value)}
-                          className="h-11 w-full rounded-xl border-2 border-black bg-white p-1"
-                        />
-                        <div className="flex items-center rounded-xl border-2 border-black bg-white px-3 text-xs font-black uppercase tracking-wide text-slate-600">
-                          {settings.imagePanelOutlineColor}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_220px]">
-                      <div className="space-y-3">
-                        <div>
-                          <div className="flex justify-between text-xs font-black uppercase">
-                            <span>Thickness</span>
-                            <span>{settings.imagePanelOutlineThickness}px</span>
-                          </div>
-                          <input
-                            type="range"
-                            min="0"
-                            max="24"
-                            step="1"
-                            value={settings.imagePanelOutlineThickness}
-                            onChange={(event) => updateSetting('imagePanelOutlineThickness', Number(event.target.value))}
-                            className="mt-2 h-3 w-full rounded-full border-2 border-black accent-black"
-                          />
-                        </div>
-                        <div className="grid grid-cols-6 gap-2">
-                          {IMAGE_PANEL_OUTLINE_SWATCHES.map((color) => (
-                            <button
-                              key={color}
-                              type="button"
-                              onClick={() => updateSetting('imagePanelOutlineColor', color)}
-                              className={`h-9 rounded-xl border-2 border-black ${settings.imagePanelOutlineColor === color ? 'ring-2 ring-slate-500 ring-offset-2' : ''}`}
-                              style={{ backgroundColor: color }}
-                            />
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="rounded-2xl border-2 border-black p-3 bg-[#F8FDFF]">
-                        <div className="text-[10px] font-black uppercase text-slate-600">Panel Preview</div>
-                        <div className="mt-3 grid grid-cols-2 gap-3">
-                          {[0, 1].map((panelIndex) => (
-                            <div
-                              key={panelIndex}
-                              className="aspect-square rounded-2xl bg-white"
-                              style={{
-                                boxShadow:
-                                  settings.imagePanelOutlineThickness > 0
-                                    ? `inset 0 0 0 ${settings.imagePanelOutlineThickness}px ${settings.imagePanelOutlineColor}`
-                                    : undefined
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                <div className="space-y-3">
+                  {renderModuleGenerator(
+                    'Text Style',
+                    settings.textStyle,
+                    VIDEO_TEXT_STYLE_OPTIONS,
+                    (value) => updateSetting('textStyle', value),
+                    () => updateSetting('textStyle', pickGeneratedValue(settings.textStyle, VIDEO_TEXT_STYLE_OPTIONS, 11, ['package']))
+                  )}
+                  {renderModuleGenerator(
+                    'Header Style',
+                    settings.headerStyle,
+                    VIDEO_HEADER_STYLE_OPTIONS,
+                    (value) => updateSetting('headerStyle', value),
+                    () => updateSetting('headerStyle', pickGeneratedValue(settings.headerStyle, VIDEO_HEADER_STYLE_OPTIONS, 23, ['package']))
+                  )}
+                  {renderModuleGenerator(
+                    'Timer Style',
+                    settings.timerStyle,
+                    VIDEO_TIMER_STYLE_OPTIONS,
+                    (value) => updateSetting('timerStyle', value),
+                    () => updateSetting('timerStyle', pickGeneratedValue(settings.timerStyle, VIDEO_TIMER_STYLE_OPTIONS, 37, ['package']))
+                  )}
+                  {renderModuleGenerator(
+                    'Progress Style',
+                    settings.progressStyle,
+                    VIDEO_PROGRESS_STYLE_OPTIONS,
+                    (value) => updateSetting('progressStyle', value),
+                    () => updateSetting('progressStyle', pickGeneratedValue(settings.progressStyle, VIDEO_PROGRESS_STYLE_OPTIONS, 53, ['package']))
+                  )}
                 </div>
               </div>
 
@@ -2010,20 +1946,17 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   </div>
 
                   <div className="rounded-2xl border-2 border-black bg-[#FFFDF5] p-4">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
+                    <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
                         <div className="text-[10px] font-black uppercase text-slate-600">Selected Pack</div>
-                        <div className="mt-1 text-lg font-black uppercase leading-none text-slate-900">
+                        <div className="mt-1 break-words text-base font-black uppercase leading-[0.95] text-slate-900 sm:text-lg">
                           {selectedBackgroundPack?.name ?? 'No pack selected'}
-                        </div>
-                        <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">
-                          Decorative animated scenes behind the puzzle panels.
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={() => updateSetting('generatedBackgroundsEnabled', !settings.generatedBackgroundsEnabled)}
-                        className={`rounded-full border-2 border-black px-3 py-1 text-[10px] font-black uppercase ${
+                        className={`self-start rounded-full border-2 border-black px-3 py-1 text-[10px] font-black uppercase ${
                           settings.generatedBackgroundsEnabled ? 'bg-[#A7F3D0]' : 'bg-white'
                         }`}
                       >
@@ -2031,8 +1964,8 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                       </button>
                     </div>
 
-                    <div className="mt-4 grid gap-4 lg:grid-cols-[180px_1fr]">
-                      <div className="overflow-hidden rounded-2xl border-2 border-black bg-slate-100">
+                    <div className="mt-4 space-y-4">
+                      <div className="mx-auto w-full max-w-[340px] overflow-hidden rounded-2xl border-2 border-black bg-slate-100">
                         {backgroundPackPreview ? (
                           <div className="aspect-video">
                             <GeneratedBackgroundCanvas spec={backgroundPackPreview} className="h-full w-full" animate />
@@ -2044,101 +1977,125 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                         )}
                       </div>
 
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <label className="space-y-2">
-                          <span className="text-[10px] font-black uppercase text-slate-600">Pack</span>
-                          <select
-                            value={selectedBackgroundPack?.id ?? ''}
-                            onChange={(event) => updateSetting('generatedBackgroundPackId', event.target.value)}
-                            className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
-                          >
-                            {availableBackgroundPacks.map((pack) => (
-                              <option key={pack.id} value={pack.id}>
-                                {pack.name} ({pack.backgrounds.length})
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                      <div className="grid min-w-0 gap-4">
+                        <div className="rounded-2xl border-2 border-black bg-white p-3">
+                          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Playback</div>
+                          <div className="mt-3 grid min-w-0 gap-3">
+                            <label className="min-w-0 space-y-2">
+                              <span className="text-[10px] font-black uppercase text-slate-600">Pack</span>
+                              <select
+                                value={selectedBackgroundPack?.id ?? ''}
+                                onChange={(event) => updateSetting('generatedBackgroundPackId', event.target.value)}
+                                className={workspaceSelectClass}
+                              >
+                                {availableBackgroundPacks.map((pack) => (
+                                  <option key={pack.id} value={pack.id}>
+                                    {pack.name} ({pack.backgrounds.length})
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
 
-                        <label className="space-y-2">
-                          <span className="text-[10px] font-black uppercase text-slate-600">Shuffle Seed</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={9999}
-                            value={settings.generatedBackgroundShuffleSeed}
-                            onChange={(event) =>
-                              updateSetting(
-                                'generatedBackgroundShuffleSeed',
-                                Math.max(1, Math.min(9999, Number(event.target.value) || 1))
-                              )
-                            }
-                            className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
-                          />
-                        </label>
+                            <label className="min-w-0 space-y-2">
+                              <span className="text-[10px] font-black uppercase text-slate-600">Shuffle Seed</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={9999}
+                                value={settings.generatedBackgroundShuffleSeed}
+                                onChange={(event) =>
+                                  updateSetting(
+                                    'generatedBackgroundShuffleSeed',
+                                    Math.max(1, Math.min(9999, Number(event.target.value) || 1))
+                                  )
+                                }
+                                className="min-w-0 w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
+                              />
+                            </label>
 
-                        <label className="space-y-2">
-                          <span className="text-[10px] font-black uppercase text-slate-600">New Pack Name</span>
-                          <input
-                            type="text"
-                            value={packName}
-                            onChange={(event) => setPackName(event.target.value)}
-                            className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
-                          />
-                        </label>
-
-                        <label className="space-y-2">
-                          <span className="text-[10px] font-black uppercase text-slate-600">Aspect Ratio</span>
-                          <select
-                            value={packAspectRatio}
-                            onChange={(event) => setPackAspectRatio(event.target.value as VideoSettings['aspectRatio'])}
-                            className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
-                          >
-                            {ASPECT_RATIOS.map((ratio) => (
-                              <option key={ratio} value={ratio}>
-                                {ratio}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-
-                        <label className="space-y-2">
-                          <span className="text-[10px] font-black uppercase text-slate-600">Motif Blend</span>
-                          <select
-                            value={motifFocus}
-                            onChange={(event) => setMotifFocus(event.target.value as MotifFocus)}
-                            className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
-                          >
-                            {MOTIF_FOCUS_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-
-                        <label className="space-y-2">
-                          <span className="text-[10px] font-black uppercase text-slate-600">Palette Focus</span>
-                          <select
-                            value={paletteFocus}
-                            onChange={(event) => setPaletteFocus(event.target.value as PaletteFocus)}
-                            className="w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
-                          >
-                            {PALETTE_FOCUS_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-
-                        <div className="rounded-xl border-2 border-black bg-[#F8FDFF] p-3 text-[10px] font-bold uppercase text-slate-600 sm:col-span-2">
-                          {selectedBackgroundPack
-                            ? `${selectedBackgroundPack.backgrounds.length} animated backgrounds ready for deterministic per-puzzle rotation.`
-                            : 'Create a pack here to start using generated backgrounds.'}
+                            <label className="min-w-0 space-y-2">
+                              <span className="text-[10px] font-black uppercase text-slate-600">Coverage</span>
+                              <select
+                                value={settings.generatedBackgroundCoverage}
+                                onChange={(event) =>
+                                  updateSetting(
+                                    'generatedBackgroundCoverage',
+                                    event.target.value as VideoSettings['generatedBackgroundCoverage']
+                                  )
+                                }
+                                className={workspaceSelectClass}
+                              >
+                                {GENERATED_BACKGROUND_COVERAGE_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
                         </div>
 
-                        <div className="grid gap-3 sm:col-span-2 sm:grid-cols-3">
+                        <div className="rounded-2xl border-2 border-black bg-white p-3">
+                          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Pack Builder</div>
+                          <div className="mt-3 grid min-w-0 gap-3">
+                            <label className="min-w-0 space-y-2">
+                              <span className="text-[10px] font-black uppercase text-slate-600">New Pack Name</span>
+                              <input
+                                type="text"
+                                value={packName}
+                                onChange={(event) => setPackName(event.target.value)}
+                                className="min-w-0 w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
+                              />
+                            </label>
+
+                            <label className="min-w-0 space-y-2">
+                              <span className="text-[10px] font-black uppercase text-slate-600">Aspect Ratio</span>
+                              <select
+                                value={packAspectRatio}
+                                onChange={(event) => setPackAspectRatio(event.target.value as VideoSettings['aspectRatio'])}
+                                className={workspaceSelectClass}
+                              >
+                                {ASPECT_RATIOS.map((ratio) => (
+                                  <option key={ratio} value={ratio}>
+                                    {ratio}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+
+                            <label className="min-w-0 space-y-2">
+                              <span className="text-[10px] font-black uppercase text-slate-600">Motif Blend</span>
+                              <select
+                                value={motifFocus}
+                                onChange={(event) => setMotifFocus(event.target.value as MotifFocus)}
+                                className={workspaceSelectClass}
+                              >
+                                {MOTIF_FOCUS_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+
+                            <label className="min-w-0 space-y-2">
+                              <span className="text-[10px] font-black uppercase text-slate-600">Palette Focus</span>
+                              <select
+                                value={paletteFocus}
+                                onChange={(event) => setPaletteFocus(event.target.value as PaletteFocus)}
+                                className={workspaceSelectClass}
+                              >
+                                {PALETTE_FOCUS_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3">
                           <button
                             type="button"
                             onClick={handleGeneratePack}
@@ -2161,246 +2118,58 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                           >
                             Rename Pack
                           </button>
+                          <button
+                            type="button"
+                            onClick={handleDeleteSelectedPack}
+                            disabled={!selectedBackgroundPack}
+                            className="rounded-xl border-2 border-black bg-[#FECACA] px-3 py-3 text-xs font-black uppercase hover:bg-[#FCA5A5] disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Delete Selected Pack
+                          </button>
                         </div>
-
-                        <button
-                          type="button"
-                          onClick={handleDeleteSelectedPack}
-                          disabled={!selectedBackgroundPack}
-                          className="rounded-xl border-2 border-black bg-[#FECACA] px-3 py-3 text-xs font-black uppercase hover:bg-[#FCA5A5] disabled:cursor-not-allowed disabled:opacity-50 sm:col-span-2"
-                        >
-                          Delete Selected Pack
-                        </button>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <ImageIcon size={20} strokeWidth={3} />
-                    <h3 className="text-lg font-black uppercase">Branding</h3>
-                  </div>
-
-                  <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF] flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-                    <div className="relative w-16 h-16 border-2 border-black rounded-lg bg-white flex items-center justify-center overflow-visible">
-                      {settings.logo ? (
-                        <div
-                          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-                          style={{
-                            width: `${Math.max(1, Math.round(64 * logoZoom))}px`,
-                            height: `${Math.max(1, Math.round(64 * logoZoom))}px`
-                          }}
-                        >
-                          <img
-                            src={processedLogoSrc ?? settings.logo}
-                            alt="Logo preview"
-                            className="block h-full w-full max-w-none object-contain"
-                          />
-                        </div>
-                      ) : (
-                        <ImageIcon size={26} className="text-slate-300" />
-                      )}
-                    </div>
-                    <div className="w-full flex-1">
-                      <label className="cursor-pointer inline-flex items-center gap-2 px-3 py-2 bg-black text-white rounded-lg text-xs font-black uppercase hover:bg-slate-800">
-                        <Upload size={14} />
-                        Upload Logo
-                        <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
-                      </label>
-                      <div className="text-[10px] font-bold uppercase text-slate-600 mt-2">Upload here, then fine-tune position and size in the Layout tab.</div>
-                    </div>
-                    {settings.logo && (
-                      <button
-                        type="button"
-                        onClick={() => updateSetting('logo', undefined)}
-                        className="px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase bg-white hover:bg-red-50"
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="p-3 border-2 border-black rounded-xl bg-[#FFF5CC]">
-                      <div className="flex justify-between text-xs font-black uppercase">
-                        <span>Logo Zoom</span>
-                        <span>{logoZoom.toFixed(2)}x</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0.5"
-                        max="4"
-                        step="0.05"
-                        value={settings.logoZoom}
-                        onChange={(event) => updateSetting('logoZoom', Number(event.target.value))}
-                        className={`${sliderClass} mt-2`}
-                      />
-                      <div className="text-[10px] font-bold uppercase text-slate-600 mt-2">
-                        Scales the artwork inside the logo position box.
-                      </div>
-                    </div>
-
-                    <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF] space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-xs font-black uppercase">Chroma Key</div>
-                          <div className="text-[10px] font-bold uppercase text-slate-600 mt-1">
-                            Remove a solid color like green or blue from the logo.
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => updateSetting('logoChromaKeyEnabled', !settings.logoChromaKeyEnabled)}
-                          className={`px-3 py-2 border-2 border-black rounded-lg text-xs font-black uppercase ${
-                            settings.logoChromaKeyEnabled ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                          }`}
-                        >
-                          {settings.logoChromaKeyEnabled ? 'On' : 'Off'}
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-[auto_1fr] items-center gap-3">
-                        <label className="text-[10px] font-black uppercase">Key Color</label>
-                        <input
-                          type="color"
-                          value={settings.logoChromaKeyColor}
-                          onChange={(event) => updateSetting('logoChromaKeyColor', event.target.value)}
-                          className="h-10 w-full border-2 border-black rounded-lg bg-white"
-                          disabled={!settings.logoChromaKeyEnabled}
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-[10px] font-black uppercase">
-                          <span>Tolerance</span>
-                          <span>{Math.round(settings.logoChromaKeyTolerance)}</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="255"
-                          step="1"
-                          value={settings.logoChromaKeyTolerance}
-                          onChange={(event) => updateSetting('logoChromaKeyTolerance', Number(event.target.value))}
-                          className={`${sliderClass} mt-2`}
-                          disabled={!settings.logoChromaKeyEnabled}
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {[selectedTextStyleOption, selectedHeaderStyleOption, selectedTimerStyleOption, selectedProgressStyleOption].map((option) => (
-                      <span
-                        key={option.label}
-                        className="rounded-full border-2 border-black bg-[#FFF5CC] px-3 py-1 text-[10px] font-black uppercase"
-                      >
-                        {option.label}
-                      </span>
-                    ))}
-                  </div>
-                </div>
               </div>
             </div>
           )}
 
           {activeTab === 'text' && (
-            <div className="space-y-6">
-              <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-5">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="flex items-center gap-2">
-                    <Film size={20} strokeWidth={3} />
-                    <div>
-                      <h3 className="text-lg font-black uppercase">Copy + Package Text</h3>
-                      <div className="text-[10px] font-bold uppercase text-slate-600">
-                        Copy lives inside the active package now, so these edits autosave with the rest of the video setup.
-                      </div>
-                    </div>
-                  </div>
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2 border-b border-black/15 pb-4">
+                <button
+                  type="button"
+                  onClick={() =>
+                    applyCopyPreset(
+                      SCENE_COPY_TEMPLATE_PRESETS[
+                        Math.abs(Date.now() + settings.generatedBackgroundShuffleSeed) %
+                          SCENE_COPY_TEMPLATE_PRESETS.length
+                      ]
+                    )
+                  }
+                  className="rounded-xl border-2 border-black bg-black px-3 py-2 text-[10px] font-black uppercase text-white hover:bg-slate-900"
+                >
+                  Generate
+                </button>
+                {SCENE_COPY_TEMPLATE_PRESETS.map((preset) => (
                   <button
+                    key={preset.id}
                     type="button"
-                    onClick={() =>
-                      applyCopyPreset(
-                        SCENE_COPY_TEMPLATE_PRESETS[
-                          Math.abs(Date.now() + settings.generatedBackgroundShuffleSeed) %
-                            SCENE_COPY_TEMPLATE_PRESETS.length
-                        ]
-                      )
-                    }
-                    className="rounded-xl border-2 border-black bg-black px-4 py-2 text-[10px] font-black uppercase text-white hover:bg-slate-900"
+                    onClick={() => applyCopyPreset(preset)}
+                    className="rounded-xl border-2 border-black bg-white px-3 py-2 text-[10px] font-black uppercase hover:bg-[#FFF8D8]"
                   >
-                    <span className="inline-flex items-center gap-2">
-                      <Sparkles size={14} />
-                      Generate Full Copy
-                    </span>
+                    {preset.name}
                   </button>
-                </div>
-
-                <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4">
-                  <div className="text-xs font-black uppercase">Export Copy Rules</div>
-                  <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">
-                    Use placeholders like {'{current}'}, {'{next}'}, {'{total}'}, {'{puzzleCount}'}, and {'{remaining}'}.
-                  </div>
-                </div>
-
-                <div className="grid gap-3 lg:grid-cols-4">
-                  {SCENE_COPY_TEMPLATE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      onClick={() => applyCopyPreset(preset)}
-                      className="rounded-2xl border-2 border-black bg-[#FFFDF8] p-4 text-left transition-transform hover:-translate-y-0.5 hover:bg-[#FFF8D8]"
-                    >
-                      <div className="text-sm font-black uppercase text-slate-900">{preset.name}</div>
-                      <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">{preset.description}</div>
-                      <div className="mt-3 rounded-xl border-2 border-black bg-white px-3 py-2 text-[10px] font-black uppercase">
-                        Apply preset
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="rounded-2xl border-2 border-black bg-[#FFFDF8] p-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <div className="text-xs font-black uppercase">Active Package Copy</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Editing text here updates {selectedVideoPackage?.name ?? 'the active package'} immediately.
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={onCreateVideoPackage}
-                        className="rounded-xl border-2 border-black bg-[#A7F3D0] px-4 py-2 text-[10px] font-black uppercase hover:bg-[#86EFAC]"
-                      >
-                        New Package From This
-                      </button>
-                      <button
-                        type="button"
-                        onClick={onDuplicateVideoPackage}
-                        className="rounded-xl border-2 border-black bg-[#DBEAFE] px-4 py-2 text-[10px] font-black uppercase hover:bg-[#BFDBFE]"
-                      >
-                        Duplicate Package
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 rounded-xl border-2 border-black bg-white px-3 py-2 text-[10px] font-bold uppercase text-slate-600">
-                    If you want a different copy direction for another series, create or duplicate a package first, then edit the text below.
-                  </div>
-                </div>
+                ))}
               </div>
 
-              <div className="grid gap-4 xl:grid-cols-2">
+              <div className="space-y-4">
                 {TEXT_TEMPLATE_GROUPS.map((group, index) => (
-                  <div key={group.title} className="space-y-4 rounded-2xl border-4 border-black bg-white p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <div className="text-sm font-black uppercase text-slate-900">{group.title}</div>
-                        <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">{group.description}</div>
-                      </div>
+                  <div key={group.title} className="space-y-3 border-b border-black/15 pb-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-600">{group.title}</div>
                       <button
                         type="button"
                         onClick={() => {
@@ -2409,7 +2178,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                           if (group.title === 'Transition Template') generateVariantPatch(TRANSITION_TEMPLATE_VARIANTS, index * 17 + 19);
                           if (group.title === 'Outro Template') generateVariantPatch(OUTRO_TEMPLATE_VARIANTS, index * 17 + 29);
                         }}
-                        className="rounded-xl border-2 border-black bg-[#FFF5CC] px-4 py-2 text-[10px] font-black uppercase hover:bg-[#FDE68A]"
+                        className="rounded-full border border-black bg-[#FFF2B3] px-2.5 py-1 text-[9px] font-black uppercase hover:bg-[#FDE68A]"
                       >
                         {group.actionLabel}
                       </button>
@@ -2428,14 +2197,14 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                           key={variant.label}
                           type="button"
                           onClick={() => updateTextTemplates(variant.patch)}
-                          className="rounded-xl border-2 border-black bg-[#F8FDFF] px-3 py-2 text-left text-[10px] font-black uppercase hover:bg-[#E0F2FE]"
+                          className="rounded-xl border-2 border-black bg-white px-3 py-2 text-left text-[10px] font-black uppercase hover:bg-[#E0F2FE]"
                         >
                           {variant.label}
                         </button>
                       ))}
                     </div>
 
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-3">
                       {group.fields.map((field) => renderTextTemplateField(field))}
                     </div>
                   </div>
@@ -2445,7 +2214,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
           )}
 
           {activeTab === 'motion' && (
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <div className="space-y-6">
               <div className="space-y-6">
                 <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
                   <div className="flex items-center gap-2">
@@ -2455,20 +2224,20 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Show Puzzle</span><span>{settings.showDuration}s</span></div>
-                      <input type="range" min="1" max="90" value={settings.showDuration} onChange={(event) => updateSetting('showDuration', Number(event.target.value))} className={sliderClass} />
+                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Show Puzzle</span><span>{getDeferredSliderValue('showDuration')}s</span></div>
+                      <input type="range" min="1" max="90" {...buildDeferredSliderHandlers('showDuration')} className={sliderClass} />
                     </div>
                     <div>
-                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Total Reveal</span><span>{settings.revealDuration}s</span></div>
-                      <input type="range" min="1" max="60" step="0.5" value={settings.revealDuration} onChange={(event) => updateSetting('revealDuration', Number(event.target.value))} className={sliderClass} />
+                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Total Reveal</span><span>{getDeferredSliderValue('revealDuration')}s</span></div>
+                      <input type="range" min="1" max="60" step="0.5" {...buildDeferredSliderHandlers('revealDuration')} className={sliderClass} />
                     </div>
                     <div>
-                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Reveal Step</span><span>{settings.sequentialRevealStep}s</span></div>
-                      <input type="range" min="0.5" max="10" step="0.5" value={settings.sequentialRevealStep} onChange={(event) => updateSetting('sequentialRevealStep', Number(event.target.value))} className={sliderClass} />
+                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Reveal Step</span><span>{getDeferredSliderValue('sequentialRevealStep')}s</span></div>
+                      <input type="range" min="0.5" max="10" step="0.5" {...buildDeferredSliderHandlers('sequentialRevealStep')} className={sliderClass} />
                     </div>
                     <div>
-                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Transition</span><span>{settings.transitionDuration}s</span></div>
-                      <input type="range" min="0" max="5" step="0.5" value={settings.transitionDuration} onChange={(event) => updateSetting('transitionDuration', Number(event.target.value))} className={sliderClass} />
+                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Transition</span><span>{getDeferredSliderValue('transitionDuration')}s</span></div>
+                      <input type="range" min="0" max="5" step="0.5" {...buildDeferredSliderHandlers('transitionDuration')} className={sliderClass} />
                     </div>
                   </div>
 
@@ -2545,43 +2314,6 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                     </div>
                   </div>
 
-                  <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF] space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-black uppercase">Intro Clip</span>
-                      <span className="text-[10px] font-bold uppercase text-slate-600">
-                        {introClipActive ? 'Active' : 'None'}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <label className="cursor-pointer rounded-lg border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase hover:bg-slate-100">
-                        Upload Clip
-                        <input
-                          type="file"
-                          accept="video/*"
-                          onChange={handleIntroVideoUpload}
-                          className="hidden"
-                        />
-                      </label>
-                      {introClipActive && (
-                        <button
-                          type="button"
-                          onClick={clearIntroVideo}
-                          className="rounded-lg border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase hover:bg-slate-100"
-                        >
-                          Remove
-                        </button>
-                      )}
-                      {introClipActive && introClipDuration > 0 && (
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {introClipDuration.toFixed(2)}s
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[10px] font-bold uppercase text-slate-600">
-                      Replaces the intro card in preview and export.
-                    </div>
-                  </div>
-
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF]">
                       <div className="flex items-center justify-between gap-2">
@@ -2598,8 +2330,8 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                       </div>
                     </div>
                     <div className="p-3 border-2 border-black rounded-xl bg-[#F8FDFF]">
-                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Blink Speed</span><span>{settings.enableBlinking ? `${settings.blinkSpeed}s` : 'Off'}</span></div>
-                      <input type="range" min="0.2" max="2" step="0.1" value={settings.blinkSpeed} onChange={(event) => updateSetting('blinkSpeed', Number(event.target.value))} disabled={!settings.enableBlinking} className={`${sliderClass} disabled:opacity-40 disabled:cursor-not-allowed`} />
+                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Blink Speed</span><span>{settings.enableBlinking ? `${getDeferredSliderValue('blinkSpeed')}s` : 'Off'}</span></div>
+                      <input type="range" min="0.2" max="2" step="0.1" {...buildDeferredSliderHandlers('blinkSpeed')} disabled={!settings.enableBlinking} className={`${sliderClass} disabled:opacity-40 disabled:cursor-not-allowed`} />
                     </div>
                   </div>
 
@@ -2688,7 +2420,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   <div>
                     <label className="block text-xs font-black uppercase mb-2">Reveal Behavior</label>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {VIDEO_REVEAL_BEHAVIOR_OPTIONS.map((option) => (
+                      {compactRevealBehaviorOptions.map((option) => (
                         <button
                           key={option.value}
                           type="button"
@@ -2738,10 +2470,10 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {(
                           settings.revealStyle === 'box'
-                            ? BOX_VARIANTS
+                            ? compactBoxVariants
                             : settings.revealStyle === 'circle'
-                            ? CIRCLE_VARIANTS
-                            : HIGHLIGHT_VARIANTS
+                            ? compactCircleVariants
+                            : compactHighlightVariants
                         ).map((variant) => (
                           <button
                             key={variant.value}
@@ -2763,8 +2495,8 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
 
                   {settings.revealStyle === 'circle' && (
                     <div>
-                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Circle Thickness</span><span>{settings.circleThickness}px</span></div>
-                      <input type="range" min="2" max="14" step="1" value={settings.circleThickness} onChange={(event) => updateSetting('circleThickness', Number(event.target.value))} className={sliderClass} />
+                      <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Circle Thickness</span><span>{getDeferredSliderValue('circleThickness')}px</span></div>
+                      <input type="range" min="2" max="14" step="1" {...buildDeferredSliderHandlers('circleThickness')} className={sliderClass} />
                     </div>
                   )}
 
@@ -2788,81 +2520,20 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   </div>
 
                   <div>
-                    <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Outline Thickness</span><span>{settings.outlineThickness}px</span></div>
-                    <input type="range" min="0" max="8" step="1" value={settings.outlineThickness} onChange={(event) => updateSetting('outlineThickness', Number(event.target.value))} className={sliderClass} />
+                    <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Outline Thickness</span><span>{getDeferredSliderValue('outlineThickness')}px</span></div>
+                    <input type="range" min="0" max="8" step="1" {...buildDeferredSliderHandlers('outlineThickness')} className={sliderClass} />
                   </div>
                 </div>
               </div>
             </div>
           )}
 
-          {activeTab === 'export' && (
+          {activeTab === 'audio' && (
             <div className="space-y-6">
-              <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-5">
-                <div className="flex items-center gap-2">
-                  <Film size={20} strokeWidth={3} />
-                  <h3 className="text-lg font-black uppercase">Export</h3>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-black uppercase mb-2">Resolution</label>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-                    {EXPORT_RESOLUTION_OPTIONS.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        onClick={() => updateSetting('exportResolution', option.value)}
-                        className={`py-2 border-2 border-black rounded-lg ${
-                          settings.exportResolution === option.value
-                            ? 'bg-[#4ECDC4] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
-                            : 'bg-white hover:bg-slate-100'
-                        }`}
-                      >
-                        <div className="text-xs font-black uppercase">{option.label}</div>
-                        <div className="text-[9px] font-bold uppercase text-slate-600">{option.subLabel}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-black uppercase mb-2">Codec</label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {[
-                      { value: 'h264', label: 'H.264 (MP4)', hint: 'Best compatibility' },
-                      { value: 'av1', label: 'AV1 (WebM)', hint: 'Smaller output' }
-                    ].map((codec) => (
-                      <button
-                        key={codec.value}
-                        type="button"
-                        onClick={() => updateSetting('exportCodec', codec.value as VideoSettings['exportCodec'])}
-                        className={`p-2 border-2 border-black rounded-lg text-left ${
-                          settings.exportCodec === codec.value
-                            ? 'bg-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
-                            : 'bg-white hover:bg-slate-100'
-                        }`}
-                      >
-                        <div className="text-xs font-black uppercase">{codec.label}</div>
-                        <div className="text-[10px] font-bold uppercase text-slate-600 mt-1">{codec.hint}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Bitrate</span><span>{settings.exportBitrateMbps.toFixed(1)} Mbps</span></div>
-                  <input type="range" min="1" max="80" step="0.5" value={settings.exportBitrateMbps} onChange={(event) => updateSetting('exportBitrateMbps', Number(event.target.value))} className={sliderClass} />
-                </div>
-
-                <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4 space-y-4">
+              <div className="space-y-4 border-b border-black/15 pb-5">
                   <div className="flex items-center gap-2">
                     <Volume2 size={18} strokeWidth={3} />
-                    <div>
-                      <div className="text-xs font-black uppercase">Export Audio Cues</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Adds low-time beeps during the last seconds and a reveal sting when the reveal phase starts.
-                      </div>
-                    </div>
+                    <div className="text-xs font-black uppercase">Audio Cues</div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
@@ -2885,173 +2556,35 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                     ))}
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
                     <button
                       type="button"
-                      onClick={() => updateSetting('countdownSoundEnabled', !settings.countdownSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
+                      onClick={() => updateSetting('previewSoundEnabled', !settings.previewSoundEnabled)}
+                      disabled={!previewAudioAvailable}
                       className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.countdownSoundEnabled
-                            ? 'bg-[#DBEAFE] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                        previewAudioAvailable
+                          ? settings.previewSoundEnabled
+                            ? 'bg-[#C7D2FE] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
                             : 'bg-white hover:bg-slate-100'
                           : 'bg-slate-200 text-slate-500'
                       }`}
                     >
-                      <div className="text-xs font-black uppercase">Low Time Left</div>
+                      <div className="text-xs font-black uppercase">Preview Audio</div>
                       <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Beeps at 3, 2, and 1 seconds left when there is enough time.
+                        Uses the same pool logic as export.
                       </div>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => updateSetting('revealSoundEnabled', !settings.revealSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
-                      className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.revealSoundEnabled
-                            ? 'bg-[#FDE68A] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            : 'bg-white hover:bg-slate-100'
-                          : 'bg-slate-200 text-slate-500'
+                      onClick={() => updateSetting('audioLimiterEnabled', !settings.audioLimiterEnabled)}
+                      className={`rounded-xl border-2 border-black px-3 py-3 text-xs font-black uppercase ${
+                        settings.audioLimiterEnabled ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
                       }`}
                     >
-                      <div className="text-xs font-black uppercase">Reveal Start</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Plays a short reveal sting at the start of each reveal phase.
-                      </div>
+                      Limiter {settings.audioLimiterEnabled ? 'On' : 'Off'}
                     </button>
                   </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => updateSetting('playSoundEnabled', !settings.playSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
-                      className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.playSoundEnabled
-                            ? 'bg-[#DCFCE7] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            : 'bg-white hover:bg-slate-100'
-                          : 'bg-slate-200 text-slate-500'
-                      }`}
-                    >
-                      <div className="text-xs font-black uppercase">Puzzle Start</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Plays when each puzzle begins.
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => updateSetting('markerSoundEnabled', !settings.markerSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
-                      className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.markerSoundEnabled
-                            ? 'bg-[#E0F2FE] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            : 'bg-white hover:bg-slate-100'
-                          : 'bg-slate-200 text-slate-500'
-                      }`}
-                    >
-                      <div className="text-xs font-black uppercase">Marker Reveal</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Pops each time a diff appears.
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => updateSetting('blinkSoundEnabled', !settings.blinkSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
-                      className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.blinkSoundEnabled
-                            ? 'bg-[#FDE68A] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            : 'bg-white hover:bg-slate-100'
-                          : 'bg-slate-200 text-slate-500'
-                      }`}
-                    >
-                      <div className="text-xs font-black uppercase">Blink Pulse</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Plays during the blink overlay.
-                      </div>
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => updateSetting('introSoundEnabled', !settings.introSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
-                      className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.introSoundEnabled
-                            ? 'bg-[#E9D5FF] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            : 'bg-white hover:bg-slate-100'
-                          : 'bg-slate-200 text-slate-500'
-                      }`}
-                    >
-                      <div className="text-xs font-black uppercase">Intro Start</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Plays when the intro card starts.
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => updateSetting('transitionSoundEnabled', !settings.transitionSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
-                      className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.transitionSoundEnabled
-                            ? 'bg-[#FECACA] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            : 'bg-white hover:bg-slate-100'
-                          : 'bg-slate-200 text-slate-500'
-                      }`}
-                    >
-                      <div className="text-xs font-black uppercase">Transition Start</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Plays on each puzzle transition.
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => updateSetting('outroSoundEnabled', !settings.outroSoundEnabled)}
-                      disabled={!settings.soundEffectsEnabled}
-                      className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                        settings.soundEffectsEnabled
-                          ? settings.outroSoundEnabled
-                            ? 'bg-[#FEF3C7] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            : 'bg-white hover:bg-slate-100'
-                          : 'bg-slate-200 text-slate-500'
-                      }`}
-                    >
-                      <div className="text-xs font-black uppercase">Outro Start</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Plays when the outro card starts.
-                      </div>
-                    </button>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => updateSetting('previewSoundEnabled', !settings.previewSoundEnabled)}
-                    disabled={!previewAudioAvailable}
-                    className={`rounded-xl border-2 border-black px-3 py-3 text-left ${
-                      previewAudioAvailable
-                        ? settings.previewSoundEnabled
-                          ? 'bg-[#C7D2FE] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                          : 'bg-white hover:bg-slate-100'
-                        : 'bg-slate-200 text-slate-500'
-                    }`}
-                  >
-                    <div className="text-xs font-black uppercase">Preview Audio</div>
-                    <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                      Plays cues and music during live preview without changing the export mix.
-                    </div>
-                  </button>
 
                   <div>
                     <div className="flex justify-between mb-1 text-xs font-black uppercase">
@@ -3069,368 +2602,170 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                       className={`${sliderClass} disabled:opacity-40 disabled:cursor-not-allowed`}
                     />
                   </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={onExport}
-                  disabled={isExporting || puzzles.length === 0}
-                  className={`w-full py-3 px-4 rounded-xl border-4 border-black text-sm font-black uppercase inline-flex items-center justify-center gap-2 ${
-                    isExporting || puzzles.length === 0
-                      ? 'bg-slate-300 text-slate-700 cursor-not-allowed'
-                      : 'bg-white hover:bg-[#A7F3D0] shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]'
-                  }`}
-                >
-                  <Download size={18} strokeWidth={3} />
-                  {isExporting ? 'Exporting...' : 'Export Video'}
-                </button>
-
-                {(isExporting || exportStatus) && (
-                  <div className="space-y-2">
-                    <div className="text-xs font-black uppercase text-slate-700">{exportStatus || 'Working...'}</div>
-                    <div className="w-full h-3 rounded-full border-2 border-black overflow-hidden bg-white">
-                      <div className="h-full bg-black transition-all" style={{ width: `${Math.max(0, Math.min(100, exportProgress * 100))}%` }} />
-                    </div>
-                  </div>
-                )}
               </div>
 
-              <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-5">
+              <div className="space-y-5">
                 <div className="flex items-center gap-2">
                   <Music size={20} strokeWidth={3} />
                   <h3 className="text-lg font-black uppercase">Audio Mix</h3>
                 </div>
 
-                <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4 space-y-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <div className="text-xs font-black uppercase">Custom SFX Files</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Replace synth cues with your own beeps and reveal stings. Short files work best.
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => updateSetting('audioLimiterEnabled', !settings.audioLimiterEnabled)}
-                      className={`rounded-xl border-2 border-black px-3 py-2 text-xs font-black uppercase ${
-                        settings.audioLimiterEnabled ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
-                      }`}
-                    >
-                      Limiter {settings.audioLimiterEnabled ? 'On' : 'Off'}
-                    </button>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Countdown SFX</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.countdownSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('countdownSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.countdownSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('countdownSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Reveal SFX</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.revealSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('revealSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.revealSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('revealSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
+                <div className="space-y-4 border-b border-black/15 pb-5">
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xs font-black uppercase">Gameplay Cue Pools</div>
+                    <div className="text-[11px] font-bold text-slate-600">
+                      Every gameplay cue pulls from its own random pool. Puzzle play assigns one track per puzzle and reshuffles when the pool runs short.
                     </div>
                   </div>
 
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Puzzle Start</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.playSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('playSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.playSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('playSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </div>
+                  <div className="grid gap-4 xl:grid-cols-2">
+                    {VIDEO_AUDIO_POOL_DEFINITIONS.map((definition) => {
+                      const pool = settings.audioCuePools[definition.key];
+                      const isPoolInteractive = settings.soundEffectsEnabled;
+                      const badgeClass = AUDIO_POOL_BADGE_CLASSES[definition.key];
+                      const selectionLabel = AUDIO_POOL_SELECTION_LABELS[definition.key];
+                      const triggerNote =
+                        definition.key === 'progress_fill_intro'
+                          ? 'Only fires when Progress Motion is set to Intro Fill and is capped to the first 4 seconds.'
+                          : definition.key === 'low_time_warning'
+                          ? 'Starts 5 seconds before timeout and only plays inside the showing phase.'
+                          : null;
 
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Marker Pop</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.markerSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('markerSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.markerSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('markerSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Blink Pulse</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.blinkSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('blinkSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.blinkSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('blinkSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Intro Start</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.introSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('introSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.introSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('introSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Transition Start</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.transitionSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('transitionSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.transitionSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('transitionSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Outro Start</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.outroSoundSrc ? 'Custom' : 'Synth'}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Upload
-                          <input type="file" accept="audio/*" onChange={handleAudioUpload('outroSoundSrc')} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.outroSoundSrc && (
-                          <button
-                            type="button"
-                            onClick={() => clearAudioSource('outroSoundSrc')}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Reveal Variants</div>
-                        <span className="text-[10px] font-bold uppercase text-slate-600">
-                          {settings.revealSoundVariantSrcs?.length ?? 0} loaded
-                        </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <label className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'}`}>
-                          <Upload size={12} />
-                          Add Variants
-                          <input type="file" accept="audio/*" multiple onChange={handleRevealVariantsUpload} className="hidden" disabled={sfxControlsDisabled} />
-                        </label>
-                        {settings.revealSoundVariantSrcs?.length ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void deleteStoredAudioAssets(settings.revealSoundVariantSrcs ?? []);
-                              updateSetting('revealSoundVariantSrcs', []);
-                            }}
-                            className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50"
-                            disabled={sfxControlsDisabled}
-                          >
-                            Clear
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div className={`rounded-xl border-2 border-black p-3 ${sfxControlsDisabled ? 'bg-slate-200 text-slate-500' : 'bg-white'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs font-black uppercase">Reveal Randomizer</div>
-                        <Shuffle size={14} />
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => updateSetting('revealSoundRandomize', !settings.revealSoundRandomize)}
-                          className={`rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
-                            settings.revealSoundRandomize ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                      return (
+                        <div
+                          key={definition.key}
+                          className={`rounded-2xl border-2 border-black p-4 space-y-4 ${
+                            isPoolInteractive ? 'bg-white' : 'bg-slate-200 text-slate-500'
                           }`}
-                          disabled={sfxControlsDisabled}
                         >
-                          {settings.revealSoundRandomize ? 'Random On' : 'Random Off'}
-                        </button>
-                        <div className="text-[10px] font-bold uppercase text-slate-600">
-                          Uses variants if they are loaded.
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <div className="min-w-0 space-y-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="text-sm font-black uppercase leading-tight">{definition.label}</div>
+                                <span className={`rounded-full px-2 py-1 text-[10px] font-black uppercase ${badgeClass}`}>
+                                  {selectionLabel}
+                                </span>
+                              </div>
+                              <div className="text-[11px] font-bold text-slate-600">{definition.description}</div>
+                              {triggerNote ? (
+                                <div className="text-[10px] font-bold uppercase text-slate-500">{triggerNote}</div>
+                              ) : null}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => updateAudioCuePool(definition.key, { enabled: !pool.enabled })}
+                              disabled={!isPoolInteractive}
+                              className={`rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                                !isPoolInteractive
+                                  ? 'bg-slate-200 text-slate-500'
+                                  : pool.enabled
+                                  ? 'bg-[#A7F3D0]'
+                                  : 'bg-white hover:bg-slate-100'
+                              }`}
+                            >
+                              {pool.enabled ? 'Enabled' : 'Disabled'}
+                            </button>
+                          </div>
 
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div>
-                      <div className="flex justify-between mb-1 text-[10px] font-black uppercase">
-                        <span>Countdown Offset</span>
-                        <span>{Math.round(settings.countdownSoundOffsetMs)}ms</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="-2000"
-                        max="2000"
-                        step="50"
-                        value={settings.countdownSoundOffsetMs}
-                        onChange={(event) => updateSetting('countdownSoundOffsetMs', Number(event.target.value))}
-                        disabled={sfxControlsDisabled}
-                        className={`${sliderClass} disabled:opacity-40 disabled:cursor-not-allowed`}
-                      />
-                    </div>
-                    <div>
-                      <div className="flex justify-between mb-1 text-[10px] font-black uppercase">
-                        <span>Reveal Offset</span>
-                        <span>{Math.round(settings.revealSoundOffsetMs)}ms</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="-2000"
-                        max="2000"
-                        step="50"
-                        value={settings.revealSoundOffsetMs}
-                        onChange={(event) => updateSetting('revealSoundOffsetMs', Number(event.target.value))}
-                        disabled={sfxControlsDisabled}
-                        className={`${sliderClass} disabled:opacity-40 disabled:cursor-not-allowed`}
-                      />
-                    </div>
+                          <div className="flex flex-wrap gap-2">
+                            <span className="rounded-full border-2 border-black bg-white px-2 py-1 text-[10px] font-black uppercase text-slate-700">
+                              {pool.sources.length} Track{pool.sources.length === 1 ? '' : 's'}
+                            </span>
+                            <span className="rounded-full border-2 border-black bg-white px-2 py-1 text-[10px] font-black uppercase text-slate-700">
+                              {pool.enabled ? 'Live In Mix' : 'Muted'}
+                            </span>
+                          </div>
+
+                          {definition.key === 'puzzle_play' ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateSetting(
+                                  'puzzlePlayUrgencyRampEnabled',
+                                  !settings.puzzlePlayUrgencyRampEnabled
+                                )
+                              }
+                              disabled={!isPoolInteractive}
+                              className={`w-full rounded-xl border-2 border-black px-3 py-3 text-left ${
+                                !isPoolInteractive
+                                  ? 'bg-slate-200 text-slate-500'
+                                  : settings.puzzlePlayUrgencyRampEnabled
+                                  ? 'bg-[#C7D2FE] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                                  : 'bg-white hover:bg-slate-100'
+                              }`}
+                            >
+                              <div className="text-xs font-black uppercase">Urgency Ramp</div>
+                              <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
+                                Gradually raises puzzle play speed and volume until the final 1 second fade.
+                              </div>
+                            </button>
+                          ) : null}
+
+                          <div className="flex flex-wrap gap-2">
+                            <label
+                              className={`inline-flex items-center gap-2 rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                                isPoolInteractive
+                                  ? 'bg-white hover:bg-slate-100'
+                                  : 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                              }`}
+                            >
+                              <Upload size={12} />
+                              Add To Pool
+                              <input
+                                type="file"
+                                accept="audio/*"
+                                multiple
+                                onChange={handleAudioPoolUpload(definition.key)}
+                                className="hidden"
+                                disabled={!isPoolInteractive}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => void clearAudioPoolSources(definition.key)}
+                              className="rounded-lg border-2 border-black px-3 py-2 text-[10px] font-black uppercase bg-white hover:bg-red-50 disabled:bg-slate-200 disabled:text-slate-500"
+                              disabled={!isPoolInteractive || pool.sources.length === 0}
+                            >
+                              Clear Pool
+                            </button>
+                          </div>
+
+                          <div className="space-y-2">
+                            {pool.sources.length > 0 ? (
+                              pool.sources.map((source, sourceIndex) => (
+                                <div
+                                  key={`${definition.key}-${sourceIndex}-${source}`}
+                                  className="flex items-center justify-between gap-3 rounded-xl border-2 border-black bg-[#F8F5EC] px-3 py-2"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="text-[11px] font-black uppercase">Track {sourceIndex + 1}</div>
+                                    <div className="truncate text-[10px] font-bold text-slate-500">{source}</div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => void removeAudioPoolSource(definition.key, sourceIndex)}
+                                    className="rounded-lg border-2 border-black bg-white px-2 py-1 text-[10px] font-black uppercase hover:bg-red-50 disabled:bg-slate-200 disabled:text-slate-500"
+                                    disabled={!isPoolInteractive}
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="rounded-xl border-2 border-dashed border-black/30 bg-white/60 px-3 py-4 text-[10px] font-bold uppercase text-slate-500">
+                                No tracks loaded for this cue.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
-                <div className="rounded-2xl border-2 border-black bg-[#FFFDF8] p-4 space-y-4">
+                <div className="space-y-4">
                   <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-black uppercase">Background Music</div>
-                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
-                        Add a looping bed that follows the full video timeline.
-                      </div>
-                    </div>
+                    <div className="text-xs font-black uppercase">Background Music</div>
                     <button
                       type="button"
                       onClick={() => updateSetting('backgroundMusicEnabled', !settings.backgroundMusicEnabled)}
@@ -3638,7 +2973,91 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
               </div>
             </div>
           )}
-        </div>
+
+          {activeTab === 'export' && (
+            <div className="space-y-6">
+              <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-5">
+                <div className="flex items-center gap-2">
+                  <Film size={20} strokeWidth={3} />
+                  <h3 className="text-lg font-black uppercase">Export</h3>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black uppercase mb-2">Resolution</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+                    {EXPORT_RESOLUTION_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => updateSetting('exportResolution', option.value)}
+                        className={`py-2 border-2 border-black rounded-lg ${
+                          settings.exportResolution === option.value
+                            ? 'bg-[#4ECDC4] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
+                            : 'bg-white hover:bg-slate-100'
+                        }`}
+                      >
+                        <div className="text-xs font-black uppercase">{option.label}</div>
+                        <div className="text-[9px] font-bold uppercase text-slate-600">{option.subLabel}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black uppercase mb-2">Codec</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {[
+                      { value: 'h264', label: 'H.264 (MP4)', hint: 'Best compatibility' },
+                      { value: 'av1', label: 'AV1 (WebM)', hint: 'Smaller output' }
+                    ].map((codec) => (
+                      <button
+                        key={codec.value}
+                        type="button"
+                        onClick={() => updateSetting('exportCodec', codec.value as VideoSettings['exportCodec'])}
+                        className={`p-2 border-2 border-black rounded-lg text-left ${
+                          settings.exportCodec === codec.value
+                            ? 'bg-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
+                            : 'bg-white hover:bg-slate-100'
+                        }`}
+                      >
+                        <div className="text-xs font-black uppercase">{codec.label}</div>
+                        <div className="text-[10px] font-bold uppercase text-slate-600 mt-1">{codec.hint}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex justify-between mb-1 text-xs font-black uppercase"><span>Bitrate</span><span>{settings.exportBitrateMbps.toFixed(1)} Mbps</span></div>
+                  <input type="range" min="1" max="80" step="0.5" value={settings.exportBitrateMbps} onChange={(event) => updateSetting('exportBitrateMbps', Number(event.target.value))} className={sliderClass} />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onExport}
+                  disabled={isExporting || puzzles.length === 0}
+                  className={`w-full py-3 px-4 rounded-xl border-4 border-black text-sm font-black uppercase inline-flex items-center justify-center gap-2 ${
+                    isExporting || puzzles.length === 0
+                      ? 'bg-slate-300 text-slate-700 cursor-not-allowed'
+                      : 'bg-white hover:bg-[#A7F3D0] shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]'
+                  }`}
+                >
+                  <Download size={18} strokeWidth={3} />
+                  {isExporting ? 'Exporting...' : 'Export Video'}
+                </button>
+
+                {(isExporting || exportStatus) && (
+                  <div className="space-y-2">
+                    <div className="text-xs font-black uppercase text-slate-700">{exportStatus || 'Working...'}</div>
+                    <div className="w-full h-3 rounded-full border-2 border-black overflow-hidden bg-white">
+                      <div className="h-full bg-black transition-all" style={{ width: `${Math.max(0, Math.min(100, exportProgress * 100))}%` }} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          </VideoPreviewCompare>
       </div>
 
       <TextPromptDialog

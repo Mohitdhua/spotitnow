@@ -1,4 +1,10 @@
-import type { GeneratedBackgroundPack, Puzzle, Region, VideoSettings } from '../types';
+import type {
+  GeneratedBackgroundPack,
+  Puzzle,
+  Region,
+  VideoAudioCuePoolKey,
+  VideoSettings
+} from '../types';
 
 export interface BinaryRenderablePuzzle {
   imageABuffer: ArrayBuffer;
@@ -28,16 +34,8 @@ export interface VideoExportAudioAsset {
 }
 
 export interface VideoExportAudioAssets {
-  countdown?: VideoExportAudioAsset;
-  reveal?: VideoExportAudioAsset;
-  revealVariants?: VideoExportAudioAsset[];
-  marker?: VideoExportAudioAsset;
-  blink?: VideoExportAudioAsset;
-  play?: VideoExportAudioAsset;
-  intro?: VideoExportAudioAsset;
+  sfxPools?: Partial<Record<VideoAudioCuePoolKey, VideoExportAudioAsset[]>>;
   introClip?: VideoExportAudioAsset;
-  transition?: VideoExportAudioAsset;
-  outro?: VideoExportAudioAsset;
   music?: VideoExportAudioAsset;
 }
 

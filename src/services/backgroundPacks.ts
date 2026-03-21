@@ -13,7 +13,7 @@ const BACKGROUND_PACKS_LEGACY_KEYS = [
 ];
 
 const PALETTE_IDS: GeneratedBackgroundPaletteId[] = ['sunrise', 'mint', 'midnight', 'candy', 'ocean', 'amber'];
-const ASPECT_RATIOS: Array<GeneratedBackgroundPack['aspectRatio']> = ['16:9', '9:16', '1:1', '4:3'];
+const ASPECT_RATIOS: Array<GeneratedBackgroundPack['aspectRatio']> = ['16:9', '9:16'];
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object';

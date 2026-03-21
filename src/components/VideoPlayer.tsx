@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useId, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowLeft, Pause, Play, SkipForward, RotateCcw, CheckCircle, Send } from 'lucide-react';
-import { Puzzle, VideoSettings } from '../types';
+import { Puzzle, type VideoAudioCuePoolKey, VideoSettings } from '../types';
 import { BASE_STAGE_SIZE, CLASSIC_HUD_SPEC, TRANSITION_TUNING } from '../constants/videoLayoutSpec';
 import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
 import { resolveVideoLayoutSettings } from '../constants/videoLayoutCustom';
@@ -12,17 +12,53 @@ import {
   radiusTokenToPx,
   resolveVideoStyleModules
 } from '../constants/videoStyleModules';
+import {
+  PROGRESS_BAR_THEMES,
+  resolveProgressBarFillColors,
+  resolveProgressBarFillStyle
+} from '../constants/progressBarThemes';
 import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
 import { VideoTimerDisplay } from './VideoTimerDisplay';
 import { loadGeneratedBackgroundPacks } from '../services/backgroundPacks';
 import { resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
 import { resolveVisualThemeStyle } from '../constants/videoThemes';
-import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import { clampLogoZoom } from '../utils/logoProcessing';
 import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
-import { buildCueTones, type AudioCueKind } from '../utils/audioCueTones';
+import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
+import {
+  revealTypewriterText,
+  VIDEO_TRANSITION_LABEL,
+  resolveVideoPuzzleEntryState,
+  resolveVideoTransitionSequenceState
+} from '../utils/videoTransitionMotion';
 import { decodeAudioBufferFromSource } from '../utils/audioDecode';
+import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import { loadVideoAssetBlob } from '../services/videoAssetStore';
+import {
+  VIDEO_AUDIO_POOL_KEYS,
+  resolveVideoAudioCyclePoolIndex,
+  resolveVideoAudioEventPoolIndex
+} from '../utils/videoAudioPools';
+import {
+  resolveLowTimeWarningCueWindow,
+  resolveProgressFillIntroCueWindow,
+  resolvePuzzlePlayCueWindow,
+  type VideoAudioPlaybackAutomation
+} from '../utils/videoAudioCueScheduling';
+
+type Phase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro' | 'finished';
+
+export interface VideoPlayerExternalControlAction {
+  kind: 'toggle-play' | 'skip' | 'replay';
+  nonce: number;
+}
+
+export interface VideoPlayerPlaybackState {
+  hasPuzzles: boolean;
+  isPlaying: boolean;
+  phase: Phase;
+  puzzleIndex: number;
+}
 
 interface VideoPlayerProps {
   puzzles: Puzzle[];
@@ -31,10 +67,10 @@ interface VideoPlayerProps {
   onSendToEditor?: () => void;
   embedded?: boolean;
   hidePlaybackControls?: boolean;
+  externalControlAction?: VideoPlayerExternalControlAction | null;
+  onPlaybackStateChange?: (state: VideoPlayerPlaybackState) => void;
   backgroundPacksSessionId?: number;
 }
-
-type Phase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro' | 'finished';
 
 export interface VisualTheme {
   rootBg: string;
@@ -593,8 +629,12 @@ const anchorToCss = (anchor: HudAnchorSpec): React.CSSProperties => {
 const fillTemplate = (template: string, values: Record<string, string | number>) =>
   template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => String(values[key] ?? ''));
 
-const resolveTextProgressFillColors = (remainingPercent: number, visualTheme: VisualTheme) => {
-  return resolveSmoothTextProgressFillColors(remainingPercent, visualTheme);
+const resolveTextProgressFillColors = (
+  remainingPercent: number,
+  theme: VisualTheme,
+  dynamicColors?: ReturnType<typeof resolveProgressBarFillColors>
+) => {
+  return resolveSmoothTextProgressFillColors(remainingPercent, theme, dynamicColors);
 };
 
 const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
@@ -980,6 +1020,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onSendToEditor,
   embedded = false,
   hidePlaybackControls = false,
+  externalControlAction = null,
+  onPlaybackStateChange,
   backgroundPacksSessionId = 0
 }) => {
   const initialHasPuzzles = puzzles.length > 0;
@@ -1025,13 +1067,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const currentPuzzle = hasPuzzles
     ? puzzles[safeCurrentIndex]
     : { imageA: '', imageB: '', regions: [] };
+
   const processedLogoSrc = useProcessedLogoSrc(settings.logo, {
     enabled: settings.logoChromaKeyEnabled,
     color: settings.logoChromaKeyColor,
     tolerance: settings.logoChromaKeyTolerance
   });
   const logoZoom = clampLogoZoom(settings.logoZoom);
-  const renderedLogoSrc = processedLogoSrc ?? settings.logo;
+  const renderedLogoSrc = processedLogoSrc;
   const renderLogoImage = (baseSize: number) => {
     if (!renderedLogoSrc) return null;
     const scaledSize = Math.max(1, Math.round(baseSize * logoZoom));
@@ -1128,35 +1171,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const phaseTransitionLockRef = useRef<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioUnlockedRef = useRef(false);
-  const lastCountdownKeyRef = useRef<string | null>(null);
-  const lastRevealKeyRef = useRef<string | null>(null);
-  const lastPlayKeyRef = useRef<string | null>(null);
+  const lastShowAudioKeyRef = useRef<string | null>(null);
   const lastMarkerKeyRef = useRef<string | null>(null);
   const lastBlinkVisibleRef = useRef(false);
-  const lastIntroKeyRef = useRef<string | null>(null);
   const lastTransitionKeyRef = useRef<string | null>(null);
-  const lastOutroKeyRef = useRef<string | null>(null);
+  const lastExternalControlNonceRef = useRef<number | null>(null);
   const audioBuffersRef = useRef<{
-    countdown: AudioBuffer | null;
-    reveal: AudioBuffer | null;
-    revealVariants: AudioBuffer[];
-    marker: AudioBuffer | null;
-    blink: AudioBuffer | null;
-    play: AudioBuffer | null;
-    intro: AudioBuffer | null;
-    transition: AudioBuffer | null;
-    outro: AudioBuffer | null;
+    sfxPools: Record<VideoAudioCuePoolKey, AudioBuffer[]>;
     music: AudioBuffer | null;
   }>({
-    countdown: null,
-    reveal: null,
-    revealVariants: [],
-    marker: null,
-    blink: null,
-    play: null,
-    intro: null,
-    transition: null,
-    outro: null,
+    sfxPools: {
+      progress_fill_intro: [],
+      puzzle_play: [],
+      low_time_warning: [],
+      marker_reveal: [],
+      blink: [],
+      transition: []
+    },
     music: null
   });
   const audioNodesRef = useRef<{
@@ -1175,6 +1206,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     duration: number;
     loop: boolean;
   } | null>(null);
+  const scheduledSfxTimeoutsRef = useRef<number[]>([]);
+  const activeSfxSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
   const ensureAudioContext = useCallback(() => {
     if (!audioUnlockedRef.current) {
@@ -1256,180 +1289,50 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     musicStateRef.current = null;
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadCountdown = async () => {
-      if (!settings.countdownSoundSrc) {
-        audioBuffersRef.current.countdown = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
+  const stopScheduledSfx = useCallback(() => {
+    scheduledSfxTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    scheduledSfxTimeoutsRef.current = [];
+    activeSfxSourcesRef.current.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        // ignore stop errors during rapid phase changes
       }
-      const buffer = await decodeAudioBufferFromSource(settings.countdownSoundSrc);
-      if (cancelled) return;
-      audioBuffersRef.current.countdown = buffer;
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadCountdown();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.countdownSoundSrc]);
+      source.disconnect();
+    });
+    activeSfxSourcesRef.current.clear();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    const loadReveal = async () => {
-      if (!settings.revealSoundSrc) {
-        audioBuffersRef.current.reveal = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffer = await decodeAudioBufferFromSource(settings.revealSoundSrc);
-      if (cancelled) return;
-      audioBuffersRef.current.reveal = buffer;
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadReveal();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.revealSoundSrc]);
+    const loadSfxPools = async () => {
+      const nextPools: Record<VideoAudioCuePoolKey, AudioBuffer[]> = {
+        progress_fill_intro: [],
+        puzzle_play: [],
+        low_time_warning: [],
+        marker_reveal: [],
+        blink: [],
+        transition: []
+      };
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadRevealVariants = async () => {
-      if (!settings.revealSoundVariantSrcs?.length) {
-        audioBuffersRef.current.revealVariants = [];
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffers = await Promise.all(
-        settings.revealSoundVariantSrcs.map((src) => decodeAudioBufferFromSource(src))
+      await Promise.all(
+        VIDEO_AUDIO_POOL_KEYS.map(async (key) => {
+          const sources = settings.audioCuePools[key].sources;
+          if (!sources.length) return;
+          const buffers = await Promise.all(sources.map((src) => decodeAudioBufferFromSource(src)));
+          nextPools[key] = buffers.filter((buffer): buffer is AudioBuffer => Boolean(buffer));
+        })
       );
-      if (cancelled) return;
-      audioBuffersRef.current.revealVariants = buffers.filter(
-        (buffer): buffer is AudioBuffer => Boolean(buffer)
-      );
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadRevealVariants();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.revealSoundVariantSrcs]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadMarker = async () => {
-      if (!settings.markerSoundSrc) {
-        audioBuffersRef.current.marker = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffer = await decodeAudioBufferFromSource(settings.markerSoundSrc);
       if (cancelled) return;
-      audioBuffersRef.current.marker = buffer;
+      audioBuffersRef.current.sfxPools = nextPools;
       setAudioAssetVersion((version) => version + 1);
     };
-    void loadMarker();
+    void loadSfxPools();
     return () => {
       cancelled = true;
     };
-  }, [settings.markerSoundSrc]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadBlink = async () => {
-      if (!settings.blinkSoundSrc) {
-        audioBuffersRef.current.blink = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffer = await decodeAudioBufferFromSource(settings.blinkSoundSrc);
-      if (cancelled) return;
-      audioBuffersRef.current.blink = buffer;
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadBlink();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.blinkSoundSrc]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadPlay = async () => {
-      if (!settings.playSoundSrc) {
-        audioBuffersRef.current.play = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffer = await decodeAudioBufferFromSource(settings.playSoundSrc);
-      if (cancelled) return;
-      audioBuffersRef.current.play = buffer;
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadPlay();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.playSoundSrc]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadIntro = async () => {
-      if (!settings.introSoundSrc) {
-        audioBuffersRef.current.intro = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffer = await decodeAudioBufferFromSource(settings.introSoundSrc);
-      if (cancelled) return;
-      audioBuffersRef.current.intro = buffer;
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadIntro();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.introSoundSrc]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadTransition = async () => {
-      if (!settings.transitionSoundSrc) {
-        audioBuffersRef.current.transition = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffer = await decodeAudioBufferFromSource(settings.transitionSoundSrc);
-      if (cancelled) return;
-      audioBuffersRef.current.transition = buffer;
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadTransition();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.transitionSoundSrc]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadOutro = async () => {
-      if (!settings.outroSoundSrc) {
-        audioBuffersRef.current.outro = null;
-        setAudioAssetVersion((version) => version + 1);
-        return;
-      }
-      const buffer = await decodeAudioBufferFromSource(settings.outroSoundSrc);
-      if (cancelled) return;
-      audioBuffersRef.current.outro = buffer;
-      setAudioAssetVersion((version) => version + 1);
-    };
-    void loadOutro();
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.outroSoundSrc]);
+  }, [settings.audioCuePools]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1451,7 +1354,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }, [settings.backgroundMusicSrc]);
 
   const playAudioCue = useCallback(
-    (kind: AudioCueKind, phase: Phase, puzzleIndex: number) => {
+    (
+      kind: VideoAudioCuePoolKey,
+      phase: Phase,
+      puzzleIndex: number,
+      options?: {
+        eventIndex?: number;
+        selectionMode?: 'cycle' | 'event';
+        delaySeconds?: number;
+        maxDuration?: number;
+        fadeOutDuration?: number;
+        automation?: VideoAudioPlaybackAutomation;
+      }
+    ) => {
       if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
       const ctx = ensureAudioContext();
       if (!ctx || ctx.state === 'suspended') return;
@@ -1461,108 +1376,144 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const masterVolume = clamp01(settings.soundEffectsVolume) * phaseGain;
       if (masterVolume <= 0) return;
 
-      const offset =
-        kind === 'countdown' ? settings.countdownSoundOffsetMs / 1000 : settings.revealSoundOffsetMs / 1000;
-      const baseTime = ctx.currentTime + 0.02;
-      const scheduledTime = baseTime + offset;
+      const pool = settings.audioCuePools[kind];
+      if (!pool.enabled) return 0;
+      const buffers = audioBuffersRef.current.sfxPools[kind];
+      if (!buffers.length) return 0;
 
-      const revealVariants = audioBuffersRef.current.revealVariants;
-      const customBuffer =
-        kind === 'countdown'
-          ? audioBuffersRef.current.countdown
-          : kind === 'reveal'
-          ? settings.revealSoundRandomize && revealVariants.length > 0
-            ? revealVariants[Math.abs(puzzleIndex) % revealVariants.length]
-            : audioBuffersRef.current.reveal
-          : kind === 'marker'
-          ? audioBuffersRef.current.marker
-          : kind === 'blink'
-          ? audioBuffersRef.current.blink
-          : kind === 'play'
-          ? audioBuffersRef.current.play
-          : kind === 'intro'
-          ? audioBuffersRef.current.intro
-          : kind === 'transition'
-          ? audioBuffersRef.current.transition
-          : kind === 'outro'
-          ? audioBuffersRef.current.outro
-          : null;
+      const eventIndex = options?.eventIndex ?? puzzleIndex;
+      const selectionMode = options?.selectionMode ?? 'cycle';
+      const selectionSources =
+        pool.sources.length === buffers.length
+          ? pool.sources
+          : buffers.map((_, index) => pool.sources[index] ?? `${kind}-${index}`);
+      const selectedIndex =
+        selectionMode === 'cycle'
+          ? resolveVideoAudioCyclePoolIndex(selectionSources, eventIndex, kind)
+          : resolveVideoAudioEventPoolIndex(selectionSources, puzzleIndex, eventIndex, kind);
+      if (selectedIndex == null) return 0;
 
-      if (customBuffer) {
-        const source = ctx.createBufferSource();
-        const gain = ctx.createGain();
+      const customBuffer = buffers[selectedIndex];
+      if (!customBuffer) return 0;
+      const resolvedMaxDuration =
+        typeof options?.maxDuration === 'number' && options.maxDuration > 0
+          ? Math.min(customBuffer.duration, options.maxDuration)
+          : customBuffer.duration;
+
+      const startCue = () => {
+        const liveCtx = ensureAudioContext();
+        if (!liveCtx || liveCtx.state === 'suspended') return;
+        const liveNodes = ensureAudioGraph(liveCtx);
+        const source = liveCtx.createBufferSource();
+        const gain = liveCtx.createGain();
+        const startTime = liveCtx.currentTime + 0.02;
+        const automation = options?.automation;
         source.buffer = customBuffer;
-        gain.gain.setValueAtTime(masterVolume, ctx.currentTime);
+        const automationDuration =
+          automation && resolvedMaxDuration > 0
+            ? Math.min(resolvedMaxDuration, Math.max(0, automation.duration))
+            : 0;
+        const startGainMultiplier = automation?.gainStart ?? 1;
+        const endGainMultiplier = automation?.gainEnd ?? startGainMultiplier;
+        const startPlaybackRate = automation?.playbackRateStart ?? 1;
+        const endPlaybackRate = automation?.playbackRateEnd ?? startPlaybackRate;
+        const targetGain = masterVolume * startGainMultiplier;
+        const rampEndTime = startTime + automationDuration;
+
+        source.playbackRate.setValueAtTime(startPlaybackRate, startTime);
+        gain.gain.setValueAtTime(targetGain, startTime);
+        if (automationDuration > 0) {
+          source.playbackRate.linearRampToValueAtTime(endPlaybackRate, rampEndTime);
+          gain.gain.linearRampToValueAtTime(masterVolume * endGainMultiplier, rampEndTime);
+        }
         source.connect(gain);
-        gain.connect(nodes.sfxGain);
+        gain.connect(liveNodes.sfxGain);
 
-        if (scheduledTime < ctx.currentTime) {
-          const offsetIntoBuffer = ctx.currentTime - scheduledTime;
-          if (offsetIntoBuffer < customBuffer.duration) {
-            source.start(ctx.currentTime, offsetIntoBuffer);
+        if (typeof options?.maxDuration === 'number' && options.maxDuration > 0) {
+          const stopTime = startTime + resolvedMaxDuration;
+          const fadeOutDuration = Math.min(
+            options.fadeOutDuration ?? 0,
+            resolvedMaxDuration
+          );
+          if (fadeOutDuration > 0) {
+            const fadeStart = Math.max(startTime, stopTime - fadeOutDuration);
+            gain.gain.setValueAtTime(masterVolume * endGainMultiplier, fadeStart);
+            gain.gain.linearRampToValueAtTime(0.0001, stopTime);
           }
-        } else {
-          source.start(scheduledTime);
         }
+
+        source.onended = () => {
+          activeSfxSourcesRef.current.delete(source);
+          source.disconnect();
+        };
+        source.start(startTime);
+        if (typeof options?.maxDuration === 'number' && options.maxDuration > 0) {
+          const stopTime = startTime + resolvedMaxDuration;
+          source.stop(stopTime + 0.02);
+        }
+        activeSfxSourcesRef.current.add(source);
+
+        if (settings.backgroundMusicEnabled && settings.backgroundMusicDuckingAmount > 0) {
+          const duckAmount = clamp01(settings.backgroundMusicDuckingAmount);
+          if (duckAmount > 0) {
+            const duckGain = liveNodes.musicDucker.gain;
+            const now = liveCtx.currentTime;
+            const minGain = 1 - duckAmount;
+            duckGain.cancelScheduledValues(now);
+            duckGain.setValueAtTime(duckGain.value, now);
+            duckGain.linearRampToValueAtTime(minGain, now + 0.04);
+            duckGain.linearRampToValueAtTime(minGain, now + 0.12);
+            duckGain.linearRampToValueAtTime(1, now + 0.32);
+          }
+        }
+      };
+
+      if (options?.delaySeconds && options.delaySeconds > 0) {
+        const timeoutId = window.setTimeout(startCue, options.delaySeconds * 1000);
+        scheduledSfxTimeoutsRef.current.push(timeoutId);
       } else {
-        const tones = buildCueTones(kind);
-        tones.forEach((tone) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          const startTime = scheduledTime + tone.startOffset;
-          const endTime = startTime + tone.duration;
-          const attack = tone.attack ?? 0.012;
-          const release = tone.release ?? Math.max(0.03, tone.duration * 0.62);
-          const peak = masterVolume * tone.volume;
-
-          osc.type = tone.type;
-          osc.frequency.setValueAtTime(Math.max(1, tone.frequency), startTime);
-          if (tone.endFrequency && tone.endFrequency !== tone.frequency) {
-            osc.frequency.exponentialRampToValueAtTime(Math.max(1, tone.endFrequency), endTime);
-          }
-          if (tone.detune) {
-            osc.detune.setValueAtTime(tone.detune, startTime);
-          }
-
-          gain.gain.setValueAtTime(0.0001, startTime);
-          gain.gain.linearRampToValueAtTime(peak, Math.min(startTime + attack, endTime));
-          gain.gain.linearRampToValueAtTime(0.0001, Math.max(startTime, endTime - release));
-
-          osc.connect(gain);
-          gain.connect(nodes.sfxGain);
-          osc.start(startTime);
-          osc.stop(endTime + 0.02);
-        });
+        startCue();
       }
 
-      if (settings.backgroundMusicEnabled && settings.backgroundMusicDuckingAmount > 0) {
-        const duckAmount = clamp01(settings.backgroundMusicDuckingAmount);
-        if (duckAmount > 0) {
-          const duckGain = nodes.musicDucker.gain;
-          const now = ctx.currentTime;
-          const minGain = 1 - duckAmount;
-          duckGain.cancelScheduledValues(now);
-          duckGain.setValueAtTime(duckGain.value, now);
-          duckGain.linearRampToValueAtTime(minGain, now + 0.04);
-          duckGain.linearRampToValueAtTime(minGain, now + 0.12);
-          duckGain.linearRampToValueAtTime(1, now + 0.32);
-        }
-      }
+      return resolvedMaxDuration;
+
     },
     [
       ensureAudioContext,
       ensureAudioGraph,
+      settings.audioCuePools,
       settings.backgroundMusicDuckingAmount,
       settings.backgroundMusicEnabled,
-      settings.countdownSoundOffsetMs,
       settings.previewSoundEnabled,
-      settings.revealSoundOffsetMs,
-      settings.revealSoundRandomize,
       settings.sfxPhaseLevels,
       settings.soundEffectsEnabled,
       settings.soundEffectsVolume
     ]
   );
+
+  const isBlinkingEnabled = settings.enableBlinking !== false;
+  const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
+  const introDuration = resolveIntroDuration(settings);
+  const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
+  const revealRegionCount = currentPuzzle.regions.length;
+  const revealStepSeconds = Math.min(
+    Math.max(0.5, settings.sequentialRevealStep),
+    revealPhaseDuration / Math.max(1, revealRegionCount + 1)
+  );
+  const revealBlinkStartTime =
+    revealRegionCount > 0
+      ? Math.max(0, (revealRegionCount - 1) * revealStepSeconds + blinkCycleDuration)
+      : 0;
+  const revealElapsed = phase === 'revealing' ? Math.max(0, revealPhaseDuration - timeLeft) : 0;
+  const revealedRegionCount =
+    phase === 'revealing' && revealRegionCount > 0
+      ? Math.min(revealRegionCount, Math.floor(revealElapsed / revealStepSeconds) + 1)
+      : 0;
+  const isBlinkOverlayActive =
+    isBlinkingEnabled &&
+    phase === 'revealing' &&
+    revealRegionCount > 0 &&
+    revealElapsed >= revealBlinkStartTime;
 
   useEffect(() => {
     if (!hasPuzzles) return;
@@ -1663,11 +1614,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   useEffect(() => {
     return () => {
+      stopScheduledSfx();
       stopPreviewMusic();
       audioContextRef.current?.close();
       audioContextRef.current = null;
     };
-  }, [stopPreviewMusic]);
+  }, [stopPreviewMusic, stopScheduledSfx]);
 
   const handleSkip = () => {
     unlockAudio();
@@ -1700,20 +1652,41 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }, [unlockAudio]);
 
   useEffect(() => {
-    if (phase !== 'showing') {
-      lastCountdownKeyRef.current = null;
+    if (!externalControlAction) return;
+    if (lastExternalControlNonceRef.current === externalControlAction.nonce) return;
+
+    lastExternalControlNonceRef.current = externalControlAction.nonce;
+
+    if (externalControlAction.kind === 'skip') {
+      handleSkip();
+      return;
     }
-  }, [phase, safeCurrentIndex]);
+
+    if (externalControlAction.kind === 'replay') {
+      handleReplay();
+      return;
+    }
+
+    if (phase === 'finished') {
+      handleReplay();
+      return;
+    }
+
+    handleTogglePlayback();
+  }, [externalControlAction, handleReplay, handleTogglePlayback, phase]);
 
   useEffect(() => {
-    if (phase !== 'revealing') {
-      lastRevealKeyRef.current = null;
-    }
-  }, [phase, safeCurrentIndex]);
+    onPlaybackStateChange?.({
+      hasPuzzles,
+      isPlaying,
+      phase,
+      puzzleIndex: safeCurrentIndex
+    });
+  }, [hasPuzzles, isPlaying, onPlaybackStateChange, phase, safeCurrentIndex]);
 
   useEffect(() => {
     if (phase !== 'showing') {
-      lastPlayKeyRef.current = null;
+      lastShowAudioKeyRef.current = null;
     }
   }, [phase, safeCurrentIndex]);
 
@@ -1725,121 +1698,110 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }, [phase, safeCurrentIndex]);
 
   useEffect(() => {
-    if (phase !== 'intro') {
-      lastIntroKeyRef.current = null;
-    }
-  }, [phase]);
-
-  useEffect(() => {
     if (phase !== 'transitioning') {
       lastTransitionKeyRef.current = null;
     }
   }, [phase, safeCurrentIndex]);
 
   useEffect(() => {
-    if (phase !== 'outro') {
-      lastOutroKeyRef.current = null;
+    return () => {
+      stopScheduledSfx();
+    };
+  }, [
+    stopScheduledSfx
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying || phase !== 'showing') return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+
+    const key = `${safeCurrentIndex}:show-audio`;
+    if (lastShowAudioKeyRef.current === key) return;
+    lastShowAudioKeyRef.current = key;
+    stopScheduledSfx();
+
+    const progressFillPoolEnabled =
+      settings.progressMotion === 'intro_fill' &&
+      settings.audioCuePools.progress_fill_intro.enabled &&
+      audioBuffersRef.current.sfxPools.progress_fill_intro.length > 0;
+    const progressFillWindow = progressFillPoolEnabled
+      ? resolveProgressFillIntroCueWindow(settings.showDuration, settings.showDuration)
+      : null;
+    const progressFillDuration = progressFillWindow
+      ? playAudioCue('progress_fill_intro', phase, safeCurrentIndex, {
+          eventIndex: safeCurrentIndex,
+          selectionMode: 'cycle',
+          maxDuration: progressFillWindow.maxDuration,
+          fadeOutDuration: progressFillWindow.fadeOutDuration
+        }) ?? 0
+      : 0;
+    const puzzlePlayWindow = resolvePuzzlePlayCueWindow(
+      settings.showDuration,
+      progressFillDuration,
+      settings.puzzlePlayUrgencyRampEnabled
+    );
+    const lowTimeWindow = resolveLowTimeWarningCueWindow(settings.showDuration);
+    const shouldPlayLowTimeWarning =
+      settings.audioCuePools.low_time_warning.enabled &&
+      audioBuffersRef.current.sfxPools.low_time_warning.length > 0;
+
+    if (puzzlePlayWindow) {
+      playAudioCue('puzzle_play', phase, safeCurrentIndex, {
+        eventIndex: safeCurrentIndex,
+        selectionMode: 'cycle',
+        delaySeconds: puzzlePlayWindow.delaySeconds,
+        maxDuration: puzzlePlayWindow.maxDuration,
+        fadeOutDuration: puzzlePlayWindow.fadeOutDuration,
+        automation: puzzlePlayWindow.automation
+      });
     }
-  }, [phase]);
 
-  useEffect(() => {
-    if (!isPlaying || phase !== 'showing') return;
-    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.countdownSoundEnabled) return;
-    if (!audioUnlockedRef.current) return;
+    if (shouldPlayLowTimeWarning && lowTimeWindow) {
+      playAudioCue('low_time_warning', phase, safeCurrentIndex, {
+        eventIndex: safeCurrentIndex,
+        selectionMode: 'cycle',
+        delaySeconds: lowTimeWindow.delaySeconds,
+        maxDuration: lowTimeWindow.maxDuration,
+        fadeOutDuration: lowTimeWindow.fadeOutDuration
+      });
+    }
 
-    const secondsLeft = Math.ceil(timeLeft);
-    if (secondsLeft < 1 || secondsLeft > 3) return;
-    const key = `${safeCurrentIndex}:${secondsLeft}`;
-    if (lastCountdownKeyRef.current === key) return;
-    lastCountdownKeyRef.current = key;
-    playAudioCue('countdown', phase, safeCurrentIndex);
-  }, [
-    isPlaying,
-    phase,
-    timeLeft,
-    safeCurrentIndex,
-    settings.countdownSoundEnabled,
-    settings.previewSoundEnabled,
-    settings.soundEffectsEnabled,
-    playAudioCue
-  ]);
-
-  useEffect(() => {
-    if (!isPlaying || phase !== 'showing') return;
-    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.playSoundEnabled) return;
-    if (!audioUnlockedRef.current) return;
-
-    const key = `${safeCurrentIndex}:play`;
-    if (lastPlayKeyRef.current === key) return;
-    lastPlayKeyRef.current = key;
-    playAudioCue('play', phase, safeCurrentIndex);
+    return () => {
+      stopScheduledSfx();
+    };
   }, [
     isPlaying,
     phase,
     safeCurrentIndex,
-    settings.playSoundEnabled,
+    settings.audioCuePools,
+    settings.puzzlePlayUrgencyRampEnabled,
+    settings.progressMotion,
     settings.previewSoundEnabled,
+    settings.showDuration,
     settings.soundEffectsEnabled,
-    playAudioCue
-  ]);
-
-  useEffect(() => {
-    if (!isPlaying || phase !== 'intro') return;
-    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.introSoundEnabled) return;
-    if (!audioUnlockedRef.current) return;
-
-    const key = `intro`;
-    if (lastIntroKeyRef.current === key) return;
-    lastIntroKeyRef.current = key;
-    playAudioCue('intro', phase, safeCurrentIndex);
-  }, [
-    isPlaying,
-    phase,
-    safeCurrentIndex,
-    settings.introSoundEnabled,
-    settings.previewSoundEnabled,
-    settings.soundEffectsEnabled,
-    playAudioCue
+    playAudioCue,
+    stopScheduledSfx
   ]);
 
   useEffect(() => {
     if (!isPlaying || phase !== 'transitioning') return;
     if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.transitionSoundEnabled) return;
     if (!audioUnlockedRef.current) return;
+    if (settings.transitionDuration <= 0) return;
 
     const key = `${safeCurrentIndex}:transition`;
     if (lastTransitionKeyRef.current === key) return;
     lastTransitionKeyRef.current = key;
-    playAudioCue('transition', phase, safeCurrentIndex);
+    playAudioCue('transition', phase, safeCurrentIndex, {
+      eventIndex: safeCurrentIndex,
+      selectionMode: 'cycle'
+    });
   }, [
     isPlaying,
     phase,
     safeCurrentIndex,
-    settings.transitionSoundEnabled,
-    settings.previewSoundEnabled,
-    settings.soundEffectsEnabled,
-    playAudioCue
-  ]);
-
-  useEffect(() => {
-    if (!isPlaying || phase !== 'outro') return;
-    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.outroSoundEnabled) return;
-    if (!audioUnlockedRef.current) return;
-
-    const key = `outro`;
-    if (lastOutroKeyRef.current === key) return;
-    lastOutroKeyRef.current = key;
-    playAudioCue('outro', phase, safeCurrentIndex);
-  }, [
-    isPlaying,
-    phase,
-    safeCurrentIndex,
-    settings.outroSoundEnabled,
+    settings.transitionDuration,
     settings.previewSoundEnabled,
     settings.soundEffectsEnabled,
     playAudioCue
@@ -1848,18 +1810,56 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   useEffect(() => {
     if (!isPlaying || phase !== 'revealing') return;
     if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.revealSoundEnabled) return;
     if (!audioUnlockedRef.current) return;
+    if (revealedRegionCount <= 0) return;
 
-    const key = `${safeCurrentIndex}:reveal`;
-    if (lastRevealKeyRef.current === key) return;
-    lastRevealKeyRef.current = key;
-    playAudioCue('reveal', phase, safeCurrentIndex);
+    const eventIndex = Math.max(0, revealedRegionCount - 1);
+    const key = `${safeCurrentIndex}:marker:${eventIndex}`;
+    if (lastMarkerKeyRef.current === key) return;
+    lastMarkerKeyRef.current = key;
+    playAudioCue('marker_reveal', phase, safeCurrentIndex, {
+      eventIndex,
+      selectionMode: 'event'
+    });
   }, [
     isPlaying,
     phase,
+    revealedRegionCount,
     safeCurrentIndex,
-    settings.revealSoundEnabled,
+    settings.previewSoundEnabled,
+    settings.soundEffectsEnabled,
+    playAudioCue
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
+    if (!audioUnlockedRef.current) return;
+    if (!isBlinkOverlayActive) {
+      lastBlinkVisibleRef.current = false;
+      return;
+    }
+
+    const blinkCueIndex = Math.max(
+      0,
+      Math.floor((revealElapsed - revealBlinkStartTime) / Math.max(0.2, settings.blinkSpeed))
+    );
+    if (isBlinkOverlayVisible && !lastBlinkVisibleRef.current) {
+      playAudioCue('blink', phase, safeCurrentIndex, {
+        eventIndex: blinkCueIndex,
+        selectionMode: 'event'
+      });
+    }
+    lastBlinkVisibleRef.current = isBlinkOverlayVisible;
+  }, [
+    isBlinkOverlayActive,
+    isBlinkOverlayVisible,
+    isPlaying,
+    phase,
+    revealBlinkStartTime,
+    revealElapsed,
+    safeCurrentIndex,
+    settings.blinkSpeed,
     settings.previewSoundEnabled,
     settings.soundEffectsEnabled,
     playAudioCue
@@ -1966,19 +1966,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [packagePreset, resolvedLayout, styleModules.text]);
   const frameLayout = resolvedLayout.frame;
-  const isBlinkingEnabled = settings.enableBlinking !== false;
-  const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
-  const introDuration = resolveIntroDuration(settings);
-  const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
-  const revealRegionCount = currentPuzzle.regions.length;
-  const revealStepSeconds = Math.min(
-    Math.max(0.5, settings.sequentialRevealStep),
-    revealPhaseDuration / Math.max(1, revealRegionCount + 1)
-  );
-  const revealBlinkStartTime =
-    revealRegionCount > 0
-      ? Math.max(0, (revealRegionCount - 1) * revealStepSeconds + blinkCycleDuration)
-      : 0;
   const generatedBackgroundPlaybackTime = useMemo(
     () =>
       resolveGeneratedBackgroundPlaybackTime({
@@ -2116,64 +2103,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     stopPreviewMusic,
     totalPlaybackDuration
   ]);
-  const revealElapsed = phase === 'revealing' ? Math.max(0, revealPhaseDuration - timeLeft) : 0;
-  const revealedRegionCount =
-    phase === 'revealing' && revealRegionCount > 0
-      ? Math.min(revealRegionCount, Math.floor(revealElapsed / revealStepSeconds) + 1)
-      : 0;
-  const isBlinkOverlayActive =
-    isBlinkingEnabled &&
-    phase === 'revealing' &&
-    revealRegionCount > 0 &&
-    revealElapsed >= revealBlinkStartTime;
-
-  useEffect(() => {
-    if (!isPlaying || phase !== 'revealing') return;
-    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.markerSoundEnabled) return;
-    if (!audioUnlockedRef.current) return;
-    if (revealedRegionCount <= 0) return;
-
-    const key = `${safeCurrentIndex}:marker:${revealedRegionCount}`;
-    if (lastMarkerKeyRef.current === key) return;
-    lastMarkerKeyRef.current = key;
-    playAudioCue('marker', phase, safeCurrentIndex);
-  }, [
-    isPlaying,
-    phase,
-    revealedRegionCount,
-    safeCurrentIndex,
-    settings.markerSoundEnabled,
-    settings.previewSoundEnabled,
-    settings.soundEffectsEnabled,
-    playAudioCue
-  ]);
-
-  useEffect(() => {
-    if (!isPlaying) return;
-    if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
-    if (!settings.blinkSoundEnabled) return;
-    if (!audioUnlockedRef.current) return;
-    if (!isBlinkOverlayActive) {
-      lastBlinkVisibleRef.current = false;
-      return;
-    }
-
-    if (isBlinkOverlayVisible && !lastBlinkVisibleRef.current) {
-      playAudioCue('blink', phase, safeCurrentIndex);
-    }
-    lastBlinkVisibleRef.current = isBlinkOverlayVisible;
-  }, [
-    isBlinkOverlayActive,
-    isBlinkOverlayVisible,
-    isPlaying,
-    phase,
-    safeCurrentIndex,
-    settings.blinkSoundEnabled,
-    settings.previewSoundEnabled,
-    settings.soundEffectsEnabled,
-    playAudioCue
-  ]);
   const currentPuzzleNumber = hasPuzzles ? safeCurrentIndex + 1 : 0;
   const nextPuzzleNumber = Math.min(puzzles.length, safeCurrentIndex + 2);
   const templateValues = {
@@ -2225,12 +2154,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     styleModules.text.subtitleTransform
   );
   const styledProgressLabel = applyTextTransform(progressLabel, styleModules.text.titleTransform);
-  const shouldRenderHeaderText = phase !== 'intro' && phase !== 'outro';
-  const shouldShowHeaderTimer = settings.showTimer !== false && phase !== 'revealing';
+  const styledTransitionTitle = applyTextTransform(
+    VIDEO_TRANSITION_LABEL,
+    styleModules.text.titleTransform
+  );
+  const shouldRenderHeaderText = phase === 'showing' || phase === 'revealing';
+  const shouldShowHeaderTimer = settings.showTimer !== false && phase === 'showing';
   const shouldShowHeaderProgress = settings.showProgress !== false && phase === 'showing';
-  const shouldRenderCustomLogo = Boolean(settings.logo) && customLayoutEnabled;
+  const shouldShowClassicPuzzleBadge = phase === 'showing' || phase === 'revealing';
+  const shouldRenderCustomLogo = Boolean(renderedLogoSrc) && customLayoutEnabled;
   const shouldRenderInlineLogo =
-    Boolean(settings.logo) && !customLayoutEnabled && !isClassicStyle && !isStorybookStyle && shouldRenderHeaderText;
+    Boolean(renderedLogoSrc) &&
+    !customLayoutEnabled &&
+    !isClassicStyle &&
+    !isStorybookStyle &&
+    shouldRenderHeaderText;
   useEffect(() => {
     if (!isBlinkOverlayActive) {
       setIsBlinkOverlayVisible(false);
@@ -2260,9 +2198,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : phase === 'outro'
       ? settings.sceneSettings.outroDuration
       : 0;
-  const phaseElapsed = Math.max(0, phaseDuration - timeLeft);
+  const visualTimeLeft = isPlaying ? smoothedTimeLeft : timeLeft;
+  const phaseElapsed = Math.max(0, phaseDuration - visualTimeLeft);
   const showIntroClip = phase === 'intro' && Boolean(introVideoUrl) && introVideoReady;
   const introClipAudioEnabled = settings.previewSoundEnabled;
+  const generatedBackgroundCoversHeader =
+    Boolean(currentGeneratedBackground) &&
+    settings.generatedBackgroundCoverage === 'full_board' &&
+    !showIntroClip;
 
   useEffect(() => {
     if (!showIntroClip || !introVideoUrl) return;
@@ -2304,18 +2247,34 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const progressPercent =
     phaseDuration <= 0
       ? 0
-      : Math.min(100, Math.max(0, ((phaseDuration - timeLeft) / phaseDuration) * 100));
+      : Math.min(100, Math.max(0, ((phaseDuration - visualTimeLeft) / phaseDuration) * 100));
   const countdownPercent =
     phaseDuration <= 0
       ? 0
-      : Math.max(0, Math.min(100, (timeLeft / Math.max(0.1, phaseDuration)) * 100));
+      : Math.max(0, Math.min(100, (visualTimeLeft / Math.max(0.1, phaseDuration)) * 100));
   const transitionDuration = Math.max(0.001, settings.transitionDuration);
   const transitionProgress =
     phase === 'transitioning'
-      ? Math.min(1, Math.max(0, (transitionDuration - timeLeft) / transitionDuration))
+      ? Math.min(1, Math.max(0, (transitionDuration - visualTimeLeft) / transitionDuration))
       : 0;
   const transitionSmooth =
     phase === 'transitioning' ? transitionProgress * transitionProgress * (3 - 2 * transitionProgress) : 0;
+  const transitionSequenceState = useMemo(
+    () =>
+      resolveVideoTransitionSequenceState({
+        phaseDuration: settings.transitionDuration,
+        timeLeft: visualTimeLeft
+      }),
+    [settings.transitionDuration, visualTimeLeft]
+  );
+  const puzzleEntryState = useMemo(
+    () =>
+      resolveVideoPuzzleEntryState({
+        phaseDuration: settings.showDuration,
+        timeLeft: visualTimeLeft
+      }),
+    [settings.showDuration, visualTimeLeft]
+  );
   const transitionCardOpacity =
     phase === 'transitioning'
       ? Math.min(
@@ -2342,31 +2301,53 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     settings.transitionStyle === 'none' ? 0 : Math.max(0, settings.transitionDuration);
   const puzzleMotionInitial = styleModules.transition.previewInitial;
   const puzzleMotionExit = styleModules.transition.previewExit;
+  const generatedProgressTheme = settings.generatedProgressEnabled
+    ? PROGRESS_BAR_THEMES[settings.generatedProgressStyle]
+    : null;
+  const generatedProgressFillColors = settings.generatedProgressEnabled
+    ? resolveProgressBarFillColors(settings.generatedProgressStyle, countdownPercent / 100)
+    : null;
   const resolvedProgressFillDefinition =
-    isClassicStyle && styleModules.progress.id === 'package'
+    settings.generatedProgressEnabled && generatedProgressTheme
+      ? resolveProgressBarFillStyle(
+          settings.generatedProgressStyle,
+          countdownPercent / 100,
+          generatedProgressTheme
+        )
+      : isClassicStyle && styleModules.progress.id === 'package'
       ? CLASSIC_HUD_SPEC.progress.fillGradient
       : buildProgressFillDefinition(styleModules.progress, visualTheme);
   const resolvedProgressGlow =
-    styleModules.progress.variant === 'glow'
+    settings.generatedProgressEnabled
+      ? generatedProgressTheme?.progressFillGlow
+      : styleModules.progress.variant === 'glow'
       ? visualTheme.progressFillGlow ?? `0 0 12px ${visualTheme.timerDot}`
       : isClassicStyle
       ? CLASSIC_HUD_SPEC.progress.fillGlowCss
       : undefined;
+  const isTextFillProgress = settings.generatedProgressEnabled
+    ? settings.generatedProgressRenderMode === 'text_fill'
+    : styleModules.progress.variant === 'text_fill';
+  const progressMotionState = useMemo(
+    () =>
+      resolveVideoProgressMotionState({
+        mode: settings.progressMotion,
+        phase,
+        phaseDuration,
+        timeLeft: visualTimeLeft
+      }),
+    [phase, phaseDuration, settings.progressMotion, visualTimeLeft]
+  );
+  const displayedProgressPercent = Math.max(0, Math.min(100, progressMotionState.fillPercent));
+  const typedTransitionTitle = useMemo(
+    () =>
+      revealTypewriterText(
+        styledTransitionTitle,
+        phase === 'transitioning' ? transitionSequenceState.titleProgress : 1
+      ),
+    [phase, styledTransitionTitle, transitionSequenceState.titleProgress]
+  );
 
-  const progressFillStyle =
-    hudLayout.progressOrientation === 'horizontal'
-      ? {
-          width: `${countdownPercent}%`,
-          height: '100%',
-          background: resolvedProgressFillDefinition,
-          boxShadow: resolvedProgressGlow
-        }
-      : {
-          width: '100%',
-          height: `${countdownPercent}%`,
-          background: resolvedProgressFillDefinition,
-          boxShadow: resolvedProgressGlow
-        };
   const classicCenterTitleFontSize = isVerticalLayout
     ? CLASSIC_HUD_SPEC.centerTitle.fontSizeNarrow
     : CLASSIC_HUD_SPEC.centerTitle.fontSize;
@@ -2380,7 +2361,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         bottom: CLASSIC_HUD_SPEC.progress.bottom
       } as React.CSSProperties)
     : hudLayout.progressPosition;
-  const isTextFillProgress = styleModules.progress.variant === 'text_fill';
   const progressTrackWidthPx = isClassicStyle
     ? Math.round(BASE_STAGE_SIZE[settings.aspectRatio].width * CLASSIC_HUD_SPEC.progress.widthRatio)
     : hudLayout.progressWidth;
@@ -2392,24 +2372,134 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const progressTrackWidth = `${progressTrackWidthPx}px`;
   const progressTrackHeight = `${progressTrackHeightPx}px`;
   const progressTrackRadius = isClassicStyle
-    ? `${radiusTokenToPx(styleModules.progress.radiusToken, CLASSIC_HUD_SPEC.progress.height)}px`
-    : `${radiusTokenToPx(styleModules.progress.radiusToken, hudLayout.progressHeight)}px`;
-  const progressTrackBorderWidth = isClassicStyle
-    ? `${CLASSIC_HUD_SPEC.progress.borderWidth}px`
-    : `${Math.max(1, Math.round(2 * styleModules.progress.borderWidthScale))}px`;
+    ? `${settings.generatedProgressEnabled ? Math.max(8, Math.round(CLASSIC_HUD_SPEC.progress.height / 2)) : radiusTokenToPx(styleModules.progress.radiusToken, CLASSIC_HUD_SPEC.progress.height)}px`
+    : `${
+        settings.generatedProgressEnabled
+          ? Math.max(8, Math.round(hudLayout.progressHeight / 2))
+          : radiusTokenToPx(styleModules.progress.radiusToken, hudLayout.progressHeight)
+      }px`;
+  const progressTrackBorderWidth =
+    settings.generatedProgressEnabled
+      ? `${Math.max(2, Math.round(progressTrackHeightPx * 0.08))}px`
+      : isClassicStyle
+      ? `${CLASSIC_HUD_SPEC.progress.borderWidth}px`
+      : `${Math.max(1, Math.round(2 * styleModules.progress.borderWidthScale))}px`;
   const progressTrackShadow = isClassicStyle
-    ? 'inset 0 1px 0 rgba(255,255,255,0.24), 0 2px 4px rgba(0,0,0,0.32)'
+    ? settings.generatedProgressEnabled
+      ? generatedProgressTheme?.progressFillGlow ?? 'inset 0 1px 0 rgba(255,255,255,0.24), 0 2px 4px rgba(0,0,0,0.32)'
+      : 'inset 0 1px 0 rgba(255,255,255,0.24), 0 2px 4px rgba(0,0,0,0.32)'
+    : settings.generatedProgressEnabled && generatedProgressTheme?.progressFillGlow
+    ? `0 0 0 2px rgba(0,0,0,0.9), ${generatedProgressTheme.progressFillGlow}`
     : styleModules.progress.variant === 'glow'
     ? `0 0 0 2px rgba(0,0,0,0.9), 0 0 16px ${visualTheme.timerDot}`
     : '2px 2px 0px 0px rgba(0,0,0,1)';
   const progressTrackBackground = isClassicStyle
-    ? styleModules.progress.id === 'package'
+    ? settings.generatedProgressEnabled && generatedProgressTheme
+      ? generatedProgressTheme.progressTrackBg
+      : styleModules.progress.id === 'package'
       ? CLASSIC_HUD_SPEC.progress.trackBackground
       : visualTheme.progressTrackBg
+    : settings.generatedProgressEnabled && generatedProgressTheme
+    ? generatedProgressTheme.progressTrackBg
     : visualTheme.progressTrackBg;
+  const progressTrackBorderColor =
+    settings.generatedProgressEnabled && generatedProgressTheme
+      ? generatedProgressTheme.progressTrackBorder
+      : visualTheme.progressTrackBorder;
+  const progressPulseBoxShadow =
+    progressMotionState.pulseGlowOpacity > 0
+      ? `0 0 ${Math.max(
+          10,
+          Math.round(
+            (hudLayout.progressOrientation === 'vertical' ? progressTrackWidthPx : progressTrackHeightPx) *
+              (1.15 + progressMotionState.pulseGlowOpacity * 1.8)
+          )
+        )}px rgba(255,255,255,${(0.08 + progressMotionState.pulseGlowOpacity * 0.26).toFixed(3)})`
+      : '';
+  const progressFillBoxShadow = [resolvedProgressGlow, progressPulseBoxShadow].filter(Boolean).join(', ');
+  const progressFillTransform =
+    hudLayout.progressOrientation === 'vertical'
+      ? `scaleX(${progressMotionState.pulseScale.toFixed(3)})`
+      : `scaleY(${progressMotionState.pulseScale.toFixed(3)})`;
+  const progressFillFilter = `brightness(${(1 + progressMotionState.pulseBrightness).toFixed(3)}) saturate(${(
+    1 + progressMotionState.pulseBrightness * 0.75
+  ).toFixed(3)})`;
+  const progressFillStyle =
+    hudLayout.progressOrientation === 'horizontal'
+      ? {
+          width: `${displayedProgressPercent}%`,
+          height: '100%',
+          background: resolvedProgressFillDefinition,
+          boxShadow: progressFillBoxShadow || undefined,
+          position: 'relative' as const,
+          overflow: 'hidden' as const,
+          transformOrigin: 'left center',
+          transform: progressFillTransform,
+          filter: progressFillFilter
+        }
+      : {
+          width: '100%',
+          height: `${displayedProgressPercent}%`,
+          background: resolvedProgressFillDefinition,
+          boxShadow: progressFillBoxShadow || undefined,
+          position: 'relative' as const,
+          overflow: 'hidden' as const,
+          transformOrigin: 'center bottom',
+          transform: progressFillTransform,
+          filter: progressFillFilter
+        };
+  const shouldShowBarProgressSweep = !isTextFillProgress && progressMotionState.sweepActive;
+  const progressSweepStyle: React.CSSProperties | undefined = shouldShowBarProgressSweep
+    ? hudLayout.progressOrientation === 'vertical'
+      ? {
+          position: 'absolute',
+          left: '0',
+          width: '100%',
+          height: `${Math.max(16, Math.round(progressTrackHeightPx * 0.22))}px`,
+          bottom: `${progressTrackHeightPx * progressMotionState.sweepProgress - Math.max(16, Math.round(progressTrackHeightPx * 0.11))}px`,
+          background:
+            'linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.06) 30%, rgba(255,255,255,0.28) 50%, rgba(255,255,255,0.06) 70%, rgba(255,255,255,0) 100%)',
+          opacity: progressMotionState.sweepOpacity
+        }
+      : {
+          position: 'absolute',
+          top: '0',
+          height: '100%',
+          width: `${Math.max(18, Math.round(progressTrackWidthPx * 0.18))}px`,
+          left: `${progressTrackWidthPx * progressMotionState.sweepProgress - Math.max(18, Math.round(progressTrackWidthPx * 0.09))}px`,
+          background:
+            'linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.06) 30%, rgba(255,255,255,0.28) 50%, rgba(255,255,255,0.06) 70%, rgba(255,255,255,0) 100%)',
+          opacity: progressMotionState.sweepOpacity
+        }
+    : undefined;
+  const progressPulseOverlayStyle: React.CSSProperties | undefined =
+    progressMotionState.pulseOverlayOpacity > 0
+      ? hudLayout.progressOrientation === 'vertical'
+        ? {
+            position: 'absolute',
+            inset: '0',
+            background:
+              'linear-gradient(180deg, rgba(255,255,255,0.82) 0%, rgba(255,255,255,0.24) 28%, rgba(255,255,255,0) 58%)',
+            opacity: progressMotionState.pulseOverlayOpacity,
+            pointerEvents: 'none'
+          }
+        : {
+            position: 'absolute',
+            inset: '0',
+            background:
+              'linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.04) 54%, rgba(255,255,255,0.24) 78%, rgba(255,255,255,0.82) 100%)',
+            opacity: progressMotionState.pulseOverlayOpacity,
+            pointerEvents: 'none'
+          }
+      : undefined;
   const textProgressFillColors = useMemo(
-    () => resolveTextProgressFillColors(countdownPercent, visualTheme),
-    [countdownPercent, visualTheme]
+    () =>
+      resolveTextProgressFillColors(
+        countdownPercent,
+        generatedProgressTheme ?? visualTheme,
+        generatedProgressFillColors
+      ),
+    [countdownPercent, generatedProgressFillColors, generatedProgressTheme, visualTheme]
   );
   const textProgressFontSize = useMemo(
     () =>
@@ -2437,14 +2527,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const stageMetrics = useMemo(() => {
     const baseSize = BASE_STAGE_SIZE[settings.aspectRatio];
-    const horizontalPadding = embedded ? 8 : 24;
-    const topReserved = embedded ? 8 : 92;
+    const horizontalPadding = embedded ? 0 : 24;
+    const topReserved = embedded ? 0 : 92;
     const bottomReserved = embedded
-      ? phase === 'finished'
-        ? 8
-        : hidePlaybackControls
-        ? 8
-        : 74
+      ? 0
       : phase === 'finished'
       ? 24
       : 122;
@@ -2469,17 +2555,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (embedded) {
       const target = viewportRef.current;
       if (!target) return;
+      let frameHandle: number | null = null;
       const syncSize = () => {
-        setViewportSize({
-          width: Math.max(1, target.clientWidth),
-          height: Math.max(1, target.clientHeight)
+        const nextWidth = Math.max(1, target.clientWidth);
+        const nextHeight = Math.max(1, target.clientHeight);
+        setViewportSize((previous) => {
+          if (Math.abs(previous.width - nextWidth) < 2 && Math.abs(previous.height - nextHeight) < 2) {
+            return previous;
+          }
+          return {
+            width: nextWidth,
+            height: nextHeight
+          };
+        });
+      };
+      const scheduleSyncSize = () => {
+        if (frameHandle !== null) {
+          cancelAnimationFrame(frameHandle);
+        }
+        frameHandle = window.requestAnimationFrame(() => {
+          frameHandle = null;
+          syncSize();
         });
       };
       syncSize();
       if (typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(() => syncSize());
+      const observer = new ResizeObserver(() => scheduleSyncSize());
       observer.observe(target);
-      return () => observer.disconnect();
+      return () => {
+        observer.disconnect();
+        if (frameHandle !== null) {
+          cancelAnimationFrame(frameHandle);
+        }
+      };
     }
 
     if (typeof window === 'undefined') return;
@@ -2583,7 +2691,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : 'highlight_soft';
   const circleStroke = Math.max(2, settings.circleThickness);
   const outlineStroke = Math.max(0, settings.outlineThickness);
-  const imagePanelOutlineThickness = Math.max(0, settings.imagePanelOutlineThickness ?? 0);
+  const imagePanelOutlineThickness = 0;
   const usesImagePanelOutline = imagePanelOutlineThickness > 0;
   const effectiveGamePadding = !isStorybookStyle && usesImagePanelOutline ? 0 : frameLayout.gamePadding;
   const imagePanelOutlineShadow =
@@ -3109,14 +3217,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   );
 
   const rootClassName = embedded
-    ? 'relative w-full h-full overflow-hidden'
+    ? 'relative flex h-full w-full items-center justify-center overflow-hidden'
     : 'flex flex-col items-center justify-center min-h-[100dvh] overflow-hidden relative';
   const playbackControlsVisible = !hidePlaybackControls && phase !== 'finished';
   const controlsContainerClass = embedded
-    ? 'absolute bottom-2 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-2'
+    ? 'absolute bottom-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-full border-2 border-black bg-white/96 px-2 py-1.5 shadow-[0_4px_0px_0px_rgba(0,0,0,1)]'
     : 'absolute bottom-4 sm:bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-4 sm:space-x-6';
   const controlButtonClass = embedded
-    ? 'p-2 bg-white border-4 border-black rounded-full transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group hover:bg-[var(--hover-bg)]'
+    ? 'flex h-10 w-10 items-center justify-center rounded-full border-2 border-black bg-white transition-all group hover:bg-[var(--hover-bg)]'
     : 'p-3 sm:p-4 bg-white border-4 border-black rounded-full transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group hover:bg-[var(--hover-bg)]';
   const controlIconSize = embedded ? 20 : 28;
   const renderHeaderLogo = () => {
@@ -3253,6 +3361,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     const gradientId = `${textProgressId}-gradient`;
     const clipId = `${textProgressId}-clip`;
+    const sweepGradientId = `${textProgressId}-sweep`;
     const width = progressTextWidthPx;
     const height = progressTextHeightPx;
     const fontSize = textProgressFontSize;
@@ -3268,7 +3377,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       styleModules.text.titleCanvasWeight
     );
     const fillX = Math.max(0, Math.min(width, textSpan.left));
-    const fillWidth = Math.max(0, Math.min(textSpan.width, (textSpan.width * countdownPercent) / 100));
+    const fillWidth = Math.max(0, Math.min(textSpan.width, (textSpan.width * displayedProgressPercent) / 100));
+    const shouldShowTextProgressSweep = progressMotionState.sweepActive;
+    const textSweepWidth = Math.max(18, Math.round(textSpan.width * 0.18));
+    const textSweepX = fillX + textSpan.width * progressMotionState.sweepProgress - textSweepWidth / 2;
 
     return (
       <div
@@ -3285,6 +3397,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <stop offset="0%" stopColor={textProgressFillColors.start} />
               <stop offset="58%" stopColor={textProgressFillColors.middle} />
               <stop offset="100%" stopColor={textProgressFillColors.end} />
+            </linearGradient>
+            <linearGradient id={sweepGradientId} x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="rgba(255,255,255,0)" />
+              <stop offset="30%" stopColor="rgba(255,255,255,0.06)" />
+              <stop offset="50%" stopColor="rgba(255,255,255,0.28)" />
+              <stop offset="70%" stopColor="rgba(255,255,255,0.06)" />
+              <stop offset="100%" stopColor="rgba(255,255,255,0)" />
             </linearGradient>
             <clipPath id={clipId}>
               <text
@@ -3315,6 +3434,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </text>
           <g clipPath={`url(#${clipId})`}>
             <rect x={fillX} y="0" width={fillWidth} height={height} fill={`url(#${gradientId})`} />
+            {shouldShowTextProgressSweep && (
+              <rect
+                x={textSweepX}
+                y="0"
+                width={textSweepWidth}
+                height={height}
+                fill={`url(#${sweepGradientId})`}
+                opacity={progressMotionState.sweepOpacity}
+              />
+            )}
           </g>
         </svg>
       </div>
@@ -3510,6 +3639,43 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       </div>
     );
   };
+  const renderTransitionOverlay = () => (
+    <div className="absolute inset-0 z-40 pointer-events-none overflow-hidden">
+      <div
+        className="absolute inset-0"
+        style={{
+          background: `linear-gradient(180deg, rgba(6,11,20,${(
+            transitionSequenceState.overlayOpacity * 0.54
+          ).toFixed(3)}) 0%, rgba(6,11,20,${(transitionSequenceState.overlayOpacity * 0.78).toFixed(
+            3
+          )}) 100%)`
+        }}
+      />
+      <div className="absolute inset-0 flex items-center justify-center px-8">
+        <div
+          className="flex max-w-[82%] flex-col items-center text-center"
+          style={{
+            opacity: transitionSequenceState.titleOpacity,
+            transform: `translateY(${transitionSequenceState.titleTranslateY.toFixed(1)}px)`
+          }}
+        >
+          <div
+            className={`font-black leading-[0.94] ${isVerticalLayout ? 'text-5xl sm:text-6xl' : 'text-6xl sm:text-7xl'} ${styleModules.text.titleFontClass}`}
+            style={{
+              color: '#F8FAFC',
+              letterSpacing: `${Math.max(0.02, styleModules.text.titleLetterSpacingEm)}em`,
+              textShadow: '0 10px 32px rgba(0,0,0,0.36)'
+            }}
+          >
+            <span>{typedTransitionTitle.text || ' '}</span>
+            {typedTransitionTitle.visibleGlyphs < typedTransitionTitle.totalGlyphs && (
+              <span className="ml-2 inline-block animate-pulse align-baseline opacity-80">|</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
   const completionCardStyle =
     styleModules.sceneCards.outro === 'storybook'
       ? {
@@ -3551,7 +3717,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       <div
         ref={viewportRef}
         className={rootClassName}
-        style={{ backgroundColor: visualTheme.rootBg }}
+        style={{ backgroundColor: embedded ? 'transparent' : visualTheme.rootBg }}
       >
         {!embedded && (
           <div className="absolute top-6 left-6 z-50">
@@ -3584,7 +3750,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     <div
       ref={viewportRef}
       className={rootClassName}
-      style={{ backgroundColor: visualTheme.rootBg }}
+      style={{ backgroundColor: embedded ? 'transparent' : visualTheme.rootBg }}
     >
       
       {/* External Back Button - Top Left */}
@@ -3690,6 +3856,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             }}
           />
         )}
+        {generatedBackgroundCoversHeader && currentGeneratedBackground && (
+          <div className="absolute inset-0 z-0 pointer-events-none">
+            <GeneratedBackgroundCanvas
+              spec={currentGeneratedBackground}
+              className="h-full w-full"
+              timeSeconds={generatedBackgroundPlaybackTime}
+            />
+          </div>
+        )}
         {!showIntroClip && (
         <>
         {/* HUD Header */}
@@ -3700,7 +3875,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               height: `${hudLayout.headerHeight}px`,
               borderColor: '#3F301A',
               background:
-                'linear-gradient(180deg, #E4C96C 0%, #D8B149 38%, #C79A31 100%)',
+                generatedBackgroundCoversHeader
+                  ? 'linear-gradient(180deg, rgba(228,201,108,0.84) 0%, rgba(216,177,73,0.8) 38%, rgba(199,154,49,0.84) 100%)'
+                  : 'linear-gradient(180deg, #E4C96C 0%, #D8B149 38%, #C79A31 100%)',
               boxShadow: 'inset 0 -2px 0 rgba(69, 53, 23, 0.55), inset 0 2px 0 rgba(255, 244, 203, 0.6)'
             }}
           >
@@ -3779,52 +3956,59 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         ) : (
           <div
             className="relative border-b-4 border-black shrink-0 z-20"
-            style={{ backgroundColor: visualTheme.headerBg, height: `${hudLayout.headerHeight}px` }}
+            style={{
+              backgroundColor: generatedBackgroundCoversHeader
+                ? hexToRgba(visualTheme.headerBg, isClassicStyle ? 0.88 : 0.82)
+                : visualTheme.headerBg,
+              height: `${hudLayout.headerHeight}px`
+            }}
           >
             {renderHeaderLogo()}
 
             {isClassicStyle ? (
               <>
-                <div
-                  className="absolute flex items-center border-2"
-                  style={{
-                    left: `${CLASSIC_HUD_SPEC.puzzleBadge.left}px`,
-                    top: `${CLASSIC_HUD_SPEC.puzzleBadge.top}px`,
-                    minWidth: `${CLASSIC_HUD_SPEC.puzzleBadge.minWidth}px`,
-                    height: `${CLASSIC_HUD_SPEC.puzzleBadge.height}px`,
-                    padding: `${CLASSIC_HUD_SPEC.puzzleBadge.padY}px ${CLASSIC_HUD_SPEC.puzzleBadge.padX}px`,
-                    borderRadius: `${CLASSIC_HUD_SPEC.puzzleBadge.radius}px`,
-                    borderColor: CLASSIC_HUD_SPEC.puzzleBadge.border,
-                    background: CLASSIC_HUD_SPEC.puzzleBadge.background,
-                    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.55), 0 2px 0 rgba(0,0,0,0.35)',
-                    gap: `${CLASSIC_HUD_SPEC.puzzleBadge.gap}px`
-                  }}
-                >
-                  <span
-                    className="font-black leading-none"
+                {shouldShowClassicPuzzleBadge && (
+                  <div
+                    className="absolute flex items-center border-2"
                     style={{
-                      color: '#111827',
-                      fontSize: `${CLASSIC_HUD_SPEC.puzzleBadge.labelSize}px`,
-                      letterSpacing: `${Math.max(0.18, styleModules.text.subtitleLetterSpacingEm)}em`,
-                      fontFamily: styleModules.text.subtitleCanvasFamily,
-                      textTransform:
-                        styleModules.text.subtitleTransform === 'upper' ? 'uppercase' : undefined
+                      left: `${CLASSIC_HUD_SPEC.puzzleBadge.left}px`,
+                      top: `${CLASSIC_HUD_SPEC.puzzleBadge.top}px`,
+                      minWidth: `${CLASSIC_HUD_SPEC.puzzleBadge.minWidth}px`,
+                      height: `${CLASSIC_HUD_SPEC.puzzleBadge.height}px`,
+                      padding: `${CLASSIC_HUD_SPEC.puzzleBadge.padY}px ${CLASSIC_HUD_SPEC.puzzleBadge.padX}px`,
+                      borderRadius: `${CLASSIC_HUD_SPEC.puzzleBadge.radius}px`,
+                      borderColor: CLASSIC_HUD_SPEC.puzzleBadge.border,
+                      background: CLASSIC_HUD_SPEC.puzzleBadge.background,
+                      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.55), 0 2px 0 rgba(0,0,0,0.35)',
+                      gap: `${CLASSIC_HUD_SPEC.puzzleBadge.gap}px`
                     }}
                   >
-                    {applyTextTransform(puzzleBadgeLabel, styleModules.text.subtitleTransform)}
-                  </span>
-                  <span
-                    className="font-black leading-none"
-                    style={{
-                      color: '#020617',
-                      fontFamily: styleModules.text.titleCanvasFamily,
-                      fontSize: `${classicBadgeValueFontSize}px`,
-                      textShadow: '0 1px 0 rgba(255,255,255,0.35)'
-                    }}
-                  >
-                    {safeCurrentIndex + 1}/{puzzles.length}
-                  </span>
-                </div>
+                    <span
+                      className="font-black leading-none"
+                      style={{
+                        color: '#111827',
+                        fontSize: `${CLASSIC_HUD_SPEC.puzzleBadge.labelSize}px`,
+                        letterSpacing: `${Math.max(0.18, styleModules.text.subtitleLetterSpacingEm)}em`,
+                        fontFamily: styleModules.text.subtitleCanvasFamily,
+                        textTransform:
+                          styleModules.text.subtitleTransform === 'upper' ? 'uppercase' : undefined
+                      }}
+                    >
+                      {applyTextTransform(puzzleBadgeLabel, styleModules.text.subtitleTransform)}
+                    </span>
+                    <span
+                      className="font-black leading-none"
+                      style={{
+                        color: '#020617',
+                        fontFamily: styleModules.text.titleCanvasFamily,
+                        fontSize: `${classicBadgeValueFontSize}px`,
+                        textShadow: '0 1px 0 rgba(255,255,255,0.35)'
+                      }}
+                    >
+                      {safeCurrentIndex + 1}/{puzzles.length}
+                    </span>
+                  </div>
+                )}
 
                 {shouldRenderHeaderText && (
                   <div className="absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
@@ -3884,7 +4068,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 <>
                   <div className="absolute z-10" style={progressTrackPosition}>
                     <div
-                      className={`overflow-hidden ${styleModules.progress.trackClass} ${
+                      className={`overflow-hidden ${
+                        settings.generatedProgressEnabled ? '' : styleModules.progress.trackClass
+                      } ${
                         hudLayout.progressOrientation === 'vertical' ? 'flex items-end' : ''
                       }`}
                       style={{
@@ -3892,13 +4078,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         height: progressTrackHeight,
                         borderRadius: progressTrackRadius,
                         background: progressTrackBackground,
-                        borderColor: visualTheme.progressTrackBorder,
+                        borderColor: progressTrackBorderColor,
                         borderStyle: 'solid',
                         borderWidth: progressTrackBorderWidth,
                         boxShadow: progressTrackShadow
                       }}
                     >
-                      <motion.div className={styleModules.progress.variant === 'glow' ? 'animate-pulse' : ''} style={progressFillStyle} />
+                      <motion.div style={progressFillStyle}>
+                        {progressPulseOverlayStyle && <span className="pointer-events-none absolute" style={progressPulseOverlayStyle} />}
+                        {progressSweepStyle && <span className="pointer-events-none absolute" style={progressSweepStyle} />}
+                      </motion.div>
                     </div>
                   </div>
                 </>
@@ -3911,11 +4100,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         <div
           className="flex-1 relative overflow-hidden flex items-center justify-center"
           style={{
-            backgroundColor: isStorybookStyle ? '#1F475B' : visualTheme.gameBg,
+            backgroundColor: generatedBackgroundCoversHeader
+              ? 'transparent'
+              : isStorybookStyle
+              ? '#1F475B'
+              : visualTheme.gameBg,
             padding: `${frameLayout.contentPadding}px`
           }}
         >
-          {currentGeneratedBackground && (
+          {currentGeneratedBackground && !generatedBackgroundCoversHeader && (
             <div className="absolute inset-0">
               <GeneratedBackgroundCanvas
                 spec={currentGeneratedBackground}
@@ -3945,22 +4138,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             {phase !== 'finished' && phase !== 'intro' && phase !== 'outro' && (
               <motion.div
                 key={currentPuzzle.imageA + safeCurrentIndex}
-                initial={puzzleMotionInitial}
+                initial={false}
                 animate={{
                   x: 0,
                   y: 0,
                   opacity:
                     phase === 'transitioning'
-                      ? Math.max(styleModules.transition.activeOpacityFloor, 1 - transitionProgress * 0.16)
+                      ? transitionSequenceState.outgoingOpacity
+                      : phase === 'showing'
+                      ? puzzleEntryState.opacity
                       : 1,
-                  scale: phase === 'transitioning' ? styleModules.transition.activeScale : 1,
-                  rotate:
-                    phase === 'transitioning' && styleModules.transition.id === 'pop'
-                      ? 0.8
+                  scale:
+                    phase === 'transitioning'
+                      ? transitionSequenceState.outgoingScale
+                      : phase === 'showing'
+                      ? puzzleEntryState.scale
+                      : 1,
+                  rotate: 0
+                }}
+                transition={{
+                  duration:
+                    phase === 'transitioning'
+                      ? 0.12
+                      : phase === 'showing' && puzzleEntryState.active
+                      ? 0.08
                       : 0
                 }}
-                exit={puzzleMotionExit}
-                transition={{ duration: puzzleTransitionDuration, ease: [0.22, 1, 0.36, 1] }}
                 className="relative w-full h-full"
               >
                 {isWidePuzzleDisplay ? (
@@ -4086,7 +4289,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               {introVideoError ? 'Intro Clip Failed' : 'Intro Clip Loading'}
             </div>
           )}
-          {phase === 'transitioning' && renderSceneCard('transition')}
+          {phase === 'transitioning' && renderTransitionOverlay()}
           {phase === 'outro' && renderSceneCard('outro')}
 
         </div>

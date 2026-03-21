@@ -13,7 +13,7 @@ import {
   WebMOutputFormat,
   canEncodeVideo
 } from 'mediabunny';
-import { Puzzle, Region, VideoSettings } from '../types';
+import { Puzzle, Region, type VideoAudioCuePoolKey, VideoSettings } from '../types';
 import { VISUAL_THEMES, resolveVisualThemeStyle, type VisualTheme } from '../constants/videoThemes';
 import { BASE_STAGE_SIZE, CLASSIC_HUD_SPEC, TRANSITION_TUNING } from '../constants/videoLayoutSpec';
 import { type HudAnchorSpec } from '../constants/videoHudLayoutSpec';
@@ -28,12 +28,34 @@ import {
   resolveTimerRenderProfile,
   resolveVideoStyleModules
 } from '../constants/videoStyleModules';
+import {
+  PROGRESS_BAR_THEMES,
+  resolveProgressBarFillColors,
+  resolveProgressBarFillStyle
+} from '../constants/progressBarThemes';
 import { drawGeneratedBackground, resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
+import { isStoredImageAssetSource, loadImageAssetBlob } from '../services/imageAssetStore';
 import { decodeRuntimeImageBitmapFromBlob } from '../services/canvasRuntime';
-import { applyLogoChromaKey, clampLogoZoom } from '../utils/logoProcessing';
+import { clampLogoZoom } from '../utils/logoProcessing';
 import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
-import { buildCueTones, type AudioCueKind, type AudioCueTone, type AudioCueWaveform } from '../utils/audioCueTones';
+import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
+import {
+  revealTypewriterText,
+  VIDEO_TRANSITION_LABEL,
+  resolveVideoPuzzleEntryState,
+  resolveVideoTransitionSequenceState
+} from '../utils/videoTransitionMotion';
 import { isDesignerTimerStyle } from '../utils/timerPackShared';
+import {
+  resolveVideoAudioCyclePoolIndex,
+  resolveVideoAudioEventPoolIndex
+} from '../utils/videoAudioPools';
+import {
+  resolveLowTimeWarningCueWindow,
+  resolveProgressFillIntroCueWindow,
+  resolvePuzzlePlayCueWindow,
+  type VideoAudioPlaybackAutomation
+} from '../utils/videoAudioCueScheduling';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from '../services/mediaTelemetry';
 import type {
   BinaryRenderablePuzzle,
@@ -55,13 +77,16 @@ interface TimelineSegment {
   end: number;
 }
 
-type ExportAudioCueKind = AudioCueKind;
-
 interface ExportAudioCueEvent {
   timestamp: number;
-  kind: ExportAudioCueKind;
+  kind: VideoAudioCuePoolKey;
   phase: FramePhase;
   puzzleIndex: number;
+  eventIndex: number;
+  selectionMode: 'cycle' | 'event';
+  maxDuration?: number;
+  fadeOutDuration?: number;
+  automation?: VideoAudioPlaybackAutomation;
 }
 
 interface RenderScene {
@@ -133,11 +158,13 @@ interface WorkerStartMessage {
 
 interface WorkerPreviewFrameMessage {
   type: 'preview-frame';
+  requestId?: number;
   payload: PreviewFrameOptions;
 }
 
 interface WorkerCancelMessage {
   type: 'cancel';
+  requestId?: number;
 }
 
 type WorkerMessage = WorkerStartMessage | WorkerPreviewFrameMessage | WorkerCancelMessage;
@@ -146,10 +173,10 @@ type WorkerResponse =
   | { type: 'progress'; progress: number; status?: string }
   | { type: 'stream-chunk'; position: number; data: ArrayBuffer }
   | { type: 'stream-done'; mimeType: string; fileName: string }
-  | { type: 'preview-frame-done'; buffer: ArrayBuffer; mimeType: string }
+  | { type: 'preview-frame-done'; buffer: ArrayBuffer; mimeType: string; requestId?: number }
   | { type: 'done'; buffer: ArrayBuffer; mimeType: string; fileName: string }
-  | { type: 'error'; message: string }
-  | { type: 'cancelled' }
+  | { type: 'error'; message: string; requestId?: number }
+  | { type: 'cancelled'; requestId?: number }
   | MediaTaskEventMessage
   | MediaWorkerStatsMessage;
 
@@ -219,103 +246,14 @@ const FORMAT_BY_CODEC = {
 const AUDIO_BITRATE = 128_000;
 const AUDIO_SAMPLE_RATE = 48_000;
 const AUDIO_CHANNELS = 2;
-const AUDIO_SILENCE_FLOOR = 0.0001;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const lerp = (start: number, end: number, progress: number) => start + (end - start) * progress;
 const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
 const formatCountdownSeconds = (seconds: number) =>
   `${Math.max(0, Math.ceil(seconds - 0.001))}s`;
 const fillTemplate = (template: string, values: Record<string, string | number>) =>
   template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => String(values[key] ?? ''));
-
-type SynthWaveform = AudioCueWaveform;
-type SynthToneOptions = AudioCueTone;
-
-const getWaveSample = (phase: number, type: SynthWaveform) => {
-  switch (type) {
-    case 'triangle':
-      return (2 / Math.PI) * Math.asin(Math.sin(phase));
-    case 'square':
-      return Math.sin(phase) >= 0 ? 1 : -1;
-    case 'sawtooth': {
-      const wrapped = ((phase / (Math.PI * 2)) % 1 + 1) % 1;
-      return wrapped * 2 - 1;
-    }
-    default:
-      return Math.sin(phase);
-  }
-};
-
-const mixToneIntoBuffer = (
-  data: Float32Array,
-  tone: SynthToneOptions,
-  masterVolume: number
-) => {
-  const startFrame = Math.max(0, Math.round(tone.startOffset * AUDIO_SAMPLE_RATE));
-  const frameCount = Math.max(1, Math.round(tone.duration * AUDIO_SAMPLE_RATE));
-  const attackFrames = Math.max(
-    1,
-    Math.round(Math.min(tone.attack ?? 0.012, tone.duration * 0.4) * AUDIO_SAMPLE_RATE)
-  );
-  const releaseFrames = Math.max(
-    1,
-    Math.round(Math.min(tone.release ?? Math.max(0.03, tone.duration * 0.62), tone.duration) * AUDIO_SAMPLE_RATE)
-  );
-  const baseFrequency = Math.max(1, tone.frequency);
-  const targetFrequency = Math.max(1, tone.endFrequency ?? tone.frequency);
-  const detuneRatio = Math.pow(2, (tone.detune ?? 0) / 1200);
-  let phase = 0;
-
-  for (let frame = 0; frame < frameCount; frame += 1) {
-    const bufferIndex = startFrame + frame;
-    if (bufferIndex < 0 || bufferIndex >= data.length / AUDIO_CHANNELS) {
-      continue;
-    }
-
-    const progress = frameCount <= 1 ? 1 : frame / (frameCount - 1);
-    const frequency =
-      targetFrequency !== baseFrequency
-        ? baseFrequency * Math.pow(targetFrequency / baseFrequency, progress)
-        : baseFrequency;
-    phase += ((Math.PI * 2 * frequency) / AUDIO_SAMPLE_RATE) * detuneRatio;
-
-    let envelope = 1;
-    if (frame < attackFrames) {
-      envelope = Math.max(AUDIO_SILENCE_FLOOR, frame / attackFrames);
-    } else if (frame >= frameCount - releaseFrames) {
-      const releaseProgress = (frameCount - frame) / releaseFrames;
-      envelope = Math.max(AUDIO_SILENCE_FLOOR, releaseProgress);
-    }
-
-    const sampleValue = getWaveSample(phase, tone.type) * tone.volume * masterVolume * envelope;
-    const clampedSample = clamp(sampleValue, -1, 1);
-    const sampleOffset = bufferIndex * AUDIO_CHANNELS;
-    for (let channel = 0; channel < AUDIO_CHANNELS; channel += 1) {
-      data[sampleOffset + channel] = clamp(data[sampleOffset + channel] + clampedSample, -1, 1);
-    }
-  }
-};
-
-const createCueAudioBuffer = (kind: ExportAudioCueKind, masterVolume: number) => {
-  const safeVolume = clamp(masterVolume, 0, 1);
-  if (safeVolume <= 0) return null;
-  const tones = buildCueTones(kind);
-  const sampleDuration = tones.reduce(
-    (maxDuration, tone) => Math.max(maxDuration, tone.startOffset + tone.duration),
-    0
-  );
-  const frameCount = Math.max(1, Math.ceil(sampleDuration * AUDIO_SAMPLE_RATE));
-  const data = new Float32Array(frameCount * AUDIO_CHANNELS);
-
-  tones.forEach((tone) => {
-    mixToneIntoBuffer(data, tone, safeVolume);
-  });
-
-  return {
-    data,
-    frames: frameCount
-  };
-};
 
 const clamp01 = (value: number) => clamp(value, 0, 1);
 
@@ -382,9 +320,13 @@ const resampleInterleaved = (
   return {
     data: output,
     frames: targetFrames,
-    channels: targetChannels
+    channels: targetChannels,
+    duration: targetFrames / targetSampleRate
   };
 };
+
+type ResampledAudioAsset = NonNullable<ReturnType<typeof resampleInterleaved>>;
+type ResolvedSfxPools = Partial<Record<VideoAudioCuePoolKey, ResampledAudioAsset[]>>;
 
 const mixInterleaved = (
   target: Float32Array,
@@ -411,6 +353,85 @@ const mixInterleaved = (
   }
 };
 
+const mixInterleavedWindow = (
+  target: Float32Array,
+  source: Float32Array,
+  sourceFrames: number,
+  targetChannels: number,
+  startFrame: number,
+  gain: number,
+  maxFrames?: number,
+  fadeOutFrames = 0,
+  automation?: VideoAudioPlaybackAutomation
+) => {
+  if (gain <= 0) return;
+  const maxOutputFrames =
+    typeof maxFrames === 'number' && Number.isFinite(maxFrames)
+      ? Math.max(0, Math.min(sourceFrames, maxFrames))
+      : sourceFrames;
+  if (maxOutputFrames <= 0) return;
+
+  const totalFrames = Math.floor(target.length / targetChannels);
+  const effectiveFadeOutFrames =
+    fadeOutFrames > 0 ? Math.min(Math.max(0, fadeOutFrames), maxOutputFrames) : 0;
+  const automationFrames =
+    automation && automation.duration > 0
+      ? Math.min(
+          Math.max(0, Math.round(automation.duration * AUDIO_SAMPLE_RATE)),
+          Math.max(0, maxOutputFrames - effectiveFadeOutFrames)
+        )
+      : 0;
+  const playbackRateStart = automation?.playbackRateStart ?? 1;
+  const playbackRateEnd = automation?.playbackRateEnd ?? playbackRateStart;
+  const gainStart = automation?.gainStart ?? 1;
+  const gainEnd = automation?.gainEnd ?? gainStart;
+  let sourceFramePosition = 0;
+
+  for (let frame = 0; frame < maxOutputFrames; frame += 1) {
+    if (sourceFramePosition >= sourceFrames) {
+      break;
+    }
+    const targetFrame = startFrame + frame;
+    const targetIndex = targetFrame * targetChannels;
+    const rampProgress =
+      automationFrames > 1
+        ? clamp(frame / (automationFrames - 1), 0, 1)
+        : automationFrames === 1
+        ? 1
+        : 0;
+    const easedRampProgress = rampProgress * rampProgress * (3 - 2 * rampProgress);
+    const playbackRate =
+      automationFrames > 0
+        ? lerp(playbackRateStart, playbackRateEnd, easedRampProgress)
+        : playbackRateStart;
+    const gainMultiplier =
+      automationFrames > 0
+        ? lerp(gainStart, gainEnd, easedRampProgress)
+        : gainStart;
+    const fadeGain =
+      effectiveFadeOutFrames > 0 && frame >= maxOutputFrames - effectiveFadeOutFrames
+        ? (maxOutputFrames - frame) / effectiveFadeOutFrames
+        : 1;
+    const frameGain = gain * gainMultiplier * fadeGain;
+    const baseSourceFrame = Math.min(sourceFrames - 1, Math.floor(sourceFramePosition));
+    const nextSourceFrame = Math.min(sourceFrames - 1, baseSourceFrame + 1);
+    const frameMix = sourceFramePosition - baseSourceFrame;
+    if (targetFrame >= 0 && targetFrame < totalFrames) {
+      for (let channel = 0; channel < targetChannels; channel += 1) {
+        const baseSample = source[baseSourceFrame * targetChannels + channel] ?? 0;
+        const nextSample = source[nextSourceFrame * targetChannels + channel] ?? baseSample;
+        target[targetIndex + channel] = clamp(
+          target[targetIndex + channel] +
+            (baseSample + (nextSample - baseSample) * frameMix) * frameGain,
+          -2,
+          2
+        );
+      }
+    }
+    sourceFramePosition += Math.max(0.001, playbackRate);
+  }
+};
+
 const applySoftLimiter = (buffer: Float32Array, enabled: boolean) => {
   if (!enabled) return;
   const drive = 1.6;
@@ -421,10 +442,49 @@ const applySoftLimiter = (buffer: Float32Array, enabled: boolean) => {
   }
 };
 
+const resolveResampledSfxPools = (
+  audioAssets: VideoExportAudioAssets | undefined
+): ResolvedSfxPools => {
+  const pools: ResolvedSfxPools = {};
+  const sourcePools = audioAssets?.sfxPools;
+  if (!sourcePools) return pools;
+
+  for (const [key, pool] of Object.entries(sourcePools) as Array<
+    [VideoAudioCuePoolKey, VideoExportAudioAsset[] | undefined]
+  >) {
+    const resampled = (pool ?? [])
+      .map((asset) => resampleInterleaved(asset, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS))
+      .filter((asset): asset is ResampledAudioAsset => Boolean(asset));
+    if (resampled.length > 0) {
+      pools[key] = resampled;
+    }
+  }
+
+  return pools;
+};
+
+const resolveScheduledPoolAsset = (
+  pools: ResolvedSfxPools,
+  settings: VideoSettings,
+  event: Pick<ExportAudioCueEvent, 'kind' | 'puzzleIndex' | 'eventIndex' | 'selectionMode'>
+) => {
+  const configuredSources = settings.audioCuePools[event.kind].sources;
+  const assets = pools[event.kind];
+  if (!configuredSources.length || !assets?.length) return null;
+
+  const index =
+    event.selectionMode === 'cycle'
+      ? resolveVideoAudioCyclePoolIndex(configuredSources, event.eventIndex, event.kind)
+      : resolveVideoAudioEventPoolIndex(configuredSources, event.puzzleIndex, event.eventIndex, event.kind);
+  if (index == null) return null;
+  return assets[index] ?? null;
+};
+
 const buildExportAudioCueEvents = (
   timeline: TimelineSegment[],
   settings: VideoSettings,
-  puzzles: RenderablePuzzle[]
+  puzzles: RenderablePuzzle[],
+  pools: ResolvedSfxPools
 ): ExportAudioCueEvent[] => {
   if (!settings.soundEffectsEnabled) {
     return [];
@@ -433,68 +493,73 @@ const buildExportAudioCueEvents = (
   const events: ExportAudioCueEvent[] = [];
   const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
   const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
+  const hasPool = (key: VideoAudioCuePoolKey) =>
+    settings.audioCuePools[key].enabled && (pools[key]?.length ?? 0) > 0;
 
   timeline.forEach((segment) => {
-    if (segment.phase === 'intro' && settings.introSoundEnabled) {
-      events.push({
-        timestamp: segment.start,
-        kind: 'intro',
-        phase: segment.phase,
-        puzzleIndex: segment.puzzleIndex
-      });
-    }
+    if (segment.phase === 'showing') {
+      const shouldPlayProgressFill =
+        settings.progressMotion === 'intro_fill' && hasPool('progress_fill_intro');
+      let progressFillDuration = 0;
 
-    if (segment.phase === 'showing' && settings.countdownSoundEnabled) {
-      [3, 2, 1].forEach((secondsLeft) => {
-        if (segment.duration + 0.001 < secondsLeft) {
-          return;
-        }
-        events.push({
-          timestamp: Math.max(segment.start, segment.end - secondsLeft),
-          kind: 'countdown',
-          phase: segment.phase,
-          puzzleIndex: segment.puzzleIndex
-        });
-      });
-    }
-
-    if (segment.phase === 'showing' && settings.playSoundEnabled) {
-      events.push({
-        timestamp: segment.start,
-        kind: 'play',
-        phase: segment.phase,
-        puzzleIndex: segment.puzzleIndex
-      });
-    }
-
-    if (segment.phase === 'transitioning' && settings.transitionSoundEnabled) {
-      events.push({
-        timestamp: segment.start,
-        kind: 'transition',
-        phase: segment.phase,
-        puzzleIndex: segment.puzzleIndex
-      });
-    }
-
-    if (segment.phase === 'outro' && settings.outroSoundEnabled) {
-      events.push({
-        timestamp: segment.start,
-        kind: 'outro',
-        phase: segment.phase,
-        puzzleIndex: segment.puzzleIndex
-      });
-    }
-
-    if (segment.phase === 'revealing') {
-      if (settings.revealSoundEnabled) {
-        events.push({
+      if (shouldPlayProgressFill) {
+        const progressEventBase: ExportAudioCueEvent = {
           timestamp: segment.start,
-          kind: 'reveal',
+          kind: 'progress_fill_intro',
           phase: segment.phase,
-          puzzleIndex: segment.puzzleIndex
+          puzzleIndex: segment.puzzleIndex,
+          eventIndex: segment.puzzleIndex,
+          selectionMode: 'cycle'
+        };
+        const progressAsset = resolveScheduledPoolAsset(pools, settings, progressEventBase);
+        const progressWindow = progressAsset
+          ? resolveProgressFillIntroCueWindow(settings.showDuration, progressAsset.duration)
+          : null;
+        if (progressWindow) {
+          events.push({
+            ...progressEventBase,
+            maxDuration: progressWindow.maxDuration,
+            fadeOutDuration: progressWindow.fadeOutDuration
+          });
+          progressFillDuration = progressWindow.maxDuration;
+        }
+      }
+
+      const puzzlePlayWindow = resolvePuzzlePlayCueWindow(
+        settings.showDuration,
+        progressFillDuration,
+        settings.puzzlePlayUrgencyRampEnabled
+      );
+      if (hasPool('puzzle_play') && puzzlePlayWindow) {
+        events.push({
+          timestamp: segment.start + puzzlePlayWindow.delaySeconds,
+          kind: 'puzzle_play',
+          phase: segment.phase,
+          puzzleIndex: segment.puzzleIndex,
+          eventIndex: segment.puzzleIndex,
+          selectionMode: 'cycle',
+          maxDuration: puzzlePlayWindow.maxDuration,
+          fadeOutDuration: puzzlePlayWindow.fadeOutDuration,
+          automation: puzzlePlayWindow.automation
         });
       }
 
+      const lowTimeWindow = resolveLowTimeWarningCueWindow(settings.showDuration);
+      if (hasPool('low_time_warning') && lowTimeWindow) {
+        events.push({
+          timestamp: segment.start + lowTimeWindow.delaySeconds,
+          kind: 'low_time_warning',
+          phase: segment.phase,
+          puzzleIndex: segment.puzzleIndex,
+          eventIndex: segment.puzzleIndex,
+          selectionMode: 'cycle',
+          maxDuration: lowTimeWindow.maxDuration,
+          fadeOutDuration: lowTimeWindow.fadeOutDuration
+        });
+      }
+    }
+
+    if (segment.phase === 'revealing') {
       const puzzle = puzzles[segment.puzzleIndex];
       const revealRegionCount = puzzle?.regions?.length ?? 0;
       if (revealRegionCount > 0) {
@@ -503,22 +568,25 @@ const buildExportAudioCueEvents = (
           revealPhaseDuration / Math.max(1, revealRegionCount + 1)
         );
 
-        if (settings.markerSoundEnabled) {
+        if (hasPool('marker_reveal')) {
           for (let index = 0; index < revealRegionCount; index += 1) {
             events.push({
               timestamp: segment.start + index * revealStepSeconds,
-              kind: 'marker',
+              kind: 'marker_reveal',
               phase: segment.phase,
-              puzzleIndex: segment.puzzleIndex
+              puzzleIndex: segment.puzzleIndex,
+              eventIndex: index,
+              selectionMode: 'event'
             });
           }
         }
 
-        if (settings.blinkSoundEnabled && settings.enableBlinking !== false) {
+        if (hasPool('blink') && settings.enableBlinking !== false) {
           const blinkStartTime =
             revealRegionCount > 0
               ? Math.max(0, (revealRegionCount - 1) * revealStepSeconds + blinkCycleDuration)
               : 0;
+          let blinkIndex = 0;
           for (
             let blinkTime = blinkStartTime;
             blinkTime < segment.duration;
@@ -528,11 +596,25 @@ const buildExportAudioCueEvents = (
               timestamp: segment.start + blinkTime,
               kind: 'blink',
               phase: segment.phase,
-              puzzleIndex: segment.puzzleIndex
+              puzzleIndex: segment.puzzleIndex,
+              eventIndex: blinkIndex,
+              selectionMode: 'event'
             });
+            blinkIndex += 1;
           }
         }
       }
+    }
+
+    if (segment.phase === 'transitioning' && hasPool('transition')) {
+      events.push({
+        timestamp: segment.start,
+        kind: 'transition',
+        phase: segment.phase,
+        puzzleIndex: segment.puzzleIndex,
+        eventIndex: segment.puzzleIndex,
+        selectionMode: 'cycle'
+      });
     }
   });
 
@@ -546,49 +628,20 @@ const buildExportAudioMixSample = (
   totalDuration: number,
   puzzles: RenderablePuzzle[]
 ): AudioSample | null => {
-  const hasSfx = settings.soundEffectsEnabled;
   const hasMusic = settings.backgroundMusicEnabled && audioAssets?.music;
   const hasIntroClip = Boolean(audioAssets?.introClip);
+  const sfxPools = resolveResampledSfxPools(audioAssets);
+  const cueEvents = settings.soundEffectsEnabled
+    ? buildExportAudioCueEvents(timeline, settings, puzzles, sfxPools)
+    : [];
+  const hasSfx = cueEvents.length > 0;
   if (!hasSfx && !hasMusic && !hasIntroClip) return null;
 
   const totalFrames = Math.max(1, Math.ceil(totalDuration * AUDIO_SAMPLE_RATE));
   const mix = new Float32Array(totalFrames * AUDIO_CHANNELS);
-  const cueEvents = hasSfx ? buildExportAudioCueEvents(timeline, settings, puzzles) : [];
-
-  let countdownAsset = audioAssets?.countdown
-    ? resampleInterleaved(audioAssets.countdown, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
-  let revealAsset = audioAssets?.reveal
-    ? resampleInterleaved(audioAssets.reveal, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
-  let markerAsset = audioAssets?.marker
-    ? resampleInterleaved(audioAssets.marker, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
-  let blinkAsset = audioAssets?.blink
-    ? resampleInterleaved(audioAssets.blink, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
-  let playAsset = audioAssets?.play
-    ? resampleInterleaved(audioAssets.play, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
-  let introAsset = audioAssets?.intro
-    ? resampleInterleaved(audioAssets.intro, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
   let introClipAsset = audioAssets?.introClip
     ? resampleInterleaved(audioAssets.introClip, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
     : null;
-  let transitionAsset = audioAssets?.transition
-    ? resampleInterleaved(audioAssets.transition, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
-  let outroAsset = audioAssets?.outro
-    ? resampleInterleaved(audioAssets.outro, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    : null;
-  const revealVariantAssets =
-    audioAssets?.revealVariants?.map((variant) =>
-      resampleInterleaved(variant, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
-    ) ?? [];
-
-  const countdownOffset = settings.countdownSoundOffsetMs / 1000;
-  const revealOffset = settings.revealSoundOffsetMs / 1000;
 
   if (hasSfx) {
     cueEvents.forEach((event) => {
@@ -596,78 +649,29 @@ const buildExportAudioMixSample = (
       const gain = clamp01(settings.soundEffectsVolume) * phaseGain;
       if (gain <= 0) return;
 
-      const offset = event.kind === 'countdown' ? countdownOffset : revealOffset;
-      const timestamp = clamp(event.timestamp + offset, 0, totalDuration);
+      const timestamp = clamp(event.timestamp, 0, totalDuration);
       const startFrame = Math.round(timestamp * AUDIO_SAMPLE_RATE);
-
-      if (event.kind === 'countdown') {
-        const asset = countdownAsset;
-        if (asset) {
-          mixInterleaved(mix, asset.data, asset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      if (event.kind === 'reveal') {
-        if (settings.revealSoundRandomize && revealVariantAssets.length > 0) {
-          const index = Math.abs(event.puzzleIndex) % revealVariantAssets.length;
-          const asset = revealVariantAssets[index];
-          if (asset) {
-            mixInterleaved(mix, asset.data, asset.frames, AUDIO_CHANNELS, startFrame, gain);
-            return;
-          }
-        }
-        if (revealAsset) {
-          mixInterleaved(mix, revealAsset.data, revealAsset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      if (event.kind === 'marker') {
-        if (markerAsset) {
-          mixInterleaved(mix, markerAsset.data, markerAsset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      if (event.kind === 'blink') {
-        if (blinkAsset) {
-          mixInterleaved(mix, blinkAsset.data, blinkAsset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      if (event.kind === 'play') {
-        if (playAsset) {
-          mixInterleaved(mix, playAsset.data, playAsset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      if (event.kind === 'intro') {
-        if (introAsset) {
-          mixInterleaved(mix, introAsset.data, introAsset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      if (event.kind === 'transition') {
-        if (transitionAsset) {
-          mixInterleaved(mix, transitionAsset.data, transitionAsset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      if (event.kind === 'outro') {
-        if (outroAsset) {
-          mixInterleaved(mix, outroAsset.data, outroAsset.frames, AUDIO_CHANNELS, startFrame, gain);
-          return;
-        }
-      }
-
-      const cueBuffer = createCueAudioBuffer(event.kind, gain);
-      if (!cueBuffer) return;
-      mixInterleaved(mix, cueBuffer.data, cueBuffer.frames, AUDIO_CHANNELS, startFrame, 1);
+      const asset = resolveScheduledPoolAsset(sfxPools, settings, event);
+      if (!asset) return;
+      const maxFrames =
+        typeof event.maxDuration === 'number'
+          ? Math.max(0, Math.round(event.maxDuration * AUDIO_SAMPLE_RATE))
+          : undefined;
+      const fadeOutFrames =
+        typeof event.fadeOutDuration === 'number'
+          ? Math.max(0, Math.round(event.fadeOutDuration * AUDIO_SAMPLE_RATE))
+          : 0;
+      mixInterleavedWindow(
+        mix,
+        asset.data,
+        asset.frames,
+        AUDIO_CHANNELS,
+        startFrame,
+        gain,
+        maxFrames,
+        fadeOutFrames,
+        event.automation
+      );
     });
   }
 
@@ -718,8 +722,7 @@ const buildExportAudioMixSample = (
         const releaseFrames = Math.max(1, Math.round(0.22 * AUDIO_SAMPLE_RATE));
 
         cueEvents.forEach((event) => {
-          const offset = event.kind === 'countdown' ? countdownOffset : revealOffset;
-          const centerFrame = Math.round(clamp(event.timestamp + offset, 0, totalDuration) * AUDIO_SAMPLE_RATE);
+          const centerFrame = Math.round(clamp(event.timestamp, 0, totalDuration) * AUDIO_SAMPLE_RATE);
           const attackStart = Math.max(0, centerFrame - attackFrames);
           const holdEnd = Math.min(totalFrames, centerFrame + holdFrames);
           const releaseEnd = Math.min(totalFrames, holdEnd + releaseFrames);
@@ -893,8 +896,12 @@ const drawRoundedRect = (
   }
 };
 
-const resolveTextProgressFillColors = (remainingPercent: number, visualTheme: VisualTheme) => {
-  return resolveSmoothTextProgressFillColors(remainingPercent, visualTheme);
+const resolveTextProgressFillColors = (
+  remainingPercent: number,
+  visualTheme: VisualTheme,
+  dynamicColors?: ReturnType<typeof resolveProgressBarFillColors>
+) => {
+  return resolveSmoothTextProgressFillColors(remainingPercent, visualTheme, dynamicColors);
 };
 
 const resolveTextProgressFontSize = (text: string, width: number, height: number, preferred: number) => {
@@ -908,10 +915,17 @@ const drawTextProgressLabel = (
   ctx: CanvasRenderingContext2D,
   rect: Rect,
   label: string,
-  remainingPercent: number,
+  fillPercent: number,
+  colorPercent: number,
   styleModules: ReturnType<typeof resolveVideoStyleModules>,
   visualTheme: VisualTheme,
-  scale: number
+  scale: number,
+  dynamicFillColors?: ReturnType<typeof resolveProgressBarFillColors>,
+  sweep?: {
+    active: boolean;
+    progress: number;
+    opacity: number;
+  }
 ) => {
   const safeLabel = label.trim() || 'PROGRESS';
   const width = Math.max(1, rect.width);
@@ -930,7 +944,7 @@ const drawTextProgressLabel = (
   const strokeWidth = Math.max(2, Math.round(fontSize * 0.08));
   const shellFill = TEXT_PROGRESS_EMPTY_FILL;
   const shellStroke = '#111827';
-  const fillColors = resolveTextProgressFillColors(remainingPercent, visualTheme);
+  const fillColors = resolveTextProgressFillColors(colorPercent, visualTheme, dynamicFillColors);
   const textCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
   const textCtx = textCanvas.getContext('2d');
 
@@ -948,7 +962,7 @@ const drawTextProgressLabel = (
     Math.min(width, Math.max(metrics.width, (metrics.actualBoundingBoxLeft || 0) + (metrics.actualBoundingBoxRight || 0)))
   );
   const fillX = Math.max(0, (width - textSpanWidth) / 2);
-  const fillWidth = Math.max(0, Math.min(textSpanWidth, (textSpanWidth * clamp(remainingPercent, 0, 100)) / 100));
+  const fillWidth = Math.max(0, Math.min(textSpanWidth, (textSpanWidth * clamp(fillPercent, 0, 100)) / 100));
   textCtx.fillStyle = '#000000';
   textCtx.fillText(safeLabel, width / 2, height * 0.68);
   textCtx.globalCompositeOperation = 'source-in';
@@ -958,6 +972,22 @@ const drawTextProgressLabel = (
   gradient.addColorStop(1, fillColors.end);
   textCtx.fillStyle = gradient;
   textCtx.fillRect(fillX, 0, fillWidth, height);
+  if (sweep?.active && sweep.opacity > 0) {
+    const sweepWidth = Math.max(18, textSpanWidth * 0.18);
+    const sweepCenterX = fillX + textSpanWidth * sweep.progress;
+    const sweepX = sweepCenterX - sweepWidth / 2;
+    const sweepGradient = textCtx.createLinearGradient(sweepX, 0, sweepX + sweepWidth, 0);
+    sweepGradient.addColorStop(0, 'rgba(255,255,255,0)');
+    sweepGradient.addColorStop(0.3, 'rgba(255,255,255,0.06)');
+    sweepGradient.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+    sweepGradient.addColorStop(0.7, 'rgba(255,255,255,0.06)');
+    sweepGradient.addColorStop(1, 'rgba(255,255,255,0)');
+    textCtx.save();
+    textCtx.globalAlpha = clamp(sweep.opacity, 0, 1);
+    textCtx.fillStyle = sweepGradient;
+    textCtx.fillRect(sweepX, 0, sweepWidth, height);
+    textCtx.restore();
+  }
 
   ctx.save();
   ctx.textAlign = 'center';
@@ -969,6 +999,112 @@ const drawTextProgressLabel = (
   ctx.strokeText(safeLabel, textX, textY);
   ctx.fillText(safeLabel, textX, textY);
   ctx.drawImage(textCanvas, textRect.x, textRect.y, textRect.width, textRect.height);
+  ctx.restore();
+};
+
+const drawProgressSweepOverlay = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  orientation: 'horizontal' | 'vertical',
+  sweepProgress: number,
+  sweepOpacity: number
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || sweepOpacity <= 0) {
+    return;
+  }
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.clip();
+  ctx.globalAlpha = clamp(sweepOpacity, 0, 1);
+
+  if (orientation === 'vertical') {
+    const sweepHeight = Math.max(16, rect.height * 0.22);
+    const sweepCenterY = rect.y + rect.height * (1 - sweepProgress);
+    const sweepY = sweepCenterY - sweepHeight / 2;
+    const gradient = ctx.createLinearGradient(0, sweepY, 0, sweepY + sweepHeight);
+    gradient.addColorStop(0, 'rgba(255,255,255,0)');
+    gradient.addColorStop(0.3, 'rgba(255,255,255,0.06)');
+    gradient.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+    gradient.addColorStop(0.7, 'rgba(255,255,255,0.06)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(rect.x, sweepY, rect.width, sweepHeight);
+  } else {
+    const sweepWidth = Math.max(18, rect.width * 0.18);
+    const sweepCenterX = rect.x + rect.width * sweepProgress;
+    const sweepX = sweepCenterX - sweepWidth / 2;
+    const gradient = ctx.createLinearGradient(sweepX, 0, sweepX + sweepWidth, 0);
+    gradient.addColorStop(0, 'rgba(255,255,255,0)');
+    gradient.addColorStop(0.3, 'rgba(255,255,255,0.06)');
+    gradient.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+    gradient.addColorStop(0.7, 'rgba(255,255,255,0.06)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(sweepX, rect.y, sweepWidth, rect.height);
+  }
+
+  ctx.restore();
+};
+
+const drawProgressPulseOverlay = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  orientation: 'horizontal' | 'vertical',
+  pulseOpacity: number
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || pulseOpacity <= 0) {
+    return;
+  }
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.clip();
+  ctx.globalAlpha = clamp(pulseOpacity, 0, 1);
+
+  if (orientation === 'vertical') {
+    const pulseHeight = Math.max(18, rect.height * 0.38);
+    const gradient = ctx.createLinearGradient(0, rect.y, 0, rect.y + pulseHeight);
+    gradient.addColorStop(0, 'rgba(255,255,255,0.84)');
+    gradient.addColorStop(0.28, 'rgba(255,255,255,0.22)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(rect.x, rect.y, rect.width, pulseHeight);
+  } else {
+    const pulseWidth = Math.max(22, rect.width * 0.28);
+    const pulseX = rect.x + rect.width - pulseWidth;
+    const gradient = ctx.createLinearGradient(pulseX, 0, pulseX + pulseWidth, 0);
+    gradient.addColorStop(0, 'rgba(255,255,255,0)');
+    gradient.addColorStop(0.45, 'rgba(255,255,255,0.08)');
+    gradient.addColorStop(0.78, 'rgba(255,255,255,0.32)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0.84)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(pulseX, rect.y, pulseWidth, rect.height);
+  }
+
+  ctx.restore();
+};
+
+const drawProgressPulseGlow = (
+  ctx: CanvasRenderingContext2D,
+  rect: Rect,
+  pulseGlowOpacity: number,
+  glowColor: string,
+  blurBase: number,
+  lineWidth: number,
+  strokeColor = 'rgba(255,255,255,0.82)'
+) => {
+  if (rect.width <= 0 || rect.height <= 0 || pulseGlowOpacity <= 0) {
+    return;
+  }
+
+  ctx.save();
+  roundRectPath(ctx, rect);
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur = Math.max(blurBase, Math.round(blurBase * (1 + pulseGlowOpacity * 1.8)));
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
   ctx.restore();
 };
 
@@ -1686,11 +1822,18 @@ const loadImage = async (src: string): Promise<ImageBitmap> => {
 };
 
 const loadLogoImage = async (src: string): Promise<ImageBitmap> => {
-  const response = await fetch(src);
-  if (!response.ok) {
-    throw new Error('Failed to fetch logo image for export.');
+  const blob = isStoredImageAssetSource(src)
+    ? await loadImageAssetBlob(src)
+    : await (async () => {
+        const response = await fetch(src);
+        if (!response.ok) {
+          throw new Error('Failed to fetch logo image for export.');
+        }
+        return await response.blob();
+      })();
+  if (!blob) {
+    throw new Error('Failed to load logo image for export.');
   }
-  const blob = await response.blob();
   throwIfCanceled();
 
   const baseBitmap = await decodeRuntimeImageBitmapFromBlob(blob);
@@ -1985,34 +2128,7 @@ const drawImageContain = (
   return zoomedFrame;
 };
 
-const processLogoBitmap = async (
-  logo: ImageBitmap,
-  settings: Pick<
-    VideoSettings,
-    'logoChromaKeyEnabled' | 'logoChromaKeyColor' | 'logoChromaKeyTolerance'
-  >
-) => {
-  if (!settings.logoChromaKeyEnabled || logo.width <= 0 || logo.height <= 0) {
-    return logo;
-  }
-
-  const canvas = new OffscreenCanvas(logo.width, logo.height);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    return logo;
-  }
-
-  ctx.drawImage(logo, 0, 0, logo.width, logo.height);
-  const imageData = ctx.getImageData(0, 0, logo.width, logo.height);
-  applyLogoChromaKey(imageData, {
-    enabled: settings.logoChromaKeyEnabled,
-    color: settings.logoChromaKeyColor,
-    tolerance: settings.logoChromaKeyTolerance
-  });
-  ctx.clearRect(0, 0, logo.width, logo.height);
-  ctx.putImageData(imageData, 0, 0);
-  return await createImageBitmap(canvas);
-};
+const processLogoBitmap = async (logo: ImageBitmap) => logo;
 
 const normalizeRegion = (region: Region, image: ImageBitmap) => {
   const imageWidth = image.width || 1;
@@ -3010,19 +3126,72 @@ const drawFrame = (
         settings.generatedBackgroundShuffleSeed
       )
     : null;
-  const progressFillDefinition =
-    isClassicStyle && styleModules.progress.id === 'package'
-      ? CLASSIC_HUD_SPEC.progress.fillGradient
-      : buildProgressFillDefinition(styleModules.progress, visualTheme);
-  const isRevealPhase = scene.segment.phase === 'revealing';
-  const shouldRenderHeaderText = scene.segment.phase !== 'intro' && scene.segment.phase !== 'outro';
-  const shouldShowHeaderTimer = settings.showTimer !== false && !isRevealPhase;
+  const generatedProgressTheme = settings.generatedProgressEnabled
+    ? PROGRESS_BAR_THEMES[settings.generatedProgressStyle]
+    : null;
+  const shouldRenderHeaderText =
+    scene.segment.phase === 'showing' || scene.segment.phase === 'revealing';
+  const shouldShowHeaderTimer = settings.showTimer !== false && scene.segment.phase === 'showing';
   const shouldShowHeaderProgress = settings.showProgress !== false && scene.segment.phase === 'showing';
+  const shouldShowClassicPuzzleBadge =
+    scene.segment.phase === 'showing' || scene.segment.phase === 'revealing';
   const shouldRenderCustomLogo = Boolean(brandLogo) && customLayoutEnabled;
   const shouldRenderInlineLogo =
     Boolean(brandLogo) && !customLayoutEnabled && !isClassicStyle && !isStorybookStyle && shouldRenderHeaderText;
   const shouldRenderPuzzlePanels = scene.segment.phase !== 'intro' && scene.segment.phase !== 'outro';
   const countdownPercent = clamp(scene.countdownPercent, 0, 100);
+  const generatedProgressFillColors = settings.generatedProgressEnabled
+    ? resolveProgressBarFillColors(settings.generatedProgressStyle, countdownPercent / 100)
+    : null;
+  const progressTrackTheme = generatedProgressTheme ?? visualTheme;
+  const progressFillDefinition =
+    settings.generatedProgressEnabled && generatedProgressTheme
+      ? resolveProgressBarFillStyle(
+          settings.generatedProgressStyle,
+          countdownPercent / 100,
+          generatedProgressTheme
+        )
+      : isClassicStyle && styleModules.progress.id === 'package'
+      ? CLASSIC_HUD_SPEC.progress.fillGradient
+      : buildProgressFillDefinition(styleModules.progress, visualTheme);
+  const isTextFillProgress = settings.generatedProgressEnabled
+    ? settings.generatedProgressRenderMode === 'text_fill'
+    : styleModules.progress.variant === 'text_fill';
+  const progressMotionState = resolveVideoProgressMotionState({
+    mode: settings.progressMotion,
+    phase: scene.segment.phase,
+    phaseDuration: scene.segment.duration,
+    timeLeft: scene.timeLeft
+  });
+  const progressFillPercent = clamp(progressMotionState.fillPercent, 0, 100);
+  const shouldShowProgressSweep = progressMotionState.sweepActive;
+  const transitionSequenceState = resolveVideoTransitionSequenceState({
+    phaseDuration: settings.transitionDuration,
+    timeLeft: scene.timeLeft
+  });
+  const puzzleEntryState = resolveVideoPuzzleEntryState({
+    phaseDuration: settings.showDuration,
+    timeLeft: scene.timeLeft
+  });
+  const transitionProgress =
+    scene.segment.phase === 'transitioning' ? clamp(scene.progressPercent / 100, 0, 1) : 0;
+  const transitionSmooth =
+    scene.segment.phase === 'transitioning'
+      ? transitionProgress * transitionProgress * (3 - 2 * transitionProgress)
+      : 0;
+  const puzzlePanelOpacity =
+    scene.segment.phase === 'transitioning'
+      ? transitionSequenceState.outgoingOpacity
+      : scene.segment.phase === 'showing'
+      ? puzzleEntryState.opacity
+      : 1;
+  const puzzlePanelScale =
+    scene.segment.phase === 'transitioning'
+      ? transitionSequenceState.outgoingScale
+      : scene.segment.phase === 'showing'
+      ? puzzleEntryState.scale
+      : 1;
+  const puzzlePanelRotate = 0;
 
   const outerPad = 0;
   const board: Rect = {
@@ -3049,11 +3218,17 @@ const drawFrame = (
     : isStorybookStyle
     ? Math.round(14 * uiScale)
     : Math.round(styleFrameLayout.contentPadding * layoutScale);
-  const gameRect: Rect = {
-    x: board.x + contentPadding,
-    y: board.y + headerHeight + contentPadding,
-    width: board.width - contentPadding * 2,
-    height: board.height - headerHeight - contentPadding * 2
+  const gameAreaRect: Rect = {
+    x: board.x,
+    y: board.y + headerHeight,
+    width: board.width,
+    height: board.height - headerHeight
+  };
+  const panelStageRect: Rect = {
+    x: gameAreaRect.x + contentPadding,
+    y: gameAreaRect.y + contentPadding,
+    width: gameAreaRect.width - contentPadding * 2,
+    height: gameAreaRect.height - contentPadding * 2
   };
   const panelGap = isClassicStyle
     ? Math.max(6, Math.round(8 * classicLayoutScale))
@@ -3065,10 +3240,7 @@ const drawFrame = (
     : isStorybookStyle
     ? Math.round(18 * uiScale)
     : Math.round(styleFrameLayout.panelRadius * layoutScale);
-  const imagePanelOutlineWidth =
-    Number(settings.imagePanelOutlineThickness) > 0
-      ? Math.max(1, Math.round(Number(settings.imagePanelOutlineThickness) * uiScale))
-      : 0;
+  const imagePanelOutlineWidth = 0;
   const imagePanelOutlineColor = settings.imagePanelOutlineColor || '#CEC3A5';
   const usesImagePanelOutline = imagePanelOutlineWidth > 0;
   const gamePadding = isStorybookStyle
@@ -3078,6 +3250,12 @@ const drawFrame = (
     : isClassicStyle
     ? Math.max(0, Math.round(styleFrameLayout.gamePadding * classicLayoutScale))
     : Math.max(0, Math.round(styleFrameLayout.gamePadding * layoutScale));
+  const generatedBackgroundCoversHeader =
+    Boolean(generatedBackgroundSpec) && settings.generatedBackgroundCoverage === 'full_board';
+  const sceneOverlayRect = generatedBackgroundCoversHeader ? board : gameAreaRect;
+  const headerFill = generatedBackgroundCoversHeader
+    ? hexToRgba(headerBackground, isClassicStyle ? 0.88 : 0.82)
+    : headerBackground;
   const drawHeaderLogo = (rect: Rect) => {
     if (!brandLogo) return;
     ctx.save();
@@ -3092,11 +3270,21 @@ const drawFrame = (
   ctx.fillStyle = rootBackground;
   ctx.fillRect(0, 0, width, height);
 
-  drawRoundedRect(ctx, board, { fill: boardBackground, stroke: boardStroke, lineWidth: boardStrokeWidth });
+  if (generatedBackgroundCoversHeader) {
+    drawRoundedRect(ctx, board, { fill: boardBackground, stroke: undefined, lineWidth: 0 });
+    ctx.save();
+    roundRectPath(ctx, board);
+    ctx.clip();
+    drawGeneratedBackground(ctx, generatedBackgroundSpec!, board, timestamp);
+    ctx.restore();
+    drawRoundedRect(ctx, board, { fill: undefined, stroke: boardStroke, lineWidth: boardStrokeWidth });
+  } else {
+    drawRoundedRect(ctx, board, { fill: boardBackground, stroke: boardStroke, lineWidth: boardStrokeWidth });
+  }
   drawRoundedRect(
     ctx,
     { x: board.x, y: board.y, width: board.width, height: headerHeight, radius: board.radius },
-    { fill: headerBackground }
+    { fill: headerFill }
   );
   ctx.fillStyle = boardStroke;
   ctx.fillRect(board.x, board.y + headerHeight - Math.max(3, 3 * uiScale), board.width, Math.max(3, 3 * uiScale));
@@ -3155,25 +3343,63 @@ const drawFrame = (
         height: progressTrackHeight,
         radius: progressTrackHeight / 2
       };
-      if (styleModules.progress.variant === 'text_fill') {
-        drawTextProgressLabel(ctx, progressTrackRect, progressLabel, countdownPercent, styleModules, visualTheme, uiScale);
+      if (isTextFillProgress) {
+        drawTextProgressLabel(
+          ctx,
+          progressTrackRect,
+          progressLabel,
+          progressFillPercent,
+          countdownPercent,
+          styleModules,
+          progressTrackTheme,
+          uiScale,
+          generatedProgressFillColors,
+          {
+            active: shouldShowProgressSweep,
+            progress: progressMotionState.sweepProgress,
+            opacity: progressMotionState.sweepOpacity
+          }
+        );
       } else {
         drawRoundedRect(ctx, progressTrackRect, {
-          fill: '#8B6D33',
-          stroke: '#3F301A',
+          fill: settings.generatedProgressEnabled ? progressTrackTheme.progressTrackBg : '#8B6D33',
+          stroke: settings.generatedProgressEnabled ? progressTrackTheme.progressTrackBorder : '#3F301A',
           lineWidth: Math.max(2, 3 * uiScale)
         });
         const progressFillRect: Rect = {
           x: progressTrackX + Math.max(2, 3 * uiScale),
           y: progressTrackY + Math.max(2, 3 * uiScale),
-          width: ((progressTrackWidth - Math.max(4, 6 * uiScale)) * countdownPercent) / 100,
+          width: ((progressTrackWidth - Math.max(4, 6 * uiScale)) * progressFillPercent) / 100,
           height: progressTrackHeight - Math.max(4, 6 * uiScale),
           radius: (progressTrackHeight - Math.max(4, 6 * uiScale)) / 2
         };
         if (progressFillRect.width > 0) {
           roundRectPath(ctx, progressFillRect);
-          ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, visualTheme.progressFill, accent);
+          ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, accent);
           ctx.fill();
+          if (shouldShowProgressSweep) {
+            drawProgressSweepOverlay(
+              ctx,
+              progressFillRect,
+              'horizontal',
+              progressMotionState.sweepProgress,
+              progressMotionState.sweepOpacity
+            );
+          }
+          drawProgressPulseOverlay(
+            ctx,
+            progressFillRect,
+            'horizontal',
+            progressMotionState.pulseOverlayOpacity
+          );
+          drawProgressPulseGlow(
+            ctx,
+            progressFillRect,
+            progressMotionState.pulseGlowOpacity,
+            hexToRgba(accent, 0.14 + progressMotionState.pulseGlowOpacity * 0.38),
+            Math.max(6, Math.round(10 * uiScale)),
+            Math.max(1, Math.round(1.5 * uiScale))
+          );
         }
       }
     }
@@ -3191,10 +3417,16 @@ const drawFrame = (
       );
     }
 
-    ctx.fillStyle = '#2E2414';
-    ctx.textAlign = 'right';
-    ctx.font = `900 ${Math.max(16, Math.round(34 * uiScale))}px "Georgia", "Times New Roman", serif`;
-    ctx.fillText(`${scene.segment.puzzleIndex + 1}/${puzzles.length}`, timerBoxX - Math.round(12 * uiScale), board.y + headerHeight / 2 + 1);
+    if (shouldShowHeaderTimer) {
+      ctx.fillStyle = '#2E2414';
+      ctx.textAlign = 'right';
+      ctx.font = `900 ${Math.max(16, Math.round(34 * uiScale))}px "Georgia", "Times New Roman", serif`;
+      ctx.fillText(
+        `${scene.segment.puzzleIndex + 1}/${puzzles.length}`,
+        timerBoxX - Math.round(12 * uiScale),
+        board.y + headerHeight / 2 + 1
+      );
+    }
 
     if (shouldShowHeaderTimer) {
       drawStyledHeaderTimer(
@@ -3284,32 +3516,35 @@ const drawFrame = (
         height: badgeHeight,
         radius: Math.max(8, Math.round(CLASSIC_HUD_SPEC.puzzleBadge.radius * classicLayoutScale))
       };
-      const badgeFill = resolveProgressFill(
-        ctx,
-        badgeRect,
-        CLASSIC_HUD_SPEC.puzzleBadge.background,
-        '#FFE88A'
-      );
-      drawRoundedRect(ctx, badgeRect, {
-        fill: badgeFill,
-        stroke: CLASSIC_HUD_SPEC.puzzleBadge.border,
-        lineWidth: Math.max(2, Math.round(2 * classicLayoutScale))
-      });
-      ctx.save();
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#111827';
-      ctx.textAlign = 'left';
-      ctx.font = `${styleModules.text.subtitleCanvasWeight} ${badgeLabelSize}px ${styleModules.text.subtitleCanvasFamily}`;
-      ctx.fillText(badgeLabelText, badgeRect.x + badgePadX, badgeRect.y + badgeRect.height / 2 + 1);
-      ctx.fillStyle = '#020617';
-      ctx.textAlign = 'right';
-      ctx.font = `${styleModules.text.titleCanvasWeight} ${badgeValueSize}px ${styleModules.text.titleCanvasFamily}`;
-      ctx.fillText(
-        badgeText,
-        badgeRect.x + badgeRect.width - badgePadX,
-        badgeRect.y + badgeRect.height / 2 + 1
-      );
-      ctx.restore();
+
+      if (shouldShowClassicPuzzleBadge) {
+        const badgeFill = resolveProgressFill(
+          ctx,
+          badgeRect,
+          CLASSIC_HUD_SPEC.puzzleBadge.background,
+          '#FFE88A'
+        );
+        drawRoundedRect(ctx, badgeRect, {
+          fill: badgeFill,
+          stroke: CLASSIC_HUD_SPEC.puzzleBadge.border,
+          lineWidth: Math.max(2, Math.round(2 * classicLayoutScale))
+        });
+        ctx.save();
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#111827';
+        ctx.textAlign = 'left';
+        ctx.font = `${styleModules.text.subtitleCanvasWeight} ${badgeLabelSize}px ${styleModules.text.subtitleCanvasFamily}`;
+        ctx.fillText(badgeLabelText, badgeRect.x + badgePadX, badgeRect.y + badgeRect.height / 2 + 1);
+        ctx.fillStyle = '#020617';
+        ctx.textAlign = 'right';
+        ctx.font = `${styleModules.text.titleCanvasWeight} ${badgeValueSize}px ${styleModules.text.titleCanvasFamily}`;
+        ctx.fillText(
+          badgeText,
+          badgeRect.x + badgeRect.width - badgePadX,
+          badgeRect.y + badgeRect.height / 2 + 1
+        );
+        ctx.restore();
+      }
 
       if (shouldRenderHeaderText) {
         const centerTitleText = applyTextTransform(scene.title, styleModules.text.titleTransform);
@@ -3415,33 +3650,42 @@ const drawFrame = (
             height: progressTrackHeight,
             radius: radiusTokenToPx(styleModules.progress.radiusToken, progressTrackHeight, classicLayoutScale)
           };
-          if (styleModules.progress.variant === 'text_fill') {
+          if (isTextFillProgress) {
             drawTextProgressLabel(
               ctx,
               progressTrackRect,
               progressLabel,
+              progressFillPercent,
               countdownPercent,
               styleModules,
-              visualTheme,
-              classicLayoutScale
+              progressTrackTheme,
+              classicLayoutScale,
+              generatedProgressFillColors,
+              {
+                active: shouldShowProgressSweep,
+                progress: progressMotionState.sweepProgress,
+                opacity: progressMotionState.sweepOpacity
+              }
             );
           } else {
             const classicTrackFill = resolveProgressFill(
               ctx,
               progressTrackRect,
-              CLASSIC_HUD_SPEC.progress.trackBackground,
-              '#141414'
+              settings.generatedProgressEnabled
+                ? progressTrackTheme.progressTrackBg
+                : CLASSIC_HUD_SPEC.progress.trackBackground,
+              settings.generatedProgressEnabled ? progressTrackTheme.progressTrackBg : '#141414'
             );
             drawRoundedRect(ctx, progressTrackRect, {
               fill: classicTrackFill,
-              stroke: visualTheme.progressTrackBorder,
+              stroke: progressTrackTheme.progressTrackBorder,
               lineWidth: Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.borderWidth * classicLayoutScale))
             });
             const fillInset = Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.fillInset * classicLayoutScale));
             const progressFillRect: Rect = {
               x: progressTrackX + fillInset,
               y: progressTrackY + fillInset,
-              width: ((progressTrackWidth - fillInset * 2) * countdownPercent) / 100,
+              width: ((progressTrackWidth - fillInset * 2) * progressFillPercent) / 100,
               height: Math.max(1, progressTrackHeight - fillInset * 2),
               radius: Math.max(1, (progressTrackHeight - fillInset * 2) / 2)
             };
@@ -3449,10 +3693,35 @@ const drawFrame = (
               roundRectPath(ctx, progressFillRect);
               ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, accent);
               ctx.fill();
+              if (shouldShowProgressSweep) {
+                drawProgressSweepOverlay(
+                  ctx,
+                  progressFillRect,
+                  'horizontal',
+                  progressMotionState.sweepProgress,
+                  progressMotionState.sweepOpacity
+                );
+              }
+              drawProgressPulseOverlay(
+                ctx,
+                progressFillRect,
+                'horizontal',
+                progressMotionState.pulseOverlayOpacity
+              );
+              drawProgressPulseGlow(
+                ctx,
+                progressFillRect,
+                progressMotionState.pulseGlowOpacity,
+                hexToRgba(accent, 0.14 + progressMotionState.pulseGlowOpacity * 0.38),
+                Math.max(4, Math.round(8 * uiScale)),
+                Math.max(1, Math.round(1.5 * uiScale))
+              );
               ctx.save();
               roundRectPath(ctx, progressFillRect);
               ctx.shadowColor =
-                styleModules.progress.variant === 'glow'
+                settings.generatedProgressEnabled
+                  ? progressTrackTheme.progressFillGlow ?? CLASSIC_HUD_SPEC.progress.fillGlowCanvas
+                  : styleModules.progress.variant === 'glow'
                   ? visualTheme.progressFillGlow ?? accent
                   : CLASSIC_HUD_SPEC.progress.fillGlowCanvas;
               ctx.shadowBlur = Math.max(4, Math.round(8 * uiScale));
@@ -3481,33 +3750,42 @@ const drawFrame = (
           height: progressTrackHeight,
           radius: radiusTokenToPx(styleModules.progress.radiusToken, progressTrackHeight, classicLayoutScale)
         };
-        if (styleModules.progress.variant === 'text_fill') {
+        if (isTextFillProgress) {
           drawTextProgressLabel(
             ctx,
             progressTrackRect,
             progressLabel,
+            progressFillPercent,
             countdownPercent,
             styleModules,
-            visualTheme,
-            classicLayoutScale
+            progressTrackTheme,
+            classicLayoutScale,
+            generatedProgressFillColors,
+            {
+              active: shouldShowProgressSweep,
+              progress: progressMotionState.sweepProgress,
+              opacity: progressMotionState.sweepOpacity
+            }
           );
         } else {
           const classicTrackFill = resolveProgressFill(
             ctx,
             progressTrackRect,
-            CLASSIC_HUD_SPEC.progress.trackBackground,
-            '#141414'
+            settings.generatedProgressEnabled
+              ? progressTrackTheme.progressTrackBg
+              : CLASSIC_HUD_SPEC.progress.trackBackground,
+            settings.generatedProgressEnabled ? progressTrackTheme.progressTrackBg : '#141414'
           );
           drawRoundedRect(ctx, progressTrackRect, {
             fill: classicTrackFill,
-            stroke: visualTheme.progressTrackBorder,
+            stroke: progressTrackTheme.progressTrackBorder,
             lineWidth: Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.borderWidth * classicLayoutScale))
           });
           const fillInset = Math.max(1, Math.round(CLASSIC_HUD_SPEC.progress.fillInset * classicLayoutScale));
           const progressFillRect: Rect = {
             x: progressTrackX + fillInset,
             y: progressTrackY + fillInset,
-            width: ((progressTrackWidth - fillInset * 2) * countdownPercent) / 100,
+            width: ((progressTrackWidth - fillInset * 2) * progressFillPercent) / 100,
             height: Math.max(1, progressTrackHeight - fillInset * 2),
             radius: Math.max(1, (progressTrackHeight - fillInset * 2) / 2)
           };
@@ -3515,10 +3793,35 @@ const drawFrame = (
             roundRectPath(ctx, progressFillRect);
             ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, accent);
             ctx.fill();
+            if (shouldShowProgressSweep) {
+              drawProgressSweepOverlay(
+                ctx,
+                progressFillRect,
+                'horizontal',
+                progressMotionState.sweepProgress,
+                progressMotionState.sweepOpacity
+              );
+            }
+            drawProgressPulseOverlay(
+              ctx,
+              progressFillRect,
+              'horizontal',
+              progressMotionState.pulseOverlayOpacity
+            );
+            drawProgressPulseGlow(
+              ctx,
+              progressFillRect,
+              progressMotionState.pulseGlowOpacity,
+              hexToRgba(accent, 0.14 + progressMotionState.pulseGlowOpacity * 0.38),
+              Math.max(4, Math.round(8 * uiScale)),
+              Math.max(1, Math.round(1.5 * uiScale))
+            );
             ctx.save();
             roundRectPath(ctx, progressFillRect);
             ctx.shadowColor =
-              styleModules.progress.variant === 'glow'
+              settings.generatedProgressEnabled
+                ? progressTrackTheme.progressFillGlow ?? CLASSIC_HUD_SPEC.progress.fillGlowCanvas
+                : styleModules.progress.variant === 'glow'
                 ? visualTheme.progressFillGlow ?? accent
                 : CLASSIC_HUD_SPEC.progress.fillGlowCanvas;
             ctx.shadowBlur = Math.max(4, Math.round(8 * uiScale));
@@ -3739,7 +4042,7 @@ const drawFrame = (
       );
       const timerDotSize = Math.max(4, Math.round(styleHudLayout.timer.dotSize * nonClassicScale));
       const timerGap = Math.max(4, Math.round(styleHudLayout.timer.gap * nonClassicScale));
-      const timerFontSize = Math.max(12, Math.round(styleHudLayout.timer.fontSize * nonClassicScale));
+      const timerFontSize = Math.max(0, Math.round(styleHudLayout.timer.fontSize * nonClassicScale));
       ctx.font = `${styleModules.timer.canvasFontWeight} ${timerFontSize}px ${styleModules.timer.canvasFontFamily}`;
       const nonClassicTimerMetrics = measureResolvedTimerBox(styleModules.timer, {
         textWidth: ctx.measureText(timerTextValue).width,
@@ -3792,28 +4095,39 @@ const drawFrame = (
         const progressTrackRect: Rect = {
           ...progressTrackRectBase,
           radius: clamp(
-            radiusTokenToPx(styleModules.progress.radiusToken, progressTrackRectBase.height, nonClassicScale),
+            settings.generatedProgressEnabled
+              ? Math.max(8, Math.round(progressTrackRectBase.height / 2))
+              : radiusTokenToPx(styleModules.progress.radiusToken, progressTrackRectBase.height, nonClassicScale),
             0,
             Math.min(progressTrackRectBase.width, progressTrackRectBase.height) / 2
           )
         };
-        if (styleModules.progress.variant === 'text_fill') {
+        if (isTextFillProgress) {
           drawTextProgressLabel(
             ctx,
             progressTrackRect,
             progressLabel,
+            progressFillPercent,
             countdownPercent,
             styleModules,
-            visualTheme,
-            nonClassicScale
+            progressTrackTheme,
+            nonClassicScale,
+            generatedProgressFillColors,
+            {
+              active: shouldShowProgressSweep,
+              progress: progressMotionState.sweepProgress,
+              opacity: progressMotionState.sweepOpacity
+            }
           );
         } else {
           drawRoundedRect(ctx, progressTrackRect, {
-            fill: visualTheme.progressTrackBg,
-            stroke: visualTheme.progressTrackBorder,
-            lineWidth: Math.max(1.5, Math.round(2 * nonClassicScale * styleModules.progress.borderWidthScale))
+            fill: progressTrackTheme.progressTrackBg,
+            stroke: progressTrackTheme.progressTrackBorder,
+            lineWidth: settings.generatedProgressEnabled
+              ? Math.max(2, Math.round(progressTrackRect.height * 0.08))
+              : Math.max(1.5, Math.round(2 * nonClassicScale * styleModules.progress.borderWidthScale))
           });
-          const fillPercent = countdownPercent / 100;
+          const fillPercent = progressFillPercent / 100;
           const progressFillRect: Rect =
             styleHudLayout.progress.orientation === 'vertical'
               ? {
@@ -3834,12 +4148,39 @@ const drawFrame = (
             roundRectPath(ctx, progressFillRect);
             ctx.fillStyle = resolveProgressFill(ctx, progressFillRect, progressFillDefinition, accent);
             ctx.fill();
-            if (styleModules.progress.variant === 'glow') {
+            if (shouldShowProgressSweep) {
+              drawProgressSweepOverlay(
+                ctx,
+                progressFillRect,
+                styleHudLayout.progress.orientation,
+                progressMotionState.sweepProgress,
+                progressMotionState.sweepOpacity
+              );
+            }
+            drawProgressPulseOverlay(
+              ctx,
+              progressFillRect,
+              styleHudLayout.progress.orientation,
+              progressMotionState.pulseOverlayOpacity
+            );
+            drawProgressPulseGlow(
+              ctx,
+              progressFillRect,
+              progressMotionState.pulseGlowOpacity,
+              hexToRgba(accent, 0.14 + progressMotionState.pulseGlowOpacity * 0.38),
+              Math.max(6, Math.round(10 * uiScale)),
+              Math.max(1, Math.round(1.5 * uiScale))
+            );
+            if (
+              settings.generatedProgressEnabled
+                ? Boolean(progressTrackTheme.progressFillGlow)
+                : styleModules.progress.variant === 'glow'
+            ) {
               ctx.save();
               roundRectPath(ctx, progressFillRect);
-              ctx.shadowColor = visualTheme.progressFillGlow ?? accent;
+              ctx.shadowColor = progressTrackTheme.progressFillGlow ?? accent;
               ctx.shadowBlur = Math.max(6, Math.round(10 * uiScale));
-              ctx.strokeStyle = visualTheme.timerDot;
+              ctx.strokeStyle = progressTrackTheme.timerDot;
               ctx.lineWidth = Math.max(1, Math.round(1.5 * uiScale));
               ctx.stroke();
               ctx.restore();
@@ -3852,29 +4193,34 @@ const drawFrame = (
     }
   }
 
-  drawRoundedRect(ctx, gameRect, {
-    fill: isStorybookStyle ? '#1F475B' : gameBackground,
-    stroke: isStorybookStyle ? '#3F301A' : usesImagePanelOutline ? undefined : '#000000',
-    lineWidth: isStorybookStyle ? Math.max(2, 2 * uiScale) : usesImagePanelOutline ? 0 : Math.max(2, 2 * uiScale)
+  drawRoundedRect(ctx, gameAreaRect, {
+    fill: generatedBackgroundCoversHeader ? 'rgba(255,255,255,0)' : isStorybookStyle ? '#1F475B' : gameBackground,
+    stroke: undefined,
+    lineWidth: 0
   });
   ctx.save();
-  roundRectPath(ctx, gameRect);
+  roundRectPath(ctx, gameAreaRect);
   ctx.clip();
-  if (generatedBackgroundSpec) {
-    drawGeneratedBackground(ctx, generatedBackgroundSpec, gameRect, timestamp);
+  if (generatedBackgroundSpec && !generatedBackgroundCoversHeader) {
+    drawGeneratedBackground(ctx, generatedBackgroundSpec, gameAreaRect, timestamp);
   }
   if (isStorybookStyle) {
-    const gameGradient = ctx.createLinearGradient(gameRect.x, gameRect.y, gameRect.x, gameRect.y + gameRect.height);
+    const gameGradient = ctx.createLinearGradient(
+      gameAreaRect.x,
+      gameAreaRect.y,
+      gameAreaRect.x,
+      gameAreaRect.y + gameAreaRect.height
+    );
     gameGradient.addColorStop(0, 'rgba(255,255,255,0.12)');
     gameGradient.addColorStop(1, 'rgba(0,0,0,0.18)');
     ctx.fillStyle = gameGradient;
-    ctx.fillRect(gameRect.x, gameRect.y, gameRect.width, gameRect.height);
+    ctx.fillRect(gameAreaRect.x, gameAreaRect.y, gameAreaRect.width, gameAreaRect.height);
   } else {
     ctx.fillStyle = hexToRgba(visualTheme.patternColor, 0.12);
     const patternSpacing = Math.max(16, Math.round(26 * uiScale));
     const patternRadius = Math.max(1, Math.round(2 * uiScale));
-    for (let y = gameRect.y; y <= gameRect.y + gameRect.height; y += patternSpacing) {
-      for (let x = gameRect.x; x <= gameRect.x + gameRect.width; x += patternSpacing) {
+    for (let y = gameAreaRect.y; y <= gameAreaRect.y + gameAreaRect.height; y += patternSpacing) {
+      for (let x = gameAreaRect.x; x <= gameAreaRect.x + gameAreaRect.width; x += patternSpacing) {
         ctx.beginPath();
         ctx.arc(x, y, patternRadius, 0, Math.PI * 2);
         ctx.fill();
@@ -3889,6 +4235,21 @@ const drawFrame = (
       throw new Error('Missing puzzle images for frame render.');
     }
 
+    ctx.save();
+    roundRectPath(ctx, gameAreaRect);
+    ctx.clip();
+    if (scene.segment.phase === 'transitioning') {
+      const panelCenterX = gameAreaRect.x + gameAreaRect.width / 2;
+      const panelCenterY = gameAreaRect.y + gameAreaRect.height / 2;
+      ctx.globalAlpha *= puzzlePanelOpacity;
+      ctx.translate(panelCenterX, panelCenterY);
+      if (puzzlePanelRotate !== 0) {
+        ctx.rotate(puzzlePanelRotate);
+      }
+      ctx.scale(puzzlePanelScale, puzzlePanelScale);
+      ctx.translate(-panelCenterX, -panelCenterY);
+    }
+
     let originalPanel: Rect;
     let modifiedPanel: Rect;
 
@@ -3897,11 +4258,11 @@ const drawFrame = (
 
     if (isStorybookStyle) {
       if (isVerticalLayout) {
-        const panelHeight = (gameRect.height - panelGap) / 2;
+        const panelHeight = (panelStageRect.height - panelGap) / 2;
         originalPanel = {
-          x: gameRect.x + Math.round(8 * uiScale),
-          y: gameRect.y + Math.round(8 * uiScale),
-          width: gameRect.width - Math.round(16 * uiScale),
+          x: panelStageRect.x + Math.round(8 * uiScale),
+          y: panelStageRect.y + Math.round(8 * uiScale),
+          width: panelStageRect.width - Math.round(16 * uiScale),
           height: panelHeight - Math.round(12 * uiScale),
           radius: panelRadius
         };
@@ -3913,12 +4274,12 @@ const drawFrame = (
           radius: panelRadius
         };
       } else {
-        const panelWidth = (gameRect.width - panelGap) / 2;
+        const panelWidth = (panelStageRect.width - panelGap) / 2;
         originalPanel = {
-          x: gameRect.x + Math.round(8 * uiScale),
-          y: gameRect.y + Math.round(8 * uiScale),
+          x: panelStageRect.x + Math.round(8 * uiScale),
+          y: panelStageRect.y + Math.round(8 * uiScale),
           width: panelWidth - Math.round(12 * uiScale),
-          height: gameRect.height - Math.round(16 * uiScale),
+          height: panelStageRect.height - Math.round(16 * uiScale),
           radius: panelRadius
         };
         modifiedPanel = {
@@ -3930,30 +4291,9 @@ const drawFrame = (
         };
       }
 
-      const panelStrokeColor = imagePanelOutlineColor;
-      const panelStrokeWidth = imagePanelOutlineWidth;
-      const insetPanelViewport = (panel: Rect): Rect => {
-        const inset = panelStrokeWidth;
-        const innerWidth = Math.max(1, panel.width - inset * 2);
-        const innerHeight = Math.max(1, panel.height - inset * 2);
-        return {
-          x: panel.x + inset,
-          y: panel.y + inset,
-          width: innerWidth,
-          height: innerHeight,
-          radius: Math.max(0, panel.radius - inset)
-        };
-      };
+      originalImageViewport = originalPanel;
+      modifiedImageViewport = modifiedPanel;
 
-      originalImageViewport = insetPanelViewport(originalPanel);
-      modifiedImageViewport = insetPanelViewport(modifiedPanel);
-
-      drawRoundedRect(ctx, originalPanel, {
-        fill: panelStrokeColor
-      });
-      drawRoundedRect(ctx, modifiedPanel, {
-        fill: panelStrokeColor
-      });
       drawRoundedRect(ctx, originalImageViewport, {
         fill: panelBackground
       });
@@ -3962,10 +4302,10 @@ const drawFrame = (
       });
     } else {
       const contentRect: Rect = {
-        x: gameRect.x + gamePadding,
-        y: gameRect.y + gamePadding,
-        width: Math.max(1, gameRect.width - gamePadding * 2),
-        height: Math.max(1, gameRect.height - gamePadding * 2),
+        x: panelStageRect.x + gamePadding,
+        y: panelStageRect.y + gamePadding,
+        width: Math.max(1, panelStageRect.width - gamePadding * 2),
+        height: Math.max(1, panelStageRect.height - gamePadding * 2),
         radius: 0
       };
 
@@ -4040,16 +4380,16 @@ const drawFrame = (
       ctx.fillStyle = hexToRgba('#5A4A2B', 0.45);
       ctx.fillRect(
         separatorX - Math.max(1, Math.round(1.5 * uiScale)),
-        gameRect.y + Math.round(8 * uiScale),
+        panelStageRect.y + Math.round(8 * uiScale),
         Math.max(2, Math.round(3 * uiScale)),
-        gameRect.height - Math.round(16 * uiScale)
+        panelStageRect.height - Math.round(16 * uiScale)
       );
 
       const badgeWidth = Math.max(36, Math.round(44 * uiScale));
       const badgeHeight = Math.max(16, Math.round(120 * uiScale));
       const badgeRect: Rect = {
         x: separatorX - badgeWidth / 2,
-        y: gameRect.y + gameRect.height / 2 - badgeHeight / 2,
+        y: panelStageRect.y + panelStageRect.height / 2 - badgeHeight / 2,
         width: badgeWidth,
         height: badgeHeight,
         radius: Math.round(8 * uiScale)
@@ -4140,15 +4480,91 @@ const drawFrame = (
       });
     }
 
+    ctx.restore();
   }
 
-  if (
-    scene.segment.phase === 'intro' ||
-    scene.segment.phase === 'transitioning' ||
-    scene.segment.phase === 'outro'
-  ) {
-    drawSceneCard(ctx, gameRect, scene, settings, visualTheme, isVerticalLayout, uiScale);
+  if (scene.segment.phase === 'intro' || scene.segment.phase === 'outro') {
+    drawSceneCard(ctx, sceneOverlayRect, scene, settings, visualTheme, isVerticalLayout, uiScale);
   }
+
+  if (scene.segment.phase === 'transitioning') {
+    drawTransitionOverlay(ctx, sceneOverlayRect, scene, settings, visualTheme, isVerticalLayout, uiScale);
+  }
+};
+
+const drawTransitionOverlay = (
+  ctx: CanvasRenderingContext2D,
+  gameRect: Rect,
+  scene: RenderScene,
+  settings: VideoSettings,
+  visualTheme: VisualTheme,
+  isVerticalLayout: boolean,
+  uiScale: number
+) => {
+  const packagePreset =
+    VIDEO_PACKAGE_PRESETS[settings.videoPackagePreset] ?? VIDEO_PACKAGE_PRESETS.gameshow;
+  const styleModules = resolveVideoStyleModules(settings, packagePreset);
+  const transitionState = resolveVideoTransitionSequenceState({
+    phaseDuration: scene.segment.duration,
+    timeLeft: scene.timeLeft
+  });
+  const titleText = applyTextTransform(VIDEO_TRANSITION_LABEL, styleModules.text.titleTransform);
+  const typedTitle = revealTypewriterText(titleText, transitionState.titleProgress);
+  const visibleTitle = typedTitle.text || ' ';
+
+  ctx.save();
+  roundRectPath(ctx, gameRect);
+  ctx.clip();
+
+  const overlay = ctx.createLinearGradient(gameRect.x, gameRect.y, gameRect.x, gameRect.y + gameRect.height);
+  overlay.addColorStop(0, `rgba(6,11,20,${(transitionState.overlayOpacity * 0.54).toFixed(3)})`);
+  overlay.addColorStop(1, `rgba(6,11,20,${(transitionState.overlayOpacity * 0.78).toFixed(3)})`);
+  ctx.fillStyle = overlay;
+  ctx.fillRect(gameRect.x, gameRect.y, gameRect.width, gameRect.height);
+
+  ctx.translate(
+    gameRect.x + gameRect.width / 2,
+    gameRect.y + gameRect.height / 2 + transitionState.titleTranslateY
+  );
+  ctx.globalAlpha = clamp(transitionState.titleOpacity, 0, 1);
+
+  const maxTextWidth = gameRect.width * 0.82;
+  const titleFontSize = fitTextSize(
+    ctx,
+    titleText,
+    maxTextWidth,
+    Math.max(28, Math.round((isVerticalLayout ? 58 : 76) * uiScale)),
+    styleModules.text.titleCanvasFamily,
+    styleModules.text.titleCanvasWeight
+  );
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${styleModules.text.titleCanvasWeight} ${titleFontSize}px ${styleModules.text.titleCanvasFamily}`;
+  ctx.fillStyle = '#F8FAFC';
+  ctx.shadowColor = 'rgba(0,0,0,0.36)';
+  ctx.shadowBlur = Math.round(28 * uiScale);
+  ctx.shadowOffsetY = Math.round(10 * uiScale);
+  ctx.fillText(visibleTitle, 0, -Math.round(8 * uiScale));
+  ctx.restore();
+
+  if (typedTitle.visibleGlyphs < typedTitle.totalGlyphs) {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${styleModules.text.titleCanvasWeight} ${titleFontSize}px ${styleModules.text.titleCanvasFamily}`;
+    const titleWidth = ctx.measureText(visibleTitle).width;
+    ctx.fillStyle = 'rgba(248,250,252,0.82)';
+    ctx.fillRect(
+      titleWidth / 2 + Math.max(8, Math.round(10 * uiScale)),
+      -Math.round(titleFontSize * 0.42),
+      Math.max(2, Math.round(3 * uiScale)),
+      Math.max(24, Math.round(titleFontSize * 0.86))
+    );
+    ctx.restore();
+  }
+
+  ctx.restore();
 };
 
 const postMessageToMain = (message: WorkerResponse, transfer: Transferable[] = []) => {
@@ -4187,7 +4603,7 @@ const renderPreviewFrameInWorker = async ({
     }
     if (settings.logo) {
       rawLogo = await loadLogoImage(settings.logo);
-      brandLogo = await processLogoBitmap(rawLogo, settings);
+      brandLogo = await processLogoBitmap(rawLogo);
       if (brandLogo !== rawLogo) {
         releaseBitmap(rawLogo);
         rawLogo = null;
@@ -4312,7 +4728,7 @@ const exportVideoInWorker = async ({
     }
     if (settings.logo) {
       rawLogo = await loadLogoImage(settings.logo);
-      brandLogo = await processLogoBitmap(rawLogo, settings);
+      brandLogo = await processLogoBitmap(rawLogo);
       if (brandLogo !== rawLogo) {
         releaseBitmap(rawLogo);
         rawLogo = null;
@@ -4526,6 +4942,7 @@ const exportVideoInWorker = async ({
 
 self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
   const message = event.data;
+  const previewRequestId = message.type === 'preview-frame' ? message.requestId : undefined;
 
   if (message.type === 'cancel') {
     isCanceled = true;
@@ -4543,7 +4960,8 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
         {
           type: 'preview-frame-done',
           buffer: result.buffer,
-          mimeType: result.mimeType
+          mimeType: result.mimeType,
+          requestId: previewRequestId
         },
         [result.buffer]
       );
@@ -4600,12 +5018,13 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
       message.type === 'preview-frame' ? 'Preview frame render failed.' : 'Video export failed.';
     const messageText = error instanceof Error ? error.message : fallbackMessage;
     if (messageText === '__EXPORT_CANCELED__') {
-      postMessageToMain({ type: 'cancelled' });
+      postMessageToMain({ type: 'cancelled', requestId: previewRequestId });
     } else {
-      postMessageToMain({ type: 'error', message: messageText });
+      postMessageToMain({ type: 'error', message: messageText, requestId: previewRequestId });
     }
   } finally {
     isCanceled = false;
     currentWorkerSessionId = 'primary';
   }
 };
+

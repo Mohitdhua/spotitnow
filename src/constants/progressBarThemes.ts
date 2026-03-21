@@ -1,7 +1,7 @@
 import { type VisualTheme, VISUAL_THEMES } from './videoThemes';
-import { VideoSettings } from '../types';
+import type { GeneratedProgressBarStyle } from '../types';
 
-export type ProgressBarVisualStyle = VideoSettings['visualStyle'] | 'heat';
+export type ProgressBarVisualStyle = GeneratedProgressBarStyle;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 

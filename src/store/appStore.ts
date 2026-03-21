@@ -535,28 +535,35 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       }
     })),
   hydrateProject: (project) =>
-    set((state) => ({
-      workspace: {
-        ...buildInitialWorkspace(),
-        puzzle: project.workspace.puzzle,
-        batch: project.workspace.batch,
-        playIndex: project.workspace.playIndex,
-        incomingVideoFrames: project.workspace.incomingVideoFrames
-      },
-      video: {
-        ...state.video,
-        videoSettings: project.video.settings
-      },
-      ui: {
-        ...state.ui,
-        lastRoute: project.uiSnapshot.lastRoute
-      },
-      projects: {
-        ...state.projects,
-        activeProjectId: project.id,
-        activeProjectName: project.name
-      }
-    })),
+    set((state) => {
+      const hydratedVideoSettings = applyVideoUserPackageToSettings(
+        createVideoUserPackageFromSettings(project.name, project.video.settings),
+        state.video.appDefaults.videoDefaults
+      );
+
+      return {
+        workspace: {
+          ...buildInitialWorkspace(),
+          puzzle: project.workspace.puzzle,
+          batch: project.workspace.batch,
+          playIndex: project.workspace.playIndex,
+          incomingVideoFrames: project.workspace.incomingVideoFrames
+        },
+        video: {
+          ...state.video,
+          videoSettings: hydratedVideoSettings
+        },
+        ui: {
+          ...state.ui,
+          lastRoute: project.uiSnapshot.lastRoute
+        },
+        projects: {
+          ...state.projects,
+          activeProjectId: project.id,
+          activeProjectName: project.name
+        }
+      };
+    }),
   setRecentProjects: (projects) =>
     set((state) => ({
       projects: {

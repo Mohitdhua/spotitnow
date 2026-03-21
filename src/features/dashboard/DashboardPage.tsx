@@ -68,7 +68,7 @@ export default function DashboardPage() {
 
   const handleImportProject = async (file: File) => {
     try {
-      const importedProject = parseImportedProject(await file.text());
+      const importedProject = await parseImportedProject(await file.text());
       const savedProject = await saveProject(importedProject);
       hydrateProject(savedProject);
       setActiveProjectMeta(savedProject.id, savedProject.name);
@@ -103,7 +103,10 @@ export default function DashboardPage() {
     }
 
     const project = (await loadProject(activeProjectId)) ?? buildLiveProjectRecord(activeProjectId, activeProjectName, '/');
-    downloadJsonFile(createProjectExport(project), `${project.name.replace(/\s+/g, '-').toLowerCase()}-project.json`);
+    downloadJsonFile(
+      await createProjectExport(project),
+      `${project.name.replace(/\s+/g, '-').toLowerCase()}-project.json`
+    );
     notifySuccess('Project backup downloaded.');
   };
 

@@ -14,13 +14,21 @@ interface StoredAudioAsset {
 
 const supportsIndexedDb = () => typeof window !== 'undefined' && 'indexedDB' in window;
 
-const readFileAsDataUrl = (file: File): Promise<string> =>
+const blobToDataUrl = (blob: Blob): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = reject;
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
+
+const dataUrlToBlob = async (dataUrl: string): Promise<Blob> => {
+  const response = await fetch(dataUrl);
+  if (!response.ok) {
+    throw new Error('Failed to read embedded audio asset.');
+  }
+  return await response.blob();
+};
 
 const openAudioAssetDb = (): Promise<IDBDatabase> =>
   new Promise((resolve, reject) => {
@@ -43,18 +51,18 @@ const createAssetId = () =>
 export const isStoredAudioAssetSource = (source?: string) =>
   typeof source === 'string' && source.startsWith(AUDIO_ASSET_PREFIX);
 
-export const saveAudioAssetFromFile = async (file: File): Promise<string> => {
+const persistAudioAsset = async (blob: Blob, name: string): Promise<string> => {
   if (!supportsIndexedDb()) {
-    return await readFileAsDataUrl(file);
+    return await blobToDataUrl(blob);
   }
 
   const db = await openAudioAssetDb();
   const id = createAssetId();
   const record: StoredAudioAsset = {
     id,
-    blob: file,
-    name: file.name,
-    type: file.type,
+    blob,
+    name,
+    type: blob.type || 'audio/mpeg',
     createdAt: Date.now()
   };
 
@@ -66,6 +74,17 @@ export const saveAudioAssetFromFile = async (file: File): Promise<string> => {
   });
 
   return `${AUDIO_ASSET_PREFIX}${id}`;
+};
+
+export const saveAudioAssetFromFile = async (file: File): Promise<string> => {
+  return await persistAudioAsset(file, file.name || 'audio-asset');
+};
+
+export const saveAudioAssetFromDataUrl = async (
+  dataUrl: string,
+  name = 'audio-asset'
+): Promise<string> => {
+  return await persistAudioAsset(await dataUrlToBlob(dataUrl), name);
 };
 
 export const loadAudioAssetBlob = async (source: string): Promise<Blob | null> => {
@@ -110,4 +129,44 @@ export const deleteStoredAudioAssets = async (sources: string[]): Promise<void> 
     const store = tx.objectStore(STORE_NAME);
     stored.forEach((source) => store.delete(source.slice(AUDIO_ASSET_PREFIX.length)));
   });
+};
+
+export const exportStoredAudioAssetMap = async (sources: Array<string | undefined>) => {
+  const entries = await Promise.all(
+    [...new Set(sources.filter((source): source is string => isStoredAudioAssetSource(source)))].map(
+      async (source) => {
+        const blob = await loadAudioAssetBlob(source);
+        if (!blob) {
+          return null;
+        }
+        return [source, await blobToDataUrl(blob)] as const;
+      }
+    )
+  );
+
+  return Object.fromEntries(
+    entries.filter((entry): entry is readonly [string, string] => Boolean(entry))
+  );
+};
+
+export const importStoredAudioAssetMap = async (assetMap?: Record<string, unknown>) => {
+  const restored = new Map<string, string>();
+  if (!assetMap || typeof assetMap !== 'object') {
+    return restored;
+  }
+
+  const entries = Object.entries(assetMap).filter(
+    (entry): entry is [string, string] =>
+      typeof entry[0] === 'string' && typeof entry[1] === 'string' && entry[1].startsWith('data:')
+  );
+
+  for (const [originalSource, dataUrl] of entries) {
+    try {
+      restored.set(originalSource, await saveAudioAssetFromDataUrl(dataUrl));
+    } catch {
+      // Skip invalid asset entries and keep the original source reference.
+    }
+  }
+
+  return restored;
 };

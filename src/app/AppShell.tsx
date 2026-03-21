@@ -49,22 +49,22 @@ function SidebarContent({
           onNavigate?.();
           onCloseMobile?.();
         }}
-        className={`group flex items-start gap-3 rounded-2xl border-2 px-3 py-3 text-left transition-colors ${
+        className={`group flex items-start gap-2 rounded-2xl border-2 px-2.5 py-2 text-left transition-colors ${
           isActive
             ? 'border-black bg-black text-white'
             : 'border-black bg-white text-slate-800 hover:bg-[#FFF7ED]'
         }`}
       >
         <div
-          className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border-2 border-black ${
+          className={`mt-0.5 flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-xl border-2 border-black ${
             isActive ? 'bg-[#FDE68A] text-slate-900' : 'bg-[#FFF7ED] text-slate-700'
           }`}
         >
-          <Icon size={16} strokeWidth={2.5} />
+          <Icon size={14} strokeWidth={2.5} />
         </div>
         <div className="min-w-0">
-          <div className="text-xs font-black uppercase tracking-wide">{label}</div>
-          <div className={`mt-1 text-[11px] font-semibold leading-4 ${isActive ? 'text-white/80' : 'text-slate-600'}`}>
+          <div className="text-[10px] font-black uppercase tracking-wide">{label}</div>
+          <div className={`mt-0.5 text-[9px] font-semibold leading-4 ${isActive ? 'text-white/80' : 'text-slate-600'}`}>
             {description}
           </div>
         </div>
@@ -73,29 +73,29 @@ function SidebarContent({
   };
 
   return (
-    <div className="flex h-full flex-col gap-5 overflow-y-auto p-4">
-      <div className="rounded-[28px] border-4 border-black bg-white p-4 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
-        <div className="flex items-start gap-3">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border-2 border-black bg-black text-white">
-            <FolderKanban size={20} strokeWidth={2.6} />
+    <div className="flex h-full flex-col gap-3.5 overflow-y-auto p-2.5">
+      <div className="rounded-[26px] border-4 border-black bg-white p-2.5 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
+        <div className="flex items-start gap-2">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border-2 border-black bg-black text-white">
+            <FolderKanban size={17} strokeWidth={2.6} />
           </div>
           <div className="min-w-0">
             <div className="text-[10px] font-black uppercase tracking-[0.2em] text-[#2563EB]">SpotItNow</div>
-            <div className="truncate text-xl font-black uppercase tracking-tight text-slate-900">{projectName}</div>
+            <div className="truncate text-[17px] font-black uppercase tracking-tight text-slate-900">{projectName}</div>
           </div>
         </div>
 
-        <div className="mt-4 rounded-2xl border-2 border-black bg-[#FFF7ED] p-3">
+        <div className="mt-2.5 rounded-2xl border-2 border-black bg-[#FFF7ED] p-2.5">
           <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Current Screen</div>
-          <div className="mt-1 text-base font-black uppercase text-slate-900">{currentRoute.label}</div>
-          <div className="mt-1 text-[11px] font-semibold leading-4 text-slate-600">{currentRoute.description}</div>
+          <div className="mt-1 text-sm font-black uppercase text-slate-900">{currentRoute.label}</div>
+          <div className="mt-1 text-[9px] font-semibold leading-4 text-slate-600">{currentRoute.description}</div>
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-2">
+        <div className="mt-2.5 grid grid-cols-2 gap-2">
           <button
             type="button"
             onClick={onOpenJobs}
-            className="relative inline-flex min-h-[46px] items-center justify-center rounded-2xl border-2 border-black bg-[#DBEAFE] px-3 text-[11px] font-black uppercase tracking-wide text-slate-900"
+            className="relative inline-flex min-h-[38px] items-center justify-center rounded-2xl border-2 border-black bg-[#DBEAFE] px-2.5 text-[9px] font-black uppercase tracking-wide text-slate-900"
           >
             Jobs
             {runningJobs > 0 ? (
@@ -110,15 +110,15 @@ function SidebarContent({
               onNavigate?.();
               onCloseMobile?.();
             }}
-            className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl border-2 border-black bg-white px-3 text-[11px] font-black uppercase tracking-wide text-slate-700 hover:bg-slate-100"
+            className="inline-flex min-h-[38px] items-center justify-center gap-1.5 rounded-2xl border-2 border-black bg-white px-2.5 text-[9px] font-black uppercase tracking-wide text-slate-700 hover:bg-slate-100"
           >
-            <Settings size={14} strokeWidth={2.5} />
+            <Settings size={13} strokeWidth={2.5} />
             Settings
           </Link>
         </div>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-2">
         <div className="px-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Workflow</div>
         <div className="space-y-2">
           {workflowRoutes.map((route) =>
@@ -127,7 +127,7 @@ function SidebarContent({
         </div>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-2">
         <div className="px-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Tools</div>
         <div className="space-y-2">
           {TOOL_NAV_ROUTES.map((route) =>
@@ -137,7 +137,7 @@ function SidebarContent({
       </div>
 
       {utilityRoutes.length > 0 ? (
-        <div className="rounded-2xl border-2 border-black bg-[#F8FAFC] p-3 text-[11px] font-semibold leading-4 text-slate-600">
+        <div className="rounded-2xl border-2 border-black bg-[#F8FAFC] p-2 text-[9px] font-semibold leading-4 text-slate-600">
           The sidebar replaces the large app header. Pages now stay focused on their own controls instead of repeating route chrome.
         </div>
       ) : null}
@@ -147,6 +147,7 @@ function SidebarContent({
 
 export function AppShell() {
   const location = useLocation();
+  const isFlushWorkspace = location.pathname === '/video/setup';
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const projectName = useAppStore((state) => state.projects.activeProjectName);
   const jobs = useAppStore((state) => state.exports.jobs);
@@ -181,7 +182,7 @@ export function AppShell() {
       <JobCenterDrawer />
 
       <div className="flex min-h-screen">
-        <aside className="hidden w-[310px] shrink-0 border-r-4 border-black bg-[radial-gradient(circle_at_top_left,#DBEAFE_0%,#FFFDF8_38%,#FFF7ED_100%)] lg:block">
+        <aside className="hidden w-[244px] shrink-0 border-r-4 border-black bg-[radial-gradient(circle_at_top_left,#DBEAFE_0%,#FFFDF8_38%,#FFF7ED_100%)] xl:w-[256px] lg:block">
           <div className="sticky top-0 h-screen">
             <SidebarContent
               currentPath={location.pathname}
@@ -229,7 +230,13 @@ export function AppShell() {
             </div>
           </header>
 
-          <main className="min-w-0 flex-1 overflow-x-hidden px-3 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
+          <main
+            className={
+              isFlushWorkspace
+                ? 'min-w-0 flex-1 overflow-x-hidden p-0'
+                : 'min-w-0 flex-1 overflow-x-hidden px-3 py-4 sm:px-4 sm:py-4 lg:px-4 lg:py-4 xl:px-5 xl:py-5'
+            }
+          >
             <Outlet />
           </main>
         </div>

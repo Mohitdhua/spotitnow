@@ -3,7 +3,28 @@ import { runBatchExportTasks } from './batchExportScheduler';
 import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from './mediaTelemetry';
 
-export type OverlayExportSettings = Pick<VideoSettings, 'exportResolution' | 'exportBitrateMbps' | 'exportCodec'>;
+export type OverlayExportSettings = Pick<
+  VideoSettings,
+  | 'videoPackagePreset'
+  | 'visualStyle'
+  | 'textStyle'
+  | 'headerStyle'
+  | 'timerStyle'
+  | 'progressStyle'
+  | 'progressMotion'
+  | 'generatedProgressEnabled'
+  | 'generatedProgressStyle'
+  | 'generatedProgressRenderMode'
+  | 'showProgress'
+  | 'introCardStyle'
+  | 'transitionCardStyle'
+  | 'outroCardStyle'
+  | 'transitionStyle'
+  | 'textTemplates'
+  | 'exportResolution'
+  | 'exportBitrateMbps'
+  | 'exportCodec'
+>;
 
 export type OverlayBaseSourceMode = 'video' | 'photo' | 'color';
 export type OverlayEditorMode = 'standard' | 'linked_pairs';
@@ -96,6 +117,7 @@ interface OverlayBatchExportOptions {
   linkedPairLayout?: OverlayLinkedPairLayout;
   linkedPairStyle?: OverlayLinkedPairStyle;
   linkedPairExportMode?: OverlayLinkedPairExportMode;
+  linkedPairsPerVideo?: number;
   settings: OverlayExportSettings;
   onProgress?: (progress: number, status?: string) => void;
 }
@@ -174,37 +196,64 @@ const downloadBlob = (blob: Blob, fileName: string) => {
   URL.revokeObjectURL(url);
 };
 
+const normalizeLinkedPairsPerVideo = (linkedPairs: OverlayLinkedPairInput[], linkedPairsPerVideo?: number) => {
+  if (linkedPairs.length === 0) return 1;
+  if (!Number.isFinite(linkedPairsPerVideo)) return linkedPairs.length;
+  return Math.min(linkedPairs.length, Math.max(1, Math.round(linkedPairsPerVideo as number)));
+};
+
 const buildOutputTargets = ({
   editorMode,
   base,
   batchPhotos,
-  linkedPairs,
+  linkedPairs = [],
   linkedPairLayout,
   linkedPairStyle,
-  linkedPairExportMode
+  linkedPairExportMode,
+  linkedPairsPerVideo
 }: Pick<
   OverlayBatchExportOptions,
-  'editorMode' | 'base' | 'batchPhotos' | 'linkedPairs' | 'linkedPairLayout' | 'linkedPairStyle' | 'linkedPairExportMode'
+  | 'editorMode'
+  | 'base'
+  | 'batchPhotos'
+  | 'linkedPairs'
+  | 'linkedPairLayout'
+  | 'linkedPairStyle'
+  | 'linkedPairExportMode'
+  | 'linkedPairsPerVideo'
 >): OverlayWorkerOutputTarget[] => {
   if (editorMode === 'linked_pairs') {
     const safeDuration = Math.max(0.5, base.durationSeconds);
     if (linkedPairExportMode === 'single_video') {
-      return [
-        {
+      const pairsPerOutput = normalizeLinkedPairsPerVideo(linkedPairs, linkedPairsPerVideo);
+      const totalOutputs = Math.max(1, Math.ceil(linkedPairs.length / pairsPerOutput));
+
+      return Array.from({ length: totalOutputs }, (_entry, outputIndex) => {
+        const startIndex = outputIndex * pairsPerOutput;
+        const chunk = linkedPairs.slice(startIndex, startIndex + pairsPerOutput);
+        const endIndex = startIndex + chunk.length;
+        const outputLabel =
+          chunk.length === 1
+            ? chunk[0].name
+            : totalOutputs === 1
+              ? `linked_pairs_${chunk.length}_items`
+              : `linked_pairs_${startIndex + 1}_${endIndex}`;
+
+        return {
           kind: 'linked_pairs',
-          taskId: 'overlay-linked-pairs:1',
-          outputLabel: linkedPairs.length === 1 ? linkedPairs[0].name : `linked_pairs_${linkedPairs.length}_items`,
-          outputIndex: 0,
-          totalOutputs: 1,
+          taskId: `overlay-linked-pairs:${outputIndex + 1}`,
+          outputLabel,
+          outputIndex,
+          totalOutputs,
           linkedPairLayout,
           linkedPairStyle,
-          segments: linkedPairs.map((pair, index) => ({
+          segments: chunk.map((pair, index) => ({
             pair,
             start: index * safeDuration,
             end: (index + 1) * safeDuration
           }))
-        }
-      ];
+        };
+      });
     }
 
     return linkedPairs.map((pair, index) => ({
@@ -250,6 +299,7 @@ export const exportOverlayBatchWithWebCodecs = async ({
   linkedPairLayout,
   linkedPairStyle,
   linkedPairExportMode = 'one_per_pair',
+  linkedPairsPerVideo,
   settings,
   onProgress
 }: OverlayBatchExportOptions): Promise<void> => {
@@ -281,7 +331,8 @@ export const exportOverlayBatchWithWebCodecs = async ({
     linkedPairs,
     linkedPairLayout,
     linkedPairStyle,
-    linkedPairExportMode
+    linkedPairExportMode,
+    linkedPairsPerVideo
   });
 
   try {

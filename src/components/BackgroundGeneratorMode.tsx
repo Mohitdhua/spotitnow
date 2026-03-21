@@ -28,7 +28,7 @@ interface BackgroundGeneratorModeProps {
 type MotifFocus = 'balanced' | 'party' | 'paper' | 'comic' | 'calm';
 type PaletteFocus = 'mixed' | 'warm' | 'cool' | 'night';
 
-const ASPECT_RATIOS: VideoSettings['aspectRatio'][] = ['16:9', '9:16', '1:1', '4:3'];
+const ASPECT_RATIOS: VideoSettings['aspectRatio'][] = ['16:9', '9:16'];
 
 const MOTIF_FOCUS_OPTIONS: Array<{ value: MotifFocus; label: string; description: string }> = [
   { value: 'balanced', label: 'Balanced', description: 'A broad mix of decorative backdrops for general puzzle videos.' },

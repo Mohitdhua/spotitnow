@@ -1,14 +1,35 @@
-import { useMemo, useState } from 'react';
-import { Film, Layers, PencilLine } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ConfirmDialog } from '../../app/components/ConfirmDialog';
 import { TextPromptDialog } from '../../app/components/TextPromptDialog';
 import { VideoSettingsPanel } from '../../components/VideoSettingsPanel';
-import type { VideoUserPackage } from '../../types';
+import type { VideoSettings, VideoUserPackage } from '../../types';
+import { migrateInlineImageSource } from '../../services/imageAssetStore';
 import { notifyError, notifyInfo, notifySuccess } from '../../services/notifications';
 import { exportVideoWithWebCodecs } from '../../services/videoExport';
 import { useAppStore } from '../../store/appStore';
 import { beginExportJob, cancelExportJobEntry, completeExportJob, failExportJob, patchExportJob } from '../shared/exportJobs';
+
+const resolveVideoPackageActionError = (
+  error: unknown,
+  fallback = 'Could not save the video package.'
+) => {
+  if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+    return 'Video package storage is full. Large legacy inline logos are usually the cause. Re-upload the logo on the active package and try again.';
+  }
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+};
+
+const normalizeVideoSettingsLogo = async (settings: VideoSettings): Promise<VideoSettings> => {
+  const nextLogo = await migrateInlineImageSource(settings.logo, 'video-package-logo');
+  if (nextLogo === settings.logo) {
+    return settings;
+  }
+  return {
+    ...settings,
+    logo: nextLogo
+  };
+};
 
 export default function VideoSetupPage() {
   const navigate = useNavigate();
@@ -32,6 +53,39 @@ export default function VideoSetupPage() {
   const deleteVideoPackage = useAppStore((state) => state.deleteVideoPackage);
   const changeVideoAspectRatio = useAppStore((state) => state.changeVideoAspectRatio);
 
+  useEffect(() => {
+    let cancelled = false;
+    const originalLogo = videoSettings.logo;
+
+    const migrateActiveLogo = async () => {
+      const nextLogo = await migrateInlineImageSource(originalLogo, 'video-package-logo');
+      if (cancelled || nextLogo === originalLogo) {
+        return;
+      }
+
+      try {
+        const currentSettings = useAppStore.getState().video.videoSettings;
+        if (currentSettings.logo !== originalLogo) {
+          return;
+        }
+        setVideoSettings({
+          ...currentSettings,
+          logo: nextLogo
+        });
+      } catch (error) {
+        if (!cancelled) {
+          notifyError(resolveVideoPackageActionError(error));
+        }
+      }
+    };
+
+    void migrateActiveLogo();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [videoSettings.logo, setVideoSettings]);
+
   const activePackage = useMemo(
     () =>
       videoPackageLibrary.packages.find((entry) => entry.id === videoPackageLibrary.activePackageId) ??
@@ -41,6 +95,22 @@ export default function VideoSetupPage() {
   );
 
   const hasRunningExport = jobs.some((job) => job.state === 'running');
+
+  const ensureCurrentLogoUsesSharedStorage = async () => {
+    const currentSettings = useAppStore.getState().video.videoSettings;
+    const nextSettings = await normalizeVideoSettingsLogo(currentSettings);
+    if (nextSettings === currentSettings) {
+      return true;
+    }
+
+    try {
+      setVideoSettings(nextSettings);
+      return true;
+    } catch (error) {
+      notifyError(resolveVideoPackageActionError(error));
+      return false;
+    }
+  };
 
   const handleExport = async () => {
     if (!batch.length) {
@@ -110,52 +180,34 @@ export default function VideoSetupPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-[28px] border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div className="max-w-3xl">
-            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-[#2563EB]">Video Workflow</div>
-            <h1 className="mt-3 text-3xl font-black uppercase tracking-tight text-slate-900">Package the batch for video production</h1>
-            <p className="mt-3 text-sm font-semibold text-slate-600">
-              Tune package presets, adjust the aspect ratio, preview timing, and keep exports visible in the Job Center instead of hidden behind one giant app screen.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-3">
-            <Link
-              to="/create/review"
-              className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-white px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-700 hover:bg-slate-100"
-            >
-              <Layers size={14} strokeWidth={2.5} />
-              Review Batch
-            </Link>
-            <Link
-              to="/create/editor"
-              className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-white px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-700 hover:bg-slate-100"
-            >
-              <PencilLine size={14} strokeWidth={2.5} />
-              Refine Puzzle
-            </Link>
-            <Link
-              to="/editor"
-              className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-[#FCE7F3] px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-900 hover:bg-[#FBCFE8]"
-            >
-              <Film size={14} strokeWidth={2.5} />
-              Editor Studio
-            </Link>
-          </div>
-        </div>
-      </section>
-
+    <div className="h-[100dvh] overflow-hidden">
       <VideoSettingsPanel
         settings={videoSettings}
         puzzles={batch}
         videoPackages={videoPackageLibrary.packages}
         activeVideoPackageId={videoPackageLibrary.activePackageId}
         backgroundPacksSessionId={backgroundPacksSessionId}
-        onSettingsChange={(next) => setVideoSettings(next)}
-        onAspectRatioChange={changeVideoAspectRatio}
-        onSelectVideoPackage={selectVideoPackage}
+        onSettingsChange={(next) => {
+          try {
+            setVideoSettings(next);
+          } catch (error) {
+            notifyError(resolveVideoPackageActionError(error));
+          }
+        }}
+        onAspectRatioChange={(aspectRatio) => {
+          try {
+            changeVideoAspectRatio(aspectRatio);
+          } catch (error) {
+            notifyError(resolveVideoPackageActionError(error));
+          }
+        }}
+        onSelectVideoPackage={(packageId) => {
+          try {
+            selectVideoPackage(packageId);
+          } catch (error) {
+            notifyError(resolveVideoPackageActionError(error));
+          }
+        }}
         onCreateVideoPackage={() => setCreateDialogOpen(true)}
         onDuplicateVideoPackage={() => setDuplicateDialogOpen(true)}
         onRenameVideoPackage={(packageId) => {
@@ -184,9 +236,20 @@ export default function VideoSetupPage() {
         confirmLabel="Create"
         onOpenChange={setCreateDialogOpen}
         onConfirm={(value) => {
-          createVideoPackage(value.trim());
-          setCreateDialogOpen(false);
-          notifySuccess(`Created "${value.trim()}".`);
+          void (async () => {
+            const name = value.trim();
+            if (!name) return;
+            if (!(await ensureCurrentLogoUsesSharedStorage())) {
+              return;
+            }
+            try {
+              createVideoPackage(name);
+              setCreateDialogOpen(false);
+              notifySuccess(`Created "${name}".`);
+            } catch (error) {
+              notifyError(resolveVideoPackageActionError(error, 'Could not create that video package.'));
+            }
+          })();
         }}
       />
 
@@ -200,9 +263,20 @@ export default function VideoSetupPage() {
         confirmLabel="Duplicate"
         onOpenChange={setDuplicateDialogOpen}
         onConfirm={(value) => {
-          duplicateActiveVideoPackage(value.trim());
-          setDuplicateDialogOpen(false);
-          notifySuccess(`Duplicated package as "${value.trim()}".`);
+          void (async () => {
+            const name = value.trim();
+            if (!name) return;
+            if (!(await ensureCurrentLogoUsesSharedStorage())) {
+              return;
+            }
+            try {
+              duplicateActiveVideoPackage(name);
+              setDuplicateDialogOpen(false);
+              notifySuccess(`Duplicated package as "${name}".`);
+            } catch (error) {
+              notifyError(resolveVideoPackageActionError(error, 'Could not duplicate that video package.'));
+            }
+          })();
         }}
       />
 
@@ -221,9 +295,13 @@ export default function VideoSetupPage() {
         }}
         onConfirm={(value) => {
           if (!renameTarget) return;
-          renameVideoPackage(renameTarget.id, value.trim());
-          setRenameTarget(null);
-          notifySuccess(`Renamed package to "${value.trim()}".`);
+          try {
+            renameVideoPackage(renameTarget.id, value.trim());
+            setRenameTarget(null);
+            notifySuccess(`Renamed package to "${value.trim()}".`);
+          } catch (error) {
+            notifyError(resolveVideoPackageActionError(error, 'Could not rename that video package.'));
+          }
         }}
       />
 
@@ -240,9 +318,13 @@ export default function VideoSetupPage() {
         }}
         onConfirm={() => {
           if (!deleteTarget) return;
-          deleteVideoPackage(deleteTarget.id);
-          notifySuccess(`Deleted "${deleteTarget.name}".`);
-          setDeleteTarget(null);
+          try {
+            deleteVideoPackage(deleteTarget.id);
+            notifySuccess(`Deleted "${deleteTarget.name}".`);
+            setDeleteTarget(null);
+          } catch (error) {
+            notifyError(resolveVideoPackageActionError(error, 'Could not delete that video package.'));
+          }
         }}
       />
     </div>

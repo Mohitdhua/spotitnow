@@ -1,4 +1,4 @@
-import { Puzzle, VideoSettings } from '../types';
+import { Puzzle, type VideoAudioCuePoolKey, VideoSettings } from '../types';
 import { loadGeneratedBackgroundPacks } from './backgroundPacks';
 import { mediaDiagnosticsStore, type MediaJobController } from './mediaDiagnostics';
 import type { MediaTaskEventMessage, MediaWorkerStatsMessage } from './mediaTelemetry';
@@ -10,6 +10,7 @@ import type {
 import { decodeAudioAssetFromSource } from '../utils/audioDecode';
 import { loadVideoAssetBlob } from './videoAssetStore';
 import { isStoredVideoAssetSource } from './videoAssetStore';
+import { VIDEO_AUDIO_POOL_KEYS } from '../utils/videoAudioPools';
 
 interface ExportVideoBaseOptions {
   settings: VideoSettings;
@@ -90,10 +91,10 @@ type WorkerResponse =
   | { type: 'progress'; progress: number; status?: string }
   | { type: 'stream-chunk'; position: number; data: ArrayBuffer }
   | { type: 'stream-done'; mimeType: string; fileName: string }
-  | { type: 'preview-frame-done'; buffer: ArrayBuffer; mimeType: string }
+  | { type: 'preview-frame-done'; buffer: ArrayBuffer; mimeType: string; requestId?: number }
   | { type: 'done'; buffer: ArrayBuffer; mimeType: string; fileName: string }
-  | { type: 'error'; message: string }
-  | { type: 'cancelled' }
+  | { type: 'error'; message: string; requestId?: number }
+  | { type: 'cancelled'; requestId?: number }
   | MediaTaskEventMessage
   | MediaWorkerStatsMessage;
 
@@ -109,8 +110,18 @@ interface ActiveVideoExportSession {
   cancel: () => void;
 }
 
+interface ActivePreviewFrameRequest {
+  id: number;
+  resolve: (result: RenderedVideoFramePreview) => void;
+  reject: (error: Error | DOMException) => void;
+  cleanupAbort: () => void;
+}
+
 const activeSessions = new Set<ActiveVideoExportSession>();
 let nextVideoExportSessionId = 1;
+let previewWorker: Worker | null = null;
+let nextPreviewRequestId = 1;
+let activePreviewFrameRequest: ActivePreviewFrameRequest | null = null;
 
 const CODEC_EXTENSION: Record<VideoSettings['exportCodec'], string> = {
   h264: 'mp4',
@@ -120,6 +131,72 @@ const CODEC_EXTENSION: Record<VideoSettings['exportCodec'], string> = {
 const CODEC_MIME: Record<VideoSettings['exportCodec'], string> = {
   h264: 'video/mp4',
   av1: 'video/webm'
+};
+
+const resetPreviewWorker = () => {
+  if (previewWorker) {
+    previewWorker.terminate();
+    previewWorker = null;
+  }
+};
+
+const clearActivePreviewFrameRequest = (request: ActivePreviewFrameRequest | null) => {
+  if (!request) return;
+  if (activePreviewFrameRequest?.id === request.id) {
+    activePreviewFrameRequest = null;
+  }
+  request.cleanupAbort();
+};
+
+const ensurePreviewWorker = () => {
+  if (previewWorker) {
+    return previewWorker;
+  }
+
+  previewWorker = new Worker(new URL('../workers/videoExport.worker.ts', import.meta.url), {
+    type: 'module'
+  });
+
+  previewWorker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    const message = event.data;
+    const request = activePreviewFrameRequest;
+    if (!request) return;
+
+    if ('requestId' in message && typeof message.requestId === 'number' && message.requestId !== request.id) {
+      return;
+    }
+
+    if (message.type === 'preview-frame-done') {
+      clearActivePreviewFrameRequest(request);
+      request.resolve({
+        blob: new Blob([message.buffer], { type: message.mimeType }),
+        mimeType: message.mimeType
+      });
+      return;
+    }
+
+    if (message.type === 'cancelled') {
+      clearActivePreviewFrameRequest(request);
+      request.reject(new DOMException('Preview canceled', 'AbortError'));
+      return;
+    }
+
+    if (message.type === 'error') {
+      clearActivePreviewFrameRequest(request);
+      request.reject(new Error(message.message));
+    }
+  };
+
+  previewWorker.onerror = (event) => {
+    const request = activePreviewFrameRequest;
+    clearActivePreviewFrameRequest(request);
+    resetPreviewWorker();
+    if (!request) return;
+    const detail = event.message ? ` ${event.message}` : '';
+    request.reject(new Error(`Video preview worker crashed.${detail}`));
+  };
+
+  return previewWorker;
 };
 
 const downloadBlob = (blob: Blob, fileName: string) => {
@@ -176,20 +253,14 @@ const resolveDiagnosticsContext = (options: ExportVideoOptions): DiagnosticsCont
 const collectAudioTransferables = (audioAssets?: VideoExportAudioAssets | null): Transferable[] => {
   if (!audioAssets) return [];
   const transferables: Transferable[] = [];
-  if (audioAssets.countdown?.data?.buffer) transferables.push(audioAssets.countdown.data.buffer);
-  if (audioAssets.reveal?.data?.buffer) transferables.push(audioAssets.reveal.data.buffer);
-  if (audioAssets.revealVariants) {
-    audioAssets.revealVariants.forEach((variant) => {
-      if (variant?.data?.buffer) transferables.push(variant.data.buffer);
+  VIDEO_AUDIO_POOL_KEYS.forEach((key) => {
+    audioAssets.sfxPools?.[key]?.forEach((asset) => {
+      if (asset?.data?.buffer) {
+        transferables.push(asset.data.buffer);
+      }
     });
-  }
-  if (audioAssets.marker?.data?.buffer) transferables.push(audioAssets.marker.data.buffer);
-  if (audioAssets.blink?.data?.buffer) transferables.push(audioAssets.blink.data.buffer);
-  if (audioAssets.play?.data?.buffer) transferables.push(audioAssets.play.data.buffer);
-  if (audioAssets.intro?.data?.buffer) transferables.push(audioAssets.intro.data.buffer);
+  });
   if (audioAssets.introClip?.data?.buffer) transferables.push(audioAssets.introClip.data.buffer);
-  if (audioAssets.transition?.data?.buffer) transferables.push(audioAssets.transition.data.buffer);
-  if (audioAssets.outro?.data?.buffer) transferables.push(audioAssets.outro.data.buffer);
   if (audioAssets.music?.data?.buffer) transferables.push(audioAssets.music.data.buffer);
   return transferables;
 };
@@ -219,15 +290,9 @@ const resolveAudioAssetsForExport = async (
 ): Promise<VideoExportAudioAssets | null> => {
   const needsSfx =
     settings.soundEffectsEnabled &&
-    (settings.countdownSoundSrc ||
-      settings.revealSoundSrc ||
-      (settings.revealSoundVariantSrcs?.length ?? 0) > 0 ||
-      settings.markerSoundSrc ||
-      settings.blinkSoundSrc ||
-      settings.playSoundSrc ||
-      settings.introSoundSrc ||
-      settings.transitionSoundSrc ||
-      settings.outroSoundSrc);
+    VIDEO_AUDIO_POOL_KEYS.some(
+      (key) => settings.audioCuePools[key].enabled && settings.audioCuePools[key].sources.length > 0
+    );
   const needsMusic = settings.backgroundMusicEnabled && settings.backgroundMusicSrc;
   const needsIntroClipAudio = settings.introVideoEnabled && settings.introVideoSrc;
 
@@ -235,38 +300,23 @@ const resolveAudioAssetsForExport = async (
   onProgress?.(0.02, 'Decoding audio assets...');
 
   const assets: VideoExportAudioAssets = {};
-  if (needsSfx && settings.countdownSoundSrc) {
-    assets.countdown = (await decodeAudioAssetFromSource(settings.countdownSoundSrc)) ?? undefined;
-  }
-  if (needsSfx && settings.revealSoundSrc) {
-    assets.reveal = (await decodeAudioAssetFromSource(settings.revealSoundSrc)) ?? undefined;
-  }
-  if (needsSfx && settings.revealSoundVariantSrcs?.length) {
-    const decoded = await Promise.all(
-      settings.revealSoundVariantSrcs.map((src) => decodeAudioAssetFromSource(src))
-    );
-    assets.revealVariants = decoded.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
-  }
-  if (needsSfx && settings.markerSoundSrc) {
-    assets.marker = (await decodeAudioAssetFromSource(settings.markerSoundSrc)) ?? undefined;
-  }
-  if (needsSfx && settings.blinkSoundSrc) {
-    assets.blink = (await decodeAudioAssetFromSource(settings.blinkSoundSrc)) ?? undefined;
-  }
-  if (needsSfx && settings.playSoundSrc) {
-    assets.play = (await decodeAudioAssetFromSource(settings.playSoundSrc)) ?? undefined;
-  }
-  if (needsSfx && settings.introSoundSrc) {
-    assets.intro = (await decodeAudioAssetFromSource(settings.introSoundSrc)) ?? undefined;
+  if (needsSfx) {
+    const sfxPools: Partial<Record<VideoAudioCuePoolKey, NonNullable<VideoExportAudioAssets['sfxPools']>[VideoAudioCuePoolKey]>> = {};
+    for (const key of VIDEO_AUDIO_POOL_KEYS) {
+      const pool = settings.audioCuePools[key];
+      if (!pool.enabled || pool.sources.length === 0) continue;
+      const decoded = await Promise.all(pool.sources.map((src) => decodeAudioAssetFromSource(src)));
+      const safeDecoded = decoded.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+      if (safeDecoded.length > 0) {
+        sfxPools[key] = safeDecoded;
+      }
+    }
+    if (Object.keys(sfxPools).length > 0) {
+      assets.sfxPools = sfxPools;
+    }
   }
   if (needsIntroClipAudio) {
     assets.introClip = (await decodeIntroClipAudio(settings)) ?? undefined;
-  }
-  if (needsSfx && settings.transitionSoundSrc) {
-    assets.transition = (await decodeAudioAssetFromSource(settings.transitionSoundSrc)) ?? undefined;
-  }
-  if (needsSfx && settings.outroSoundSrc) {
-    assets.outro = (await decodeAudioAssetFromSource(settings.outroSoundSrc)) ?? undefined;
   }
   if (needsMusic && settings.backgroundMusicSrc) {
     assets.music = (await decodeAudioAssetFromSource(settings.backgroundMusicSrc)) ?? undefined;
@@ -622,13 +672,23 @@ export const renderVideoFramePreview = async ({
       return;
     }
 
-    const worker = new Worker(new URL('../workers/videoExport.worker.ts', import.meta.url), {
-      type: 'module'
-    });
+    if (activePreviewFrameRequest) {
+      const previousRequest = activePreviewFrameRequest;
+      clearActivePreviewFrameRequest(previousRequest);
+      try {
+        previewWorker?.postMessage({ type: 'cancel' });
+      } catch {
+        // Ignore worker cancellation failures and reset below.
+      }
+      resetPreviewWorker();
+      previousRequest.reject(new DOMException('Preview canceled', 'AbortError'));
+    }
+
+    const worker = ensurePreviewWorker();
+    const requestId = nextPreviewRequestId++;
     let settled = false;
 
-    const cleanup = () => {
-      worker.terminate();
+    const cleanupAbort = () => {
       if (signal) {
         signal.removeEventListener('abort', handleAbort);
       }
@@ -637,54 +697,41 @@ export const renderVideoFramePreview = async ({
     const handleAbort = () => {
       if (settled) return;
       settled = true;
-      cleanup();
+      if (activePreviewFrameRequest?.id === requestId) {
+        activePreviewFrameRequest = null;
+      }
+      cleanupAbort();
+      try {
+        worker.postMessage({ type: 'cancel', requestId });
+      } catch {
+        // Ignore worker cancellation failures on abort.
+      }
+      resetPreviewWorker();
       reject(new DOMException('Preview canceled', 'AbortError'));
+    };
+
+    activePreviewFrameRequest = {
+      id: requestId,
+      resolve: (result) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      },
+      reject: (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      },
+      cleanupAbort
     };
 
     if (signal) {
       signal.addEventListener('abort', handleAbort, { once: true });
     }
 
-    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-      const message = event.data;
-
-      if (message.type === 'preview-frame-done') {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve({
-          blob: new Blob([message.buffer], { type: message.mimeType }),
-          mimeType: message.mimeType
-        });
-        return;
-      }
-
-      if (message.type === 'cancelled') {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new Error('Preview canceled'));
-        return;
-      }
-
-      if (message.type === 'error') {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new Error(message.message));
-      }
-    };
-
-    worker.onerror = (event) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      const detail = event.message ? ` ${event.message}` : '';
-      reject(new Error(`Video preview worker crashed.${detail}`));
-    };
-
     worker.postMessage({
       type: 'preview-frame',
+      requestId,
       payload: {
         source,
         puzzles,

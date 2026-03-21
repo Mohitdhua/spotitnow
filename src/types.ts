@@ -145,6 +145,35 @@ export type VideoProgressStyle =
   | 'minimal'
   | 'text_fill';
 
+export type VideoProgressMotion =
+  | 'countdown'
+  | 'intro_fill'
+  | 'intro_sweep';
+
+export type GeneratedProgressBarStyle =
+  | 'random'
+  | 'classic'
+  | 'pop'
+  | 'neon'
+  | 'sunset'
+  | 'mint'
+  | 'midnight'
+  | 'mono'
+  | 'retro'
+  | 'cyber'
+  | 'oceanic'
+  | 'ember'
+  | 'candy'
+  | 'forest'
+  | 'aurora'
+  | 'slate'
+  | 'arcade'
+  | 'ivory'
+  | 'storybook'
+  | 'heat';
+
+export type GeneratedProgressBarRenderMode = 'bar' | 'text_fill';
+
 export type VideoSceneCardStyle =
   | 'package'
   | 'standard'
@@ -199,8 +228,23 @@ export interface AudioPhaseLevels {
   outro: number;
 }
 
+export type VideoAudioCuePoolKey =
+  | 'progress_fill_intro'
+  | 'puzzle_play'
+  | 'low_time_warning'
+  | 'marker_reveal'
+  | 'blink'
+  | 'transition';
+
+export interface VideoAudioCuePool {
+  enabled: boolean;
+  sources: string[];
+}
+
+export type VideoAudioCuePools = Record<VideoAudioCuePoolKey, VideoAudioCuePool>;
+
 export interface VideoSettings {
-  aspectRatio: '16:9' | '9:16' | '1:1' | '4:3';
+  aspectRatio: '16:9' | '9:16';
   videoPackagePreset: VideoPackagePreset;
   visualStyle:
     | 'random'
@@ -226,6 +270,10 @@ export interface VideoSettings {
   headerStyle: VideoHeaderStyle;
   timerStyle: VideoTimerStyle;
   progressStyle: VideoProgressStyle;
+  progressMotion: VideoProgressMotion;
+  generatedProgressEnabled: boolean;
+  generatedProgressStyle: GeneratedProgressBarStyle;
+  generatedProgressRenderMode: GeneratedProgressBarRenderMode;
   showTimer: boolean;
   showProgress: boolean;
   introCardStyle: VideoSceneCardStyle;
@@ -282,6 +330,8 @@ export interface VideoSettings {
   outroSoundEnabled: boolean;
   previewSoundEnabled: boolean;
   soundEffectsVolume: number;
+  audioCuePools: VideoAudioCuePools;
+  puzzlePlayUrgencyRampEnabled: boolean;
   countdownSoundSrc?: string;
   revealSoundSrc?: string;
   markerSoundSrc?: string;
@@ -311,6 +361,7 @@ export interface VideoSettings {
   logoChromaKeyColor: string;
   logoChromaKeyTolerance: number;
   generatedBackgroundsEnabled: boolean;
+  generatedBackgroundCoverage: 'game_area' | 'full_board';
   generatedBackgroundPackId: string;
   generatedBackgroundShuffleSeed: number;
   headerTextOverrides?: VideoHeaderTextOverrides;

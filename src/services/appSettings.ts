@@ -11,6 +11,10 @@ import {
   VIDEO_REVEAL_BEHAVIOR_OPTIONS
 } from '../constants/videoPackages';
 import { sanitizeVideoCustomLayout } from './videoLayoutStorage';
+import {
+  createDefaultVideoAudioCuePools,
+  sanitizeVideoAudioCuePools
+} from '../utils/videoAudioPools';
 
 export interface FrameExtractorDefaults {
   timestampsText: string;
@@ -113,6 +117,10 @@ const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
   headerStyle: 'package',
   timerStyle: 'package',
   progressStyle: 'package',
+  progressMotion: 'countdown',
+  generatedProgressEnabled: false,
+  generatedProgressStyle: 'classic',
+  generatedProgressRenderMode: 'bar',
   showTimer: true,
   showProgress: true,
   introCardStyle: 'package',
@@ -154,6 +162,8 @@ const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
   outroSoundEnabled: false,
   previewSoundEnabled: false,
   soundEffectsVolume: 0.7,
+  audioCuePools: createDefaultVideoAudioCuePools(),
+  puzzlePlayUrgencyRampEnabled: false,
   countdownSoundSrc: '',
   revealSoundSrc: '',
   markerSoundSrc: '',
@@ -182,6 +192,7 @@ const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
   logoChromaKeyColor: '#00FF00',
   logoChromaKeyTolerance: 70,
   generatedBackgroundsEnabled: false,
+  generatedBackgroundCoverage: 'game_area',
   generatedBackgroundPackId: '',
   generatedBackgroundShuffleSeed: 1
 };
@@ -285,7 +296,7 @@ const VIDEO_PACKAGE_PRESET_VALUES = Object.keys(VIDEO_PACKAGE_PRESETS) as VideoS
 const VIDEO_REVEAL_BEHAVIOR_VALUES = VIDEO_REVEAL_BEHAVIOR_OPTIONS.map(
   (option) => option.value
 ) as VideoSettings['revealBehavior'][];
-const ASPECT_RATIO_VALUES: VideoSettings['aspectRatio'][] = ['16:9', '9:16', '1:1', '4:3'];
+const ASPECT_RATIO_VALUES: VideoSettings['aspectRatio'][] = ['16:9', '9:16'];
 const VISUAL_STYLE_VALUES: VideoSettings['visualStyle'][] = [
   'random',
   'classic',
@@ -392,6 +403,37 @@ const PROGRESS_STYLE_VALUES: VideoSettings['progressStyle'][] = [
   'minimal',
   'text_fill'
 ];
+const PROGRESS_MOTION_VALUES: VideoSettings['progressMotion'][] = [
+  'countdown',
+  'intro_fill',
+  'intro_sweep'
+];
+const GENERATED_PROGRESS_STYLE_VALUES: VideoSettings['generatedProgressStyle'][] = [
+  'random',
+  'classic',
+  'pop',
+  'neon',
+  'sunset',
+  'mint',
+  'midnight',
+  'mono',
+  'retro',
+  'cyber',
+  'oceanic',
+  'ember',
+  'candy',
+  'forest',
+  'aurora',
+  'slate',
+  'arcade',
+  'ivory',
+  'storybook',
+  'heat'
+];
+const GENERATED_PROGRESS_RENDER_MODE_VALUES: VideoSettings['generatedProgressRenderMode'][] = [
+  'bar',
+  'text_fill'
+];
 const SCENE_CARD_STYLE_VALUES: VideoSettings['introCardStyle'][] = [
   'package',
   'standard',
@@ -446,6 +488,67 @@ const sanitizeHexColor = (value: unknown, fallback: string) => {
   return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalized) ? normalized : fallback;
 };
 
+const mergeUniqueAudioSources = (...groups: unknown[]) => {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  groups.flat().forEach((value) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    next.push(trimmed);
+  });
+  return next;
+};
+
+const resolveLegacyAudioCuePools = (mergedVideo: Record<string, unknown>) => ({
+  progress_fill_intro: {
+    enabled: true,
+    sources: []
+  },
+  puzzle_play: {
+    enabled:
+      typeof mergedVideo.playSoundEnabled === 'boolean'
+        ? mergedVideo.playSoundEnabled
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.puzzle_play.enabled,
+    sources: mergeUniqueAudioSources(mergedVideo.playSoundSrc)
+  },
+  low_time_warning: {
+    enabled:
+      typeof mergedVideo.countdownSoundEnabled === 'boolean'
+        ? mergedVideo.countdownSoundEnabled
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.low_time_warning.enabled,
+    sources: mergeUniqueAudioSources(mergedVideo.countdownSoundSrc)
+  },
+  marker_reveal: {
+    enabled:
+      typeof mergedVideo.markerSoundEnabled === 'boolean'
+        ? mergedVideo.markerSoundEnabled
+        : typeof mergedVideo.revealSoundEnabled === 'boolean'
+        ? mergedVideo.revealSoundEnabled
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.marker_reveal.enabled,
+    sources: mergeUniqueAudioSources(
+      mergedVideo.markerSoundSrc,
+      mergedVideo.revealSoundSrc,
+      Array.isArray(mergedVideo.revealSoundVariantSrcs) ? mergedVideo.revealSoundVariantSrcs : []
+    )
+  },
+  blink: {
+    enabled:
+      typeof mergedVideo.blinkSoundEnabled === 'boolean'
+        ? mergedVideo.blinkSoundEnabled
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.blink.enabled,
+    sources: mergeUniqueAudioSources(mergedVideo.blinkSoundSrc)
+  },
+  transition: {
+    enabled:
+      typeof mergedVideo.transitionSoundEnabled === 'boolean'
+        ? mergedVideo.transitionSoundEnabled
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.transition.enabled,
+    sources: mergeUniqueAudioSources(mergedVideo.transitionSoundSrc)
+  }
+});
+
 const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings => {
   const mergedVideo = {
     ...DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults,
@@ -459,6 +562,7 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
       ...(input?.videoDefaults?.textTemplates ?? {})
     }
   } as VideoSettings;
+  const legacyMergedVideo = mergedVideo as unknown as Record<string, unknown>;
 
   const mergedFrame = {
     ...DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults,
@@ -506,6 +610,23 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
       progressStyle: PROGRESS_STYLE_VALUES.includes(mergedVideo.progressStyle)
         ? mergedVideo.progressStyle
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.progressStyle,
+      progressMotion: PROGRESS_MOTION_VALUES.includes(mergedVideo.progressMotion)
+        ? mergedVideo.progressMotion
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.progressMotion,
+      generatedProgressEnabled: sanitizeBoolean(
+        mergedVideo.generatedProgressEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.generatedProgressEnabled
+      ),
+      generatedProgressStyle: GENERATED_PROGRESS_STYLE_VALUES.includes(
+        mergedVideo.generatedProgressStyle
+      )
+        ? mergedVideo.generatedProgressStyle
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.generatedProgressStyle,
+      generatedProgressRenderMode: GENERATED_PROGRESS_RENDER_MODE_VALUES.includes(
+        mergedVideo.generatedProgressRenderMode
+      )
+        ? mergedVideo.generatedProgressRenderMode
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.generatedProgressRenderMode,
       showTimer: sanitizeBoolean(
         mergedVideo.showTimer,
         DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.showTimer
@@ -698,6 +819,14 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
           : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.soundEffectsVolume,
         0,
         1
+      ),
+      audioCuePools: sanitizeVideoAudioCuePools(
+        legacyMergedVideo.audioCuePools ?? resolveLegacyAudioCuePools(legacyMergedVideo),
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools
+      ),
+      puzzlePlayUrgencyRampEnabled: sanitizeBoolean(
+        mergedVideo.puzzlePlayUrgencyRampEnabled,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.puzzlePlayUrgencyRampEnabled
       ),
       countdownSoundSrc:
         typeof mergedVideo.countdownSoundSrc === 'string'
@@ -899,6 +1028,11 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
         mergedVideo.generatedBackgroundsEnabled,
         DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.generatedBackgroundsEnabled
       ),
+      generatedBackgroundCoverage:
+        mergedVideo.generatedBackgroundCoverage === 'full_board' ||
+        mergedVideo.generatedBackgroundCoverage === 'game_area'
+          ? mergedVideo.generatedBackgroundCoverage
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.generatedBackgroundCoverage,
       generatedBackgroundPackId: sanitizeOptionalText(mergedVideo.generatedBackgroundPackId),
       generatedBackgroundShuffleSeed: sanitizeInteger(
         mergedVideo.generatedBackgroundShuffleSeed,

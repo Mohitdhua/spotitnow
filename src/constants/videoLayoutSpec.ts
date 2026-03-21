@@ -2,9 +2,7 @@ import { VideoSettings } from '../types';
 
 export const BASE_STAGE_SIZE: Record<VideoSettings['aspectRatio'], { width: number; height: number }> = {
   '16:9': { width: 1600, height: 900 },
-  '9:16': { width: 900, height: 1600 },
-  '1:1': { width: 1200, height: 1200 },
-  '4:3': { width: 1440, height: 1080 }
+  '9:16': { width: 900, height: 1600 }
 };
 
 export const CLASSIC_HUD_SPEC = {

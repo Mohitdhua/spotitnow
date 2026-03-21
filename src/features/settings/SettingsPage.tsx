@@ -3,7 +3,7 @@ import { Download, Settings as SettingsIcon, SlidersHorizontal } from 'lucide-re
 import { AppSettingsModal } from '../../components/AppSettingsModal';
 import { applyAppSettingsTransferBundle, createAppSettingsTransferBundle } from '../../services/settingsTransfer';
 import { downloadJsonFile } from '../../services/jsonTransfer';
-import { notifySuccess } from '../../services/notifications';
+import { notifyError, notifySuccess } from '../../services/notifications';
 import { applyVideoUserPackageToSettings, resolveActiveVideoUserPackage } from '../../services/videoUserPackages';
 import { useAppStore } from '../../store/appStore';
 
@@ -19,13 +19,17 @@ export default function SettingsPage() {
   const bumpSplitterDefaultsSession = useAppStore((state) => state.bumpSplitterDefaultsSession);
   const bumpBackgroundPacksSession = useAppStore((state) => state.bumpBackgroundPacksSession);
 
-  const handleQuickExport = () => {
-    const bundle = createAppSettingsTransferBundle({
-      appSettings: appDefaults
-    });
-    const timestamp = bundle.exportedAt.replace(/[:.]/g, '-');
-    downloadJsonFile(bundle, `spotitnow-settings-${timestamp}.json`);
-    notifySuccess('Settings backup downloaded.');
+  const handleQuickExport = async () => {
+    try {
+      const bundle = await createAppSettingsTransferBundle({
+        appSettings: appDefaults
+      });
+      const timestamp = bundle.exportedAt.replace(/[:.]/g, '-');
+      downloadJsonFile(bundle, `spotitnow-settings-${timestamp}.json`);
+      notifySuccess('Settings backup downloaded.');
+    } catch (error) {
+      notifyError(error instanceof Error ? error.message : 'Settings export failed.');
+    }
   };
 
   return (
@@ -67,7 +71,9 @@ export default function SettingsPage() {
           </button>
           <button
             type="button"
-            onClick={handleQuickExport}
+            onClick={() => {
+              void handleQuickExport();
+            }}
             className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-white px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-700 hover:bg-slate-100"
           >
             <Download size={14} strokeWidth={2.5} />
@@ -108,7 +114,7 @@ export default function SettingsPage() {
           setIsModalOpen(false);
         }}
         onExportSettings={async (nextSettings, options) => {
-          const bundle = createAppSettingsTransferBundle({
+          const bundle = await createAppSettingsTransferBundle({
             appSettings: nextSettings,
             gameAudioMuted: options?.gameAudioMuted
           });
@@ -118,7 +124,7 @@ export default function SettingsPage() {
         }}
         onImportSettings={async (file) => {
           const raw = await file.text();
-          const result = applyAppSettingsTransferBundle(raw);
+          const result = await applyAppSettingsTransferBundle(raw);
           setAppDefaults(result.appSettings, { gameAudioMuted: result.gameAudioMuted });
           applyVideoPackageLibraryState(
             {

@@ -1,15 +1,51 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { Pause, Play, RotateCcw, SkipForward } from 'lucide-react';
 import { Puzzle, VideoSettings } from '../types';
 import { renderVideoFramePreview } from '../services/videoExport';
-import { VideoPlayer } from './VideoPlayer';
+import {
+  VideoPlayer,
+  type VideoPlayerExternalControlAction,
+  type VideoPlayerPlaybackState
+} from './VideoPlayer';
 
 type ExportPreviewMoment = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro';
 type PreviewStatus = 'idle' | 'loading' | 'ready' | 'error';
+type PreviewWorkspaceTab = 'package' | 'theme' | 'text' | 'motion' | 'layout' | 'audio' | 'export';
+
+type WorkspaceOption<T extends string> = {
+  value: T;
+  label: string;
+};
+
+interface PreviewMonitorStageProps {
+  puzzles: Puzzle[];
+  settings: VideoSettings;
+  usesStackedStage: boolean;
+  frameShellStyle: React.CSSProperties;
+  liveControlAction: VideoPlayerExternalControlAction | null;
+  onPlaybackStateChange: (state: VideoPlayerPlaybackState) => void;
+  previewStatus: PreviewStatus;
+  previewError: string;
+  previewUrl: string | null;
+}
 
 interface VideoPreviewCompareProps {
   puzzles: Puzzle[];
   settings: VideoSettings;
   heightStyle: string;
+  activeTab: PreviewWorkspaceTab;
+  onSelectTab: (tab: PreviewWorkspaceTab) => void;
+  activeVideoPackageId: string;
+  packageOptions: Array<{ id: string; name: string }>;
+  onSelectVideoPackage: (packageId: string) => void;
+  themeOptions: Array<WorkspaceOption<VideoSettings['visualStyle']>>;
+  onVisualStyleChange: (style: VideoSettings['visualStyle']) => void;
+  onShowProgressChange: (show: boolean) => void;
+  onGeneratedProgressEnabledChange: (enabled: boolean) => void;
+  selectedStyleLabel: string;
+  selectedProgressStyleLabel: string;
+  selectedProgressMotionLabel: string;
+  children?: React.ReactNode;
 }
 
 const PREVIEW_MOMENT_OPTIONS: Array<{ value: ExportPreviewMoment; label: string }> = [
@@ -19,6 +55,19 @@ const PREVIEW_MOMENT_OPTIONS: Array<{ value: ExportPreviewMoment; label: string 
   { value: 'transitioning', label: 'Transition' },
   { value: 'outro', label: 'Outro' }
 ];
+
+const QUICK_TABS: Array<{ value: PreviewWorkspaceTab; label: string }> = [
+  { value: 'package', label: 'Package' },
+  { value: 'theme', label: 'Theme' },
+  { value: 'audio', label: 'Audio' },
+  { value: 'text', label: 'Text' },
+  { value: 'layout', label: 'Layout' },
+  { value: 'motion', label: 'Motion' },
+  { value: 'export', label: 'Export' }
+];
+
+const SETUP_TABS: PreviewWorkspaceTab[] = ['package', 'theme', 'audio'];
+const OUTPUT_TABS: PreviewWorkspaceTab[] = ['text', 'layout', 'motion', 'export'];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -112,10 +161,95 @@ const getPreviewTimestamp = (
   return outroDuration > 0 ? outroStart + outroDuration * 0.5 : puzzleStart + showDuration + revealDuration * 0.5;
 };
 
+const PreviewMonitorStage = React.memo(
+  ({
+    puzzles,
+    settings,
+    usesStackedStage,
+    frameShellStyle,
+    liveControlAction,
+    onPlaybackStateChange,
+    previewStatus,
+    previewError,
+    previewUrl
+  }: PreviewMonitorStageProps) => (
+    <div className="flex h-full w-full items-center justify-center overflow-hidden">
+      <div className="inline-flex max-w-full flex-none items-center justify-center overflow-hidden border-2 border-black bg-white p-[2px]">
+        <div
+          className={`flex items-start justify-center gap-1 ${
+            usesStackedStage ? 'flex-col' : 'flex-row'
+          }`}
+        >
+          <div className="flex min-w-0 flex-none flex-col items-center">
+            <div className="relative flex-none overflow-hidden border-2 border-black bg-white" style={frameShellStyle}>
+              {puzzles.length > 0 ? (
+                <span className="absolute left-2 top-2 z-10 h-3 w-3 rounded-full border border-black bg-[#EF4444] shadow-[0_0_0_2px_rgba(255,255,255,0.95)] animate-pulse" />
+              ) : null}
+              {puzzles.length > 0 ? (
+                <VideoPlayer
+                  puzzles={puzzles}
+                  settings={settings}
+                  embedded
+                  hidePlaybackControls
+                  externalControlAction={liveControlAction}
+                  onPlaybackStateChange={onPlaybackStateChange}
+                  onExit={() => {}}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center px-4 text-center text-[11px] font-black uppercase text-slate-600">
+                  Add puzzles for live preview.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-none flex-col items-center">
+            <div className="relative flex-none overflow-hidden border-2 border-black bg-white" style={frameShellStyle}>
+              {puzzles.length === 0 ? (
+                <div className="flex h-full items-center justify-center px-4 text-center text-[11px] font-black uppercase text-slate-600">
+                  Add puzzles for export preview.
+                </div>
+              ) : previewStatus === 'error' ? (
+                <div className="flex h-full items-center justify-center px-4 text-center">
+                  <div>
+                    <div className="text-[11px] font-black uppercase text-red-600">Preview failed</div>
+                    <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">{previewError}</div>
+                  </div>
+                </div>
+              ) : previewUrl ? (
+                <img src={previewUrl} alt="Export frame preview" className="block h-full w-full bg-white object-cover" />
+              ) : (
+                <div className="flex h-full items-center justify-center px-4 text-center text-[11px] font-black uppercase text-slate-600">
+                  {previewStatus === 'loading' ? 'Rendering...' : 'Preparing...'}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+);
+
+PreviewMonitorStage.displayName = 'PreviewMonitorStage';
+
 export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
   puzzles,
   settings,
-  heightStyle
+  heightStyle,
+  activeTab,
+  onSelectTab,
+  activeVideoPackageId,
+  packageOptions,
+  onSelectVideoPackage,
+  themeOptions,
+  onVisualStyleChange,
+  onShowProgressChange,
+  onGeneratedProgressEnabledChange,
+  selectedStyleLabel,
+  selectedProgressStyleLabel,
+  selectedProgressMotionLabel,
+  children
 }) => {
   const [previewMoment, setPreviewMoment] = useState<ExportPreviewMoment>(() =>
     resolveIntroDuration(settings) > 0 ? 'intro' : 'showing'
@@ -124,6 +258,15 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
   const [previewStatus, setPreviewStatus] = useState<PreviewStatus>('idle');
   const [previewError, setPreviewError] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [committedPreviewSettings, setCommittedPreviewSettings] = useState(settings);
+  const [livePlaybackState, setLivePlaybackState] = useState<VideoPlayerPlaybackState>(() => ({
+    hasPuzzles: puzzles.length > 0,
+    isPlaying: puzzles.length > 0,
+    phase: resolveIntroDuration(settings) > 0 ? 'intro' : 'showing',
+    puzzleIndex: 0
+  }));
+  const [liveControlAction, setLiveControlAction] = useState<VideoPlayerExternalControlAction | null>(null);
+  const livePreviewSettings = useDeferredValue(settings);
 
   const maxPuzzleIndex = Math.max(0, puzzles.length - 1);
 
@@ -139,6 +282,16 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
   }, [previewMoment, previewPuzzleIndex, puzzles.length, settings]);
 
   useEffect(() => {
+    if (puzzles.length > 0) return;
+    setLivePlaybackState({
+      hasPuzzles: false,
+      isPlaying: false,
+      phase: resolveIntroDuration(settings) > 0 ? 'intro' : 'showing',
+      puzzleIndex: 0
+    });
+  }, [puzzles.length, settings]);
+
+  useEffect(() => {
     return () => {
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
@@ -146,10 +299,26 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
     };
   }, [previewUrl]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setCommittedPreviewSettings(settings);
+    }, 180);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [settings]);
+
   const safeMoment = resolveValidMoment(previewMoment, previewPuzzleIndex, puzzles.length, settings);
+  const committedMoment = resolveValidMoment(
+    previewMoment,
+    previewPuzzleIndex,
+    puzzles.length,
+    committedPreviewSettings
+  );
   const previewTimestamp = useMemo(
-    () => getPreviewTimestamp(settings, puzzles.length, previewPuzzleIndex, safeMoment),
-    [settings, puzzles.length, previewPuzzleIndex, safeMoment]
+    () => getPreviewTimestamp(committedPreviewSettings, puzzles.length, previewPuzzleIndex, committedMoment),
+    [committedPreviewSettings, puzzles.length, previewPuzzleIndex, committedMoment]
   );
 
   useEffect(() => {
@@ -173,7 +342,7 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
       try {
         const result = await renderVideoFramePreview({
           puzzles,
-          settings,
+          settings: committedPreviewSettings,
           timestamp: previewTimestamp,
           signal: controller.signal
         });
@@ -205,131 +374,279 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [previewTimestamp, puzzles, settings]);
+  }, [committedPreviewSettings, previewTimestamp, puzzles]);
 
-  const activeMomentLabel =
-    PREVIEW_MOMENT_OPTIONS.find((option) => option.value === safeMoment)?.label ?? 'Play';
-  const puzzleLabel =
-    safeMoment === 'intro' || safeMoment === 'outro'
-      ? `${activeMomentLabel} frame`
-      : `Puzzle ${previewPuzzleIndex + 1} ${activeMomentLabel.toLowerCase()}`;
+  const usesStackedStage = settings.aspectRatio === '16:9';
+  const previewAspectRatio = settings.aspectRatio === '16:9' ? 16 / 9 : 9 / 16;
+  const frameShellStyle = useMemo<React.CSSProperties>(
+    () => ({
+      aspectRatio: `${previewAspectRatio}`,
+      height: heightStyle,
+      width: 'auto',
+      maxWidth: '100%',
+      minWidth: 0,
+      flex: '0 0 auto'
+    }),
+    [heightStyle, previewAspectRatio]
+  );
+  const selectClass =
+    'h-10 w-full rounded-xl border-2 border-black bg-white px-4 text-sm font-black text-slate-900 outline-none';
+  const setupTabs = QUICK_TABS.filter((tab) => SETUP_TABS.includes(tab.value));
+  const outputTabs = QUICK_TABS.filter((tab) => OUTPUT_TABS.includes(tab.value));
+  const renderChildrenInSetupPanel = SETUP_TABS.includes(activeTab);
+  const renderChildrenInOutputPanel = OUTPUT_TABS.includes(activeTab);
+  const issueLiveControl = (kind: VideoPlayerExternalControlAction['kind']) => {
+    setLiveControlAction((current) => ({ kind, nonce: (current?.nonce ?? 0) + 1 }));
+  };
 
   return (
-    <section className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
-      <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h3 className="text-lg font-black uppercase">Preview Compare</h3>
-          <p className="text-[10px] font-bold uppercase text-slate-600">
-            Left is live playback. Right is a real frame rendered through the export worker.
-          </p>
-        </div>
-        <span className="px-2 py-1 border-2 border-black rounded-full text-[10px] font-black uppercase bg-[#F8FAFC]">
-          {settings.aspectRatio} / {settings.exportResolution}
-        </span>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <div className="space-y-3">
-          <div>
-            <div className="text-xs font-black uppercase">Video Preview</div>
-            <div className="text-[10px] font-bold uppercase text-slate-600">Interactive playback inside the app</div>
+    <section className="h-full min-h-0 bg-white">
+      <div className="grid h-full min-h-0 xl:grid-cols-[370px_minmax(0,1fr)_370px]">
+        <aside className="video-panel-scroll min-h-0 overflow-y-auto border-r border-black/15 bg-[#FFFDF8]">
+          <div className="sticky top-0 z-10 border-b border-black/15 bg-[#FFFDF8] px-3 py-3">
+            <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Setup</div>
+            <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+              {setupTabs.map((tab) => (
+                <button
+                  key={tab.value}
+                  type="button"
+                  onClick={() => onSelectTab(tab.value)}
+                  className={`rounded-md border-2 border-black px-2 py-1.5 text-[8px] font-black uppercase ${
+                    activeTab === tab.value ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="w-full border-2 border-black rounded-xl overflow-hidden bg-black/5" style={{ height: heightStyle }}>
-            {puzzles.length > 0 ? (
-              <VideoPlayer puzzles={puzzles} settings={settings} embedded onExit={() => {}} />
-            ) : (
-              <div className="h-full flex items-center justify-center text-[11px] font-black uppercase text-slate-600 px-4 text-center">
-                Add at least one puzzle to see the preview compare.
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="space-y-3">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <div className="text-xs font-black uppercase">Export Look Preview</div>
-              <div className="text-[10px] font-bold uppercase text-slate-600">Actual frame styling from the export renderer</div>
+          <div className="space-y-3 px-3 py-3">
+            <div className="space-y-1.5">
+              <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Package</div>
+              <select
+                value={activeVideoPackageId}
+                onChange={(event) => onSelectVideoPackage(event.target.value)}
+                className={selectClass}
+              >
+                {packageOptions.map((videoPackage) => (
+                  <option key={videoPackage.id} value={videoPackage.id}>
+                    {videoPackage.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {PREVIEW_MOMENT_OPTIONS.map((option) => {
-                const disabled = !isMomentAvailable(option.value, previewPuzzleIndex, puzzles.length, settings);
-                const selected = safeMoment === option.value;
-                return (
+            <div className="space-y-1.5 border-t border-black/15 pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Theme</div>
+                <button
+                  type="button"
+                  onClick={() => onSelectTab('theme')}
+                  className="text-[8px] font-black uppercase tracking-[0.14em] text-slate-600 hover:text-black"
+                >
+                  Edit
+                </button>
+              </div>
+              <select
+                value={settings.visualStyle}
+                onChange={(event) => onVisualStyleChange(event.target.value as VideoSettings['visualStyle'])}
+                className={selectClass}
+              >
+                {themeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5 border-t border-black/15 pt-3">
+              <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Current</div>
+              <div className="flex flex-wrap gap-1.5">
+                <span className="rounded-md border border-black bg-[#DBEAFE] px-2 py-1 text-[8px] font-black uppercase">
+                  {selectedStyleLabel}
+                </span>
+                <span className="rounded-md border border-black bg-white px-2 py-1 text-[8px] font-black uppercase">
+                  {selectedProgressStyleLabel}
+                </span>
+                <span className="rounded-md border border-black bg-[#E0F2FE] px-2 py-1 text-[8px] font-black uppercase">
+                  {selectedProgressMotionLabel}
+                </span>
+              </div>
+            </div>
+
+            {children && renderChildrenInSetupPanel ? (
+              <div className="video-setup-panel-content space-y-4 border-t border-black/15 pt-3">{children}</div>
+            ) : null}
+          </div>
+        </aside>
+
+        <div className="flex min-h-0 flex-col border-r border-black/15 bg-white">
+          <div className="border-b border-black/20 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => issueLiveControl('replay')}
+                  disabled={puzzles.length === 0}
+                  className={`inline-flex h-9 w-9 items-center justify-center rounded-md border-2 border-black ${
+                    puzzles.length === 0 ? 'cursor-not-allowed bg-slate-200 text-slate-500' : 'bg-white hover:bg-slate-100'
+                  }`}
+                  title="Replay live preview"
+                >
+                  <RotateCcw size={15} strokeWidth={2.8} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => issueLiveControl('toggle-play')}
+                  disabled={puzzles.length === 0}
+                  className={`inline-flex h-9 w-9 items-center justify-center rounded-md border-2 border-black ${
+                    puzzles.length === 0 ? 'cursor-not-allowed bg-slate-200 text-slate-500' : 'bg-white hover:bg-slate-100'
+                  }`}
+                  title={livePlaybackState.isPlaying ? 'Pause live preview' : 'Play live preview'}
+                >
+                  {livePlaybackState.isPlaying ? <Pause size={15} strokeWidth={2.8} /> : <Play size={15} strokeWidth={2.8} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => issueLiveControl('skip')}
+                  disabled={puzzles.length === 0}
+                  className={`inline-flex h-9 w-9 items-center justify-center rounded-md border-2 border-black ${
+                    puzzles.length === 0 ? 'cursor-not-allowed bg-slate-200 text-slate-500' : 'bg-white hover:bg-slate-100'
+                  }`}
+                  title="Skip live preview"
+                >
+                  <SkipForward size={15} strokeWidth={2.8} />
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {PREVIEW_MOMENT_OPTIONS.map((option) => {
+                  const disabled = !isMomentAvailable(option.value, previewPuzzleIndex, puzzles.length, settings);
+                  const selected = safeMoment === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setPreviewMoment(option.value)}
+                      disabled={disabled}
+                      className={`rounded-md border-2 border-black px-2.5 py-2 text-[8px] font-black uppercase ${
+                        selected
+                          ? 'bg-[#FFD93D]'
+                          : disabled
+                            ? 'cursor-not-allowed bg-slate-200 text-slate-400'
+                            : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="min-w-[180px] flex-1 max-w-[240px]">
+                <select
+                  aria-label="Preview puzzle"
+                  value={previewPuzzleIndex}
+                  onChange={(event) => setPreviewPuzzleIndex(Number(event.target.value))}
+                  disabled={puzzles.length === 0}
+                  className={selectClass}
+                >
+                  {puzzles.length === 0 ? (
+                    <option value={0}>No puzzles</option>
+                  ) : (
+                    puzzles.map((_, index) => (
+                      <option key={index} value={index}>
+                        Puzzle {index + 1}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-hidden px-0 py-1">
+            <PreviewMonitorStage
+              puzzles={puzzles}
+              settings={livePreviewSettings}
+              usesStackedStage={usesStackedStage}
+              frameShellStyle={frameShellStyle}
+              liveControlAction={liveControlAction}
+              onPlaybackStateChange={setLivePlaybackState}
+              previewStatus={previewStatus}
+              previewError={previewError}
+              previewUrl={previewUrl}
+            />
+          </div>
+        </div>
+
+        <aside className="video-panel-scroll min-h-0 overflow-y-auto bg-[#FFFDF8]">
+          <style>{`
+            .video-panel-scroll {
+              scrollbar-width: none;
+              -ms-overflow-style: none;
+            }
+            .video-panel-scroll::-webkit-scrollbar {
+              width: 0;
+              height: 0;
+            }
+            .video-setup-panel-content [class*="grid-cols"] {
+              grid-template-columns: minmax(0, 1fr) !important;
+            }
+            .video-output-panel-content [class*="grid-cols"] {
+              grid-template-columns: minmax(0, 1fr) !important;
+            }
+          `}</style>
+          <div className="sticky top-0 z-10 border-b border-black/15 bg-[#FFFDF8] px-3 py-3">
+              <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Output</div>
+              <div className="mt-1.5 grid grid-cols-4 gap-1.5">
+                {outputTabs.map((tab) => (
                   <button
-                    key={option.value}
+                    key={tab.value}
                     type="button"
-                    onClick={() => setPreviewMoment(option.value)}
-                    disabled={disabled}
-                    className={`px-3 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase ${
-                      selected
-                        ? 'bg-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                        : disabled
-                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                        : 'bg-white hover:bg-slate-100'
+                    onClick={() => onSelectTab(tab.value)}
+                    className={`rounded-md border-2 border-black px-2 py-1.5 text-[8px] font-black uppercase ${
+                      activeTab === tab.value ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
                     }`}
                   >
-                    {option.label}
+                    {tab.label}
                   </button>
-                );
-              })}
+                ))}
+              </div>
+          </div>
+
+          <div className="space-y-3 px-3 py-3">
+            <div className="space-y-1.5">
+              <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Progress</div>
+              <div className="space-y-1.5">
+                <button
+                  type="button"
+                  onClick={() => onShowProgressChange(!settings.showProgress)}
+                  className={`rounded-md border-2 border-black px-2 py-2 text-[8px] font-black uppercase ${
+                    settings.showProgress ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
+                  }`}
+                >
+                  {settings.showProgress ? 'Visible' : 'Hidden'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onGeneratedProgressEnabledChange(!settings.generatedProgressEnabled)}
+                  className={`rounded-md border-2 border-black px-2 py-2 text-[8px] font-black uppercase ${
+                    settings.generatedProgressEnabled ? 'bg-[#FDE68A]' : 'bg-white hover:bg-slate-100'
+                  }`}
+                >
+                  {settings.generatedProgressEnabled ? 'Generated' : 'Package'}
+                </button>
+              </div>
             </div>
-          </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_180px] gap-3">
-            <label className="block">
-              <span className="block text-[10px] font-black uppercase text-slate-600 mb-1">Puzzle</span>
-              <select
-                value={previewPuzzleIndex}
-                onChange={(event) => setPreviewPuzzleIndex(Number(event.target.value))}
-                disabled={puzzles.length === 0}
-                className="w-full px-3 py-2 border-2 border-black rounded-lg bg-white text-xs font-black uppercase"
-              >
-                {puzzles.length === 0 ? (
-                  <option value={0}>No puzzles</option>
-                ) : (
-                  puzzles.map((_, index) => (
-                    <option key={index} value={index}>
-                      Puzzle {index + 1}
-                    </option>
-                  ))
-                )}
-              </select>
-            </label>
-
-            <div className="border-2 border-black rounded-lg bg-[#F8FDFF] px-3 py-2 flex flex-col justify-center">
-              <div className="text-[10px] font-black uppercase text-slate-600">Frame</div>
-              <div className="text-xs font-black uppercase text-slate-900">{puzzleLabel}</div>
-            </div>
+            {children && renderChildrenInOutputPanel ? (
+              <div className="video-output-panel-content space-y-4 border-t border-black/15 pt-3">{children}</div>
+            ) : null}
           </div>
-
-          <div className="w-full border-2 border-black rounded-xl overflow-hidden bg-black/5" style={{ height: heightStyle }}>
-            {puzzles.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-[11px] font-black uppercase text-slate-600 px-4 text-center">
-                Add at least one puzzle to render an export-accurate frame.
-              </div>
-            ) : previewStatus === 'error' ? (
-              <div className="h-full flex items-center justify-center px-4 text-center">
-                <div>
-                  <div className="text-[11px] font-black uppercase text-red-600">Preview failed</div>
-                  <div className="mt-2 text-[10px] font-bold uppercase text-slate-600">{previewError}</div>
-                </div>
-              </div>
-            ) : previewUrl ? (
-              <img
-                src={previewUrl}
-                alt="Export frame preview"
-                className="h-full w-full object-contain bg-white"
-              />
-            ) : (
-              <div className="h-full flex items-center justify-center text-[11px] font-black uppercase text-slate-600 px-4 text-center">
-                {previewStatus === 'loading' ? 'Rendering export frame...' : 'Preparing export preview...'}
-              </div>
-            )}
-          </div>
-        </div>
+        </aside>
       </div>
     </section>
   );

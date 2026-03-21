@@ -1,4 +1,4 @@
-import type { CustomVideoLayout, GeneratedBackgroundPack } from '../types';
+import type { CustomVideoLayout, GeneratedBackgroundPack, VideoSettings } from '../types';
 import type { WatermarkSelectionPreset } from './watermarkRemoval';
 import {
   applySplitterSetupSnapshot,
@@ -36,11 +36,20 @@ import {
   loadGeneratedBackgroundPacks,
   replaceGeneratedBackgroundPacks
 } from './backgroundPacks';
+import {
+  exportStoredImageAssetMap,
+  importStoredImageAssetMap
+} from './imageAssetStore';
+import {
+  exportStoredAudioAssetMap,
+  importStoredAudioAssetMap
+} from './audioAssetStore';
 import { loadWatermarkPresets, replaceWatermarkPresets } from './watermarkPresets';
+import { VIDEO_AUDIO_POOL_KEYS } from '../utils/videoAudioPools';
 
 export interface AppSettingsTransferBundle {
-  kind: 'spotitnow-settings-transfer@v4';
-  version: 4;
+  kind: 'spotitnow-settings-transfer@v5';
+  version: 5;
   exportedAt: string;
   appSettings: AppGlobalSettings;
   splitterSetup: SplitterSetupSnapshot;
@@ -51,6 +60,8 @@ export interface AppSettingsTransferBundle {
   backgroundPacks: GeneratedBackgroundPack[];
   savedVideoLayout: CustomVideoLayout | null;
   gameAudioMuted: boolean;
+  imageAssets?: Record<string, string>;
+  audioAssets?: Record<string, string>;
 }
 
 export interface ApplyAppSettingsTransferResult {
@@ -72,8 +83,10 @@ interface CreateBundleOverrides {
   gameAudioMuted?: boolean;
 }
 
-const TRANSFER_KIND = 'spotitnow-settings-transfer@v4';
-const TRANSFER_VERSION = 4;
+const TRANSFER_KIND = 'spotitnow-settings-transfer@v5';
+const TRANSFER_VERSION = 5;
+const LEGACY_TRANSFER_KIND_V4 = 'spotitnow-settings-transfer@v4';
+const LEGACY_TRANSFER_VERSION_V4 = 4;
 const LEGACY_TRANSFER_KIND_V3 = 'spotitnow-settings-transfer@v3';
 const LEGACY_TRANSFER_VERSION_V3 = 3;
 const LEGACY_TRANSFER_KIND_V2 = 'spotitnow-settings-transfer@v2';
@@ -105,6 +118,7 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
   if (
     'kind' in value &&
     value.kind !== TRANSFER_KIND &&
+    value.kind !== LEGACY_TRANSFER_KIND_V4 &&
     value.kind !== LEGACY_TRANSFER_KIND_V3 &&
     value.kind !== LEGACY_TRANSFER_KIND_V2 &&
     value.kind !== LEGACY_TRANSFER_KIND
@@ -115,6 +129,7 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
   if (
     'version' in value &&
     value.version !== TRANSFER_VERSION &&
+    value.version !== LEGACY_TRANSFER_VERSION_V4 &&
     value.version !== LEGACY_TRANSFER_VERSION_V3 &&
     value.version !== LEGACY_TRANSFER_VERSION_V2 &&
     value.version !== LEGACY_TRANSFER_VERSION
@@ -125,15 +140,127 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
   return value;
 };
 
-export const createAppSettingsTransferBundle = (
+const remapStoredLogoSource = (
+  source: unknown,
+  restoredImageAssets: Map<string, string>
+) =>
+  typeof source === 'string'
+    ? restoredImageAssets.get(source) ?? source
+    : source;
+
+const remapStoredAudioSource = (
+  source: unknown,
+  restoredAudioAssets: Map<string, string>
+) =>
+  typeof source === 'string'
+    ? restoredAudioAssets.get(source) ?? source
+    : source;
+
+const collectTransferredAudioSources = (
+  settings: Partial<VideoSettings> | null | undefined
+): Array<string | undefined> => {
+  if (!settings) {
+    return [];
+  }
+
+  const pooledSources = VIDEO_AUDIO_POOL_KEYS.flatMap((key) => {
+    const sources = settings.audioCuePools?.[key]?.sources;
+    return Array.isArray(sources) ? sources : [];
+  });
+
+  return [settings.backgroundMusicSrc, ...pooledSources];
+};
+
+const remapTransferredVideoSettingsAssets = (
+  settings: unknown,
+  restoredImageAssets: Map<string, string>,
+  restoredAudioAssets: Map<string, string>
+) => {
+  if (!isObjectRecord(settings)) {
+    return settings;
+  }
+
+  const nextAudioCuePools = isObjectRecord(settings.audioCuePools)
+    ? Object.fromEntries(
+        VIDEO_AUDIO_POOL_KEYS.map((key) => {
+          const pool = settings.audioCuePools[key];
+          if (!isObjectRecord(pool)) {
+            return [key, pool];
+          }
+
+          return [
+            key,
+            {
+              ...pool,
+              sources: Array.isArray(pool.sources)
+                ? pool.sources.map((source) =>
+                    remapStoredAudioSource(source, restoredAudioAssets)
+                  )
+                : pool.sources
+            }
+          ];
+        })
+      )
+    : settings.audioCuePools;
+
+  return {
+    ...settings,
+    logo: remapStoredLogoSource(settings.logo, restoredImageAssets),
+    backgroundMusicSrc: remapStoredAudioSource(
+      settings.backgroundMusicSrc,
+      restoredAudioAssets
+    ),
+    audioCuePools: nextAudioCuePools
+  };
+};
+
+const remapTransferredVideoPackages = (
+  packages: unknown,
+  restoredImageAssets: Map<string, string>,
+  restoredAudioAssets: Map<string, string>
+) => {
+  if (
+    !Array.isArray(packages) ||
+    (restoredImageAssets.size === 0 && restoredAudioAssets.size === 0)
+  ) {
+    return packages;
+  }
+
+  return packages.map((entry) => {
+    if (!isObjectRecord(entry) || !isObjectRecord(entry.sharedSettings)) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      sharedSettings: remapTransferredVideoSettingsAssets(
+        entry.sharedSettings,
+        restoredImageAssets,
+        restoredAudioAssets
+      )
+    };
+  });
+};
+
+export const createAppSettingsTransferBundle = async (
   overrides: CreateBundleOverrides = {}
-): AppSettingsTransferBundle => {
+): Promise<AppSettingsTransferBundle> => {
   const appSettings = sanitizeAppGlobalSettings(
     overrides.appSettings ?? loadAppGlobalSettings()
   );
   const videoPackageLibrary = loadVideoUserPackageLibrary(
     appSettings.videoDefaults
   );
+  const imageAssets = await exportStoredImageAssetMap([
+    appSettings.videoDefaults.logo,
+    ...videoPackageLibrary.packages.map((videoPackage) => videoPackage.sharedSettings.logo)
+  ]);
+  const audioAssets = await exportStoredAudioAssetMap([
+    ...collectTransferredAudioSources(appSettings.videoDefaults),
+    ...videoPackageLibrary.packages.flatMap((videoPackage) =>
+      collectTransferredAudioSources(videoPackage.sharedSettings)
+    )
+  ]);
 
   return {
     kind: TRANSFER_KIND,
@@ -147,13 +274,15 @@ export const createAppSettingsTransferBundle = (
     lastSelectedVideoPackageId: videoPackageLibrary.activePackageId,
     backgroundPacks: loadGeneratedBackgroundPacks(),
     savedVideoLayout: loadSavedVideoCustomLayout(),
-    gameAudioMuted: overrides.gameAudioMuted ?? loadGameAudioMuted()
+    gameAudioMuted: overrides.gameAudioMuted ?? loadGameAudioMuted(),
+    imageAssets: Object.keys(imageAssets).length > 0 ? imageAssets : undefined,
+    audioAssets: Object.keys(audioAssets).length > 0 ? audioAssets : undefined
   };
 };
 
-export const applyAppSettingsTransferBundle = (
+export const applyAppSettingsTransferBundle = async (
   raw: string
-): ApplyAppSettingsTransferResult => {
+): Promise<ApplyAppSettingsTransferResult> => {
   let parsed: unknown;
 
   try {
@@ -167,10 +296,32 @@ export const applyAppSettingsTransferBundle = (
     throw new Error('This file is not a Spotitnow settings backup.');
   }
 
-  const currentBundle = createAppSettingsTransferBundle();
-  const appSettings = sanitizeAppGlobalSettings(
-    isObjectRecord(candidate.appSettings) ? (candidate.appSettings as Partial<AppGlobalSettings>) : currentBundle.appSettings
+  const currentBundle = await createAppSettingsTransferBundle();
+  const restoredImageAssets = await importStoredImageAssetMap(
+    isObjectRecord(candidate.imageAssets)
+      ? (candidate.imageAssets as Record<string, unknown>)
+      : undefined
   );
+  const restoredAudioAssets = await importStoredAudioAssetMap(
+    isObjectRecord(candidate.audioAssets)
+      ? (candidate.audioAssets as Record<string, unknown>)
+      : undefined
+  );
+  let appSettings = sanitizeAppGlobalSettings(
+    isObjectRecord(candidate.appSettings)
+      ? (candidate.appSettings as Partial<AppGlobalSettings>)
+      : currentBundle.appSettings
+  );
+  if (restoredImageAssets.size > 0 || restoredAudioAssets.size > 0) {
+    appSettings = {
+      ...appSettings,
+      videoDefaults: remapTransferredVideoSettingsAssets(
+        appSettings.videoDefaults,
+        restoredImageAssets,
+        restoredAudioAssets
+      ) as AppGlobalSettings['videoDefaults']
+    };
+  }
   const splitterSetup = applySplitterSetupSnapshot(
     isObjectRecord(candidate.splitterSetup)
       ? (candidate.splitterSetup as unknown as SplitterSetupSnapshot)
@@ -195,7 +346,11 @@ export const applyAppSettingsTransferBundle = (
     'videoPackages' in candidate
       ? replaceVideoUserPackageLibrary(
           {
-            packages: candidate.videoPackages,
+            packages: remapTransferredVideoPackages(
+              candidate.videoPackages,
+              restoredImageAssets,
+              restoredAudioAssets
+            ),
             activePackageId: candidate.lastSelectedVideoPackageId
           },
           appSettings.videoDefaults

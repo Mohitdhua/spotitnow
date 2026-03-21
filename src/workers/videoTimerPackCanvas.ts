@@ -431,8 +431,8 @@ const drawBadgePop = (ctx: CanvasRenderingContext2D, rect: CanvasTimerRect, inpu
     { x: rect.x + rect.width * 0.17, y: rect.y, width: rect.width * 0.66, height: rect.height * 0.24, radius: rect.height * 0.1 },
     { fill: palette.empty, stroke: palette.shell, lineWidth: 3 }
   );
-  drawCenteredText(ctx, 'TIMER', rect.x + rect.width / 2, rect.y + rect.height * 0.14, rect.height * 0.14, palette.shell, '"Segoe UI", Arial, sans-serif', 900);
-  drawCenteredText(ctx, state.secondsLabel, rect.x + rect.width / 2, rect.y + rect.height * 0.62, rect.height * 0.34, palette.text, '"Arial Black", "Segoe UI", sans-serif');
+  drawCenteredText(ctx, 'TIMER', rect.x + rect.width / 2, rect.y + rect.height * 0.14, rect.height * 0.16, palette.shell, '"Segoe UI", Arial, sans-serif', 900);
+  drawCenteredText(ctx, state.secondsLabel, rect.x + rect.width / 2, rect.y + rect.height * 0.6, rect.height * 0.42, palette.text, '"Arial Black", "Segoe UI", sans-serif');
   ctx.restore();
 };
 

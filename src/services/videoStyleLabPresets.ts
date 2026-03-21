@@ -8,6 +8,7 @@ export interface VideoStyleLabPresetSettings {
   headerStyle: VideoSettings['headerStyle'];
   timerStyle: VideoSettings['timerStyle'];
   progressStyle: VideoSettings['progressStyle'];
+  progressMotion?: VideoSettings['progressMotion'];
   introCardStyle: VideoSettings['introCardStyle'];
   transitionCardStyle: VideoSettings['transitionCardStyle'];
   outroCardStyle: VideoSettings['outroCardStyle'];
@@ -15,6 +16,7 @@ export interface VideoStyleLabPresetSettings {
   sceneSettings: VideoSettings['sceneSettings'];
   textTemplates: VideoSettings['textTemplates'];
   generatedBackgroundsEnabled: boolean;
+  generatedBackgroundCoverage?: VideoSettings['generatedBackgroundCoverage'];
   generatedBackgroundPackId: string;
   generatedBackgroundShuffleSeed: number;
   imagePanelOutlineColor: string;
@@ -126,6 +128,7 @@ const isStyleLabPresetSettings = (value: unknown): value is VideoStyleLabPresetS
     typeof candidate.headerStyle === 'string' &&
     typeof candidate.timerStyle === 'string' &&
     typeof candidate.progressStyle === 'string' &&
+    (candidate.progressMotion === undefined || typeof candidate.progressMotion === 'string') &&
     typeof candidate.introCardStyle === 'string' &&
     typeof candidate.transitionCardStyle === 'string' &&
     typeof candidate.outroCardStyle === 'string' &&
@@ -133,6 +136,9 @@ const isStyleLabPresetSettings = (value: unknown): value is VideoStyleLabPresetS
     isSceneSettings(candidate.sceneSettings) &&
     isTextTemplateMap(candidate.textTemplates) &&
     typeof candidate.generatedBackgroundsEnabled === 'boolean' &&
+    (candidate.generatedBackgroundCoverage === undefined ||
+      candidate.generatedBackgroundCoverage === 'game_area' ||
+      candidate.generatedBackgroundCoverage === 'full_board') &&
     typeof candidate.generatedBackgroundPackId === 'string' &&
     isFiniteNumber(candidate.generatedBackgroundShuffleSeed) &&
     (candidate.imagePanelOutlineColor === undefined || typeof candidate.imagePanelOutlineColor === 'string') &&
@@ -223,6 +229,7 @@ export const applyVideoStyleLabPresetToSettings = (
   headerStyle: preset.settings.headerStyle,
   timerStyle: preset.settings.timerStyle,
   progressStyle: preset.settings.progressStyle,
+  progressMotion: preset.settings.progressMotion ?? settings.progressMotion,
   introCardStyle: preset.settings.introCardStyle,
   transitionCardStyle: preset.settings.transitionCardStyle,
   outroCardStyle: preset.settings.outroCardStyle,
@@ -234,6 +241,7 @@ export const applyVideoStyleLabPresetToSettings = (
     ...preset.settings.textTemplates
   },
   generatedBackgroundsEnabled: preset.settings.generatedBackgroundsEnabled,
+  generatedBackgroundCoverage: preset.settings.generatedBackgroundCoverage ?? settings.generatedBackgroundCoverage,
   generatedBackgroundPackId: preset.settings.generatedBackgroundPackId,
   generatedBackgroundShuffleSeed: preset.settings.generatedBackgroundShuffleSeed,
   imagePanelOutlineColor:
