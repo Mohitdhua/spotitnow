@@ -11,6 +11,7 @@ const PlayPage = lazy(() => import('../features/play/PlayPage'));
 const VideoSetupPage = lazy(() => import('../features/video/VideoSetupPage'));
 const VideoPreviewPage = lazy(() => import('../features/video/VideoPreviewPage'));
 const VideoOverlayPage = lazy(() => import('../features/video/VideoOverlayPage'));
+const ThumbnailGeneratorPage = lazy(() => import('../features/tools/ThumbnailGeneratorPage'));
 const SplitterPage = lazy(() => import('../features/tools/SplitterPage'));
 const ExtractorPage = lazy(() => import('../features/tools/ExtractorPage'));
 const UpscalerPage = lazy(() => import('../features/tools/UpscalerPage'));
@@ -49,6 +50,7 @@ export const appRouter = createBrowserRouter([
       { path: 'video/setup', element: withSuspense(<VideoSetupPage />) },
       { path: 'video/preview', element: withSuspense(<VideoPreviewPage />) },
       { path: 'video/overlay', element: <Navigate to="/editor" replace /> },
+      { path: 'tools/thumbnail', element: withSuspense(<ThumbnailGeneratorPage />) },
       { path: 'tools/splitter', element: withSuspense(<SplitterPage />) },
       { path: 'tools/extractor', element: withSuspense(<ExtractorPage />) },
       { path: 'tools/upscaler', element: withSuspense(<UpscalerPage />) },

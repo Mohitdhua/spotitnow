@@ -146,7 +146,7 @@ export default function SettingsPage() {
           const layoutSummary = result.hasSavedVideoLayout ? 'saved layout included' : 'no saved layout';
           return {
             gameAudioMuted: result.gameAudioMuted,
-            message: `Imported settings, ${result.timestampPresetCount} timestamp presets, ${result.watermarkPresetCount} watermark presets, ${result.videoPackageCount} video packages, ${result.backgroundPackCount} background packs, ${layoutSummary}.${result.migratedLegacyStyleLabPresetCount > 0 ? ` Migrated ${result.migratedLegacyStyleLabPresetCount} legacy video presets into packages.` : ''}`
+            message: `Imported settings, ${result.splitterPresetCount} splitter presets, ${result.timestampPresetCount} timestamp presets, ${result.watermarkPresetCount} watermark presets, ${result.videoPackageCount} video packages, ${result.backgroundPackCount} background packs, ${layoutSummary}.${result.migratedLegacyStyleLabPresetCount > 0 ? ` Migrated ${result.migratedLegacyStyleLabPresetCount} legacy video presets into packages.` : ''}`
           };
         }}
         onResetDefaults={() => {

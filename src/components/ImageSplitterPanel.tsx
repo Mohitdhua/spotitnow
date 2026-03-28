@@ -1,6 +1,7 @@
 import React, { DragEvent, useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Crop, Download, Image as ImageIcon, Layers, Plus, RefreshCcw, Trash2, Upload } from 'lucide-react';
+import { TextPromptDialog } from '../app/components/TextPromptDialog';
 import {
   assistLinkedSplitPairPlacement,
   dataUrlToPngBlob,
@@ -14,16 +15,20 @@ import {
   clearSplitterSharedPair,
   clearSplitterSharedRegion,
   createSplitterSetupSnapshot,
+  deleteSplitterSetupPreset,
+  loadSplitterSetupPresets,
   parseSplitterSetupSnapshot,
   readSplitterMode,
   readSplitterNextSequence,
   readSplitterSharedPair,
   readSplitterSharedRegion,
+  saveSplitterSetupPreset,
   setSplitterNextSequence,
   saveSplitterMode,
   saveSplitterSharedPair,
   saveSplitterSharedRegion,
   type SplitterModePreference,
+  type SplitterSetupPreset,
   type SplitterSharedRegion
 } from '../services/appSettings';
 
@@ -96,6 +101,17 @@ const triggerBlobDownload = (blob: Blob, filename: string) => {
 };
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const formatPresetDate = (value: string) => {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return 'Saved recently';
+  return new Date(parsed).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+};
 
 const clampSequence = (value: number) => Math.max(1, Math.floor(value));
 
@@ -425,6 +441,8 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
   const [sharedManualPair, setSharedManualPair] = useState<NormalizedLinkedSplitPairSelection | null>(
     () => readSplitterSharedPair()
   );
+  const [splitterPresets, setSplitterPresets] = useState<SplitterSetupPreset[]>(() => loadSplitterSetupPresets());
+  const [isSavePresetDialogOpen, setIsSavePresetDialogOpen] = useState(false);
   const [previewMode, setPreviewMode] = useState<SplitterPreviewMode>('outputs');
   const [isCompareBlinkVisible, setIsCompareBlinkVisible] = useState(true);
 
@@ -443,6 +461,10 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
   useEffect(() => {
     splitterModeRef.current = splitterMode;
   }, [splitterMode]);
+
+  useEffect(() => {
+    setSplitterPresets(loadSplitterSetupPresets());
+  }, []);
 
   useEffect(() => {
     if (!hasMountedDefaultModeRef.current) {
@@ -477,6 +499,88 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
       splitPairsRef.current.forEach(revokePreviewUrl);
     };
   }, []);
+
+  const refreshSplitterPresets = () => {
+    setSplitterPresets(loadSplitterSetupPresets());
+  };
+
+  const currentSetupSelectionReady =
+    splitterMode === 'manual_pair' ? Boolean(sharedManualPair) : Boolean(sharedManualRegion);
+
+  const applySplitterPreset = (preset: SplitterSetupPreset) => {
+    editorDragStartRef.current = null;
+    pairEditorDragRef.current = null;
+    setManualEditor(null);
+    setManualPairEditor(null);
+    setSplitterMode(preset.setup.splitterMode);
+    setSharedManualRegion(preset.setup.sharedRegion);
+    setSharedManualPair(preset.setup.sharedPair);
+    writeNextSequence(preset.setup.nextSequence);
+    setNextSequence(readNextSequence());
+
+    const targetLabel =
+      preset.setup.splitterMode === 'manual_pair' ? 'manual pair layout' : 'shared area';
+    const existingImagesMessage =
+      splitPairsRef.current.length > 0 ? ' Existing loaded images were kept as-is.' : '';
+    alert(`Loaded preset "${preset.name}" as the active ${targetLabel}.${existingImagesMessage}`);
+  };
+
+  const handleSaveCurrentAsPreset = (name: string) => {
+    const preset = saveSplitterSetupPreset({
+      name,
+      splitterMode,
+      nextSequence,
+      sharedRegion: sharedManualRegion,
+      sharedPair: sharedManualPair
+    });
+
+    if (!preset) {
+      alert('Enter a preset name to save the current splitter setup.');
+      return;
+    }
+
+    refreshSplitterPresets();
+    setIsSavePresetDialogOpen(false);
+  };
+
+  const handleOpenSavePresetDialog = () => {
+    if (!currentSetupSelectionReady) {
+      alert(
+        splitterMode === 'manual_pair'
+          ? 'Set a shared manual pair first, then save it as a preset.'
+          : 'Set a shared area first, then save it as a preset.'
+      );
+      return;
+    }
+
+    setIsSavePresetDialogOpen(true);
+  };
+
+  const handleUpdatePreset = (preset: SplitterSetupPreset) => {
+    if (!currentSetupSelectionReady) {
+      alert(
+        splitterMode === 'manual_pair'
+          ? 'Set a shared manual pair first, then update a preset.'
+          : 'Set a shared area first, then update a preset.'
+      );
+      return;
+    }
+
+    saveSplitterSetupPreset({
+      id: preset.id,
+      name: preset.name,
+      splitterMode,
+      nextSequence,
+      sharedRegion: sharedManualRegion,
+      sharedPair: sharedManualPair
+    });
+    refreshSplitterPresets();
+  };
+
+  const handleDeletePreset = (preset: SplitterSetupPreset) => {
+    if (!window.confirm(`Delete splitter preset "${preset.name}"?`)) return;
+    setSplitterPresets(deleteSplitterSetupPreset(preset.id));
+  };
 
   const readyPairs = splitPairs.filter(isSplitReady);
   const readyPairCount = readyPairs.length;
@@ -1433,6 +1537,102 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
               </div>
             </div>
 
+            <div className="p-3 border-2 border-black rounded-xl bg-white space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[11px] font-black uppercase text-slate-500">Splitter Presets</div>
+                  <div className="text-sm font-black">
+                    {splitterPresets.length} saved setup{splitterPresets.length === 1 ? '' : 's'}
+                  </div>
+                </div>
+                <button
+                  onClick={handleOpenSavePresetDialog}
+                  disabled={isProcessing}
+                  className={`px-3 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase inline-flex items-center gap-2 ${
+                    isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#DBEAFE] hover:bg-[#BFDBFE]'
+                  }`}
+                >
+                  <Plus size={12} strokeWidth={2.5} />
+                  <span>Save Current</span>
+                </button>
+              </div>
+
+              <div className="text-xs font-bold text-slate-600">
+                Save named splitter setups and reload them later. Shared-area presets also show up in Frame Extractor
+                for Super Image tools.
+              </div>
+
+              {splitterPresets.length === 0 ? (
+                <div className="rounded-xl border-2 border-dashed border-black/30 bg-slate-50 px-3 py-4 text-xs font-bold text-slate-500">
+                  Save your current splitter setup as a reusable preset once the shared area or manual pair is ready.
+                </div>
+              ) : (
+                <div className="max-h-56 space-y-2 overflow-auto pr-1">
+                  {splitterPresets.map((preset) => {
+                    const hasSelection =
+                      preset.setup.splitterMode === 'manual_pair'
+                        ? Boolean(preset.setup.sharedPair)
+                        : Boolean(preset.setup.sharedRegion);
+
+                    return (
+                      <div key={preset.id} className="rounded-xl border-2 border-black bg-slate-50 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="break-words text-sm font-black text-slate-900">{preset.name}</div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] font-black uppercase text-slate-600">
+                              <span className="rounded-full border border-black bg-white px-2 py-1">
+                                {preset.setup.splitterMode === 'manual_pair' ? 'Manual Pair' : 'Shared Area'}
+                              </span>
+                              <span className="rounded-full border border-black bg-white px-2 py-1">
+                                #{preset.setup.nextSequence}
+                              </span>
+                              <span>{formatPresetDate(preset.updatedAt)}</span>
+                            </div>
+                            <div className="mt-2 text-[11px] font-bold text-slate-600">
+                              {hasSelection
+                                ? preset.setup.splitterMode === 'manual_pair'
+                                  ? 'Loads a saved linked-square pair for the splitter batch.'
+                                  : 'Loads a saved shared split area and makes it available across the app.'
+                                : 'This preset has no active shared selection saved.'}
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => applySplitterPreset(preset)}
+                              disabled={isProcessing}
+                              className={`px-3 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase ${
+                                isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-white hover:bg-slate-100'
+                              }`}
+                            >
+                              Load
+                            </button>
+                            <button
+                              onClick={() => handleUpdatePreset(preset)}
+                              disabled={isProcessing}
+                              className={`px-3 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase ${
+                                isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#FDE68A] hover:bg-[#FCD34D]'
+                              }`}
+                            >
+                              Update
+                            </button>
+                            <button
+                              onClick={() => handleDeletePreset(preset)}
+                              disabled={isProcessing}
+                              className={`px-3 py-2 border-2 border-black rounded-lg text-[10px] font-black uppercase ${
+                                isProcessing ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#FEE2E2] hover:bg-[#FECACA]'
+                              }`}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <button
                 onClick={handleExportSetup}
@@ -1916,11 +2116,8 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
                   {manualPairEditor.assistResult && (
                     <div className="border-2 border-black rounded-xl bg-white p-3 text-xs font-bold text-slate-700">
                       Assist shift: dx {manualPairEditor.assistResult.dx >= 0 ? '+' : ''}
-                      {manualPairEditor.assistResult.dx}px, dy{' '}
-                      {manualPairEditor.assistResult.dy >= 0 ? '+' : ''}
-                      {manualPairEditor.assistResult.dy}px, score {manualPairEditor.assistResult.score}.
-                      The editor keeps both boxes on the same row, so only the horizontal placement
-                      is applied visually.
+                      {manualPairEditor.assistResult.dx}px, score {manualPairEditor.assistResult.score}.
+                      The diff box stays on the same row and only the horizontal placement is applied.
                     </div>
                   )}
 
@@ -2038,6 +2235,21 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
           </div>
         </div>
       )}
+
+      <TextPromptDialog
+        open={isSavePresetDialogOpen}
+        onOpenChange={setIsSavePresetDialogOpen}
+        title="Save Splitter Preset"
+        description={
+          splitterMode === 'manual_pair'
+            ? 'Save the current linked-square splitter setup with a reusable name.'
+            : 'Save the current shared-area splitter setup with a reusable name.'
+        }
+        label="Preset Name"
+        placeholder={splitterMode === 'manual_pair' ? 'Manual pair preset' : 'Shared area preset'}
+        confirmLabel="Save Preset"
+        onConfirm={handleSaveCurrentAsPreset}
+      />
     </div>
   );
 }

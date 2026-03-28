@@ -72,7 +72,10 @@ import {
   saveVideoAssetFromFile
 } from '../services/videoAssetStore';
 import { readVideoFileMetadata } from '../services/frameExtractor';
-import { VIDEO_AUDIO_POOL_DEFINITIONS } from '../utils/videoAudioPools';
+import {
+  VIDEO_AUDIO_CUE_POOL_MAX_VOLUME,
+  VIDEO_AUDIO_POOL_DEFINITIONS
+} from '../utils/videoAudioPools';
 
 interface VideoSettingsPanelProps {
   settings: VideoSettings;
@@ -86,6 +89,8 @@ interface VideoSettingsPanelProps {
   onDuplicateVideoPackage: () => void;
   onRenameVideoPackage: (packageId: string) => void;
   onDeleteVideoPackage: (packageId: string) => void;
+  onExportVideoPackage: () => void | Promise<void>;
+  onImportVideoPackage: () => void;
   onExport: () => void | Promise<void>;
   isExporting: boolean;
   exportProgress: number;
@@ -626,6 +631,8 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   onDuplicateVideoPackage,
   onRenameVideoPackage,
   onDeleteVideoPackage,
+  onExportVideoPackage,
+  onImportVideoPackage,
   onExport,
   isExporting,
   exportProgress,
@@ -1426,6 +1433,32 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                       }`}
                     >
                       Delete
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void onExportVideoPackage();
+                      }}
+                      disabled={!selectedVideoPackage}
+                      className={`inline-flex items-center justify-center gap-2 rounded-xl border-2 border-black px-3 py-2 text-[10px] font-black uppercase ${
+                        selectedVideoPackage
+                          ? 'bg-[#E9D5FF] hover:bg-[#DDD6FE]'
+                          : 'bg-slate-200 text-slate-500'
+                      }`}
+                    >
+                      <Download size={12} strokeWidth={2.5} />
+                      Export
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onImportVideoPackage}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border-2 border-black bg-[#BFDBFE] px-3 py-2 text-[10px] font-black uppercase hover:bg-[#93C5FD]"
+                    >
+                      <Upload size={12} strokeWidth={2.5} />
+                      Import
                     </button>
                   </div>
 
@@ -2588,7 +2621,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
 
                   <div>
                     <div className="flex justify-between mb-1 text-xs font-black uppercase">
-                      <span>Audio Volume</span>
+                      <span>Master SFX Volume</span>
                       <span>{Math.round(settings.soundEffectsVolume * 100)}%</span>
                     </div>
                     <input
@@ -2674,6 +2707,27 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                             <span className="rounded-full border-2 border-black bg-white px-2 py-1 text-[10px] font-black uppercase text-slate-700">
                               {pool.enabled ? 'Live In Mix' : 'Muted'}
                             </span>
+                          </div>
+
+                          <div>
+                            <div className="mb-1 flex justify-between text-[10px] font-black uppercase">
+                              <span>Cue Volume</span>
+                              <span>{Math.round(pool.volume * 100)}%</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max={VIDEO_AUDIO_CUE_POOL_MAX_VOLUME}
+                              step="0.01"
+                              value={pool.volume}
+                              onChange={(event) =>
+                                updateAudioCuePool(definition.key, {
+                                  volume: Number(event.target.value)
+                                })
+                              }
+                              disabled={!isPoolInteractive}
+                              className={`${sliderClass} disabled:cursor-not-allowed disabled:opacity-40`}
+                            />
                           </div>
 
                           {definition.key === 'puzzle_play' ? (

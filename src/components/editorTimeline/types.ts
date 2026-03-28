@@ -22,7 +22,6 @@ export interface EditorTimelineClip {
   color: string;
   subtitle?: string;
   previewUrl?: string | null;
-  thumbnailHints?: string[];
   waveform?: number[];
   effects?: EditorTimelineEffectMeta[];
   editable?: boolean;

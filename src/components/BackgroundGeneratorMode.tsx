@@ -209,7 +209,7 @@ export function BackgroundGeneratorMode({
   };
 
   const aspectLabel = selectedPack ? `${selectedPack.aspectRatio} pack` : `${aspectRatio} pack`;
-  const starterThumbnails = selectedPack ? selectedPack.backgrounds.slice(0, 8) : [];
+  const starterSamples = selectedPack ? selectedPack.backgrounds.slice(0, 8) : [];
 
   return (
     <div className="mx-auto w-full max-w-7xl p-3 sm:p-4 md:p-6">
@@ -488,7 +488,7 @@ export function BackgroundGeneratorMode({
                 <span className="text-[10px] font-bold uppercase text-slate-500">First eight recipes</span>
               </div>
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {starterThumbnails.map((background, index) => (
+                {starterSamples.map((background, index) => (
                   <button
                     key={background.id}
                     type="button"

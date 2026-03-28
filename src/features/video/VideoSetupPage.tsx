@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ConfirmDialog } from '../../app/components/ConfirmDialog';
 import { TextPromptDialog } from '../../app/components/TextPromptDialog';
 import { VideoSettingsPanel } from '../../components/VideoSettingsPanel';
 import type { VideoSettings, VideoUserPackage } from '../../types';
 import { migrateInlineImageSource } from '../../services/imageAssetStore';
+import { downloadJsonFile } from '../../services/jsonTransfer';
 import { notifyError, notifyInfo, notifySuccess } from '../../services/notifications';
+import {
+  applyVideoPackageTransferBundle,
+  createVideoPackageTransferBundle,
+  resolveImportedVideoPackageSettings
+} from '../../services/videoPackageTransfer';
 import { exportVideoWithWebCodecs } from '../../services/videoExport';
 import { useAppStore } from '../../store/appStore';
 import { beginExportJob, cancelExportJobEntry, completeExportJob, failExportJob, patchExportJob } from '../shared/exportJobs';
@@ -31,8 +37,16 @@ const normalizeVideoSettingsLogo = async (settings: VideoSettings): Promise<Vide
   };
 };
 
+const slugifyPackageFileName = (name: string) =>
+  (name
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'video-package');
+
 export default function VideoSetupPage() {
   const navigate = useNavigate();
+  const importPackageInputRef = useRef<HTMLInputElement | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState('');
@@ -46,12 +60,14 @@ export default function VideoSetupPage() {
   const videoPackageLibrary = useAppStore((state) => state.video.videoPackageLibrary);
   const backgroundPacksSessionId = useAppStore((state) => state.video.backgroundPacksSessionId);
   const setVideoSettings = useAppStore((state) => state.setVideoSettings);
+  const applyVideoPackageLibraryState = useAppStore((state) => state.applyVideoPackageLibraryState);
   const selectVideoPackage = useAppStore((state) => state.selectVideoPackage);
   const createVideoPackage = useAppStore((state) => state.createVideoPackage);
   const duplicateActiveVideoPackage = useAppStore((state) => state.duplicateActiveVideoPackage);
   const renameVideoPackage = useAppStore((state) => state.renameVideoPackage);
   const deleteVideoPackage = useAppStore((state) => state.deleteVideoPackage);
   const changeVideoAspectRatio = useAppStore((state) => state.changeVideoAspectRatio);
+  const bumpBackgroundPacksSession = useAppStore((state) => state.bumpBackgroundPacksSession);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,8 +195,82 @@ export default function VideoSetupPage() {
     navigate('/video/preview');
   };
 
+  const handleExportVideoPackage = async () => {
+    if (!activePackage) {
+      notifyError('Select a video package before exporting.');
+      return;
+    }
+
+    try {
+      const bundle = await createVideoPackageTransferBundle(activePackage);
+      const timestamp = bundle.exportedAt.replace(/[:.]/g, '-');
+      downloadJsonFile(
+        bundle,
+        `${slugifyPackageFileName(activePackage.name)}-${timestamp}.json`
+      );
+      notifySuccess(`Exported "${activePackage.name}".`);
+    } catch (error) {
+      notifyError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : 'Could not export that video package.'
+      );
+    }
+  };
+
+  const handleImportVideoPackageFile = async (file: File) => {
+    try {
+      const raw = await file.text();
+      const result = await applyVideoPackageTransferBundle(raw, {
+        library: useAppStore.getState().video.videoPackageLibrary,
+        defaultSettings: useAppStore.getState().video.appDefaults.videoDefaults
+      });
+      const nextLibrary = {
+        packages: [
+          ...useAppStore.getState().video.videoPackageLibrary.packages,
+          result.videoPackage
+        ],
+        activePackageId: result.videoPackage.id
+      };
+      applyVideoPackageLibraryState(
+        nextLibrary,
+        resolveImportedVideoPackageSettings(
+          result.videoPackage,
+          useAppStore.getState().video.appDefaults.videoDefaults
+        )
+      );
+      if (result.backgroundPack) {
+        bumpBackgroundPacksSession();
+      }
+      notifySuccess(
+        `Imported "${result.videoPackage.name}"${result.backgroundPack ? ' with its background pack.' : '.'}`
+      );
+    } catch (error) {
+      notifyError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : 'Could not import that video package.'
+      );
+    }
+  };
+
   return (
     <div className="h-[100dvh] overflow-hidden">
+      <input
+        ref={importPackageInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = '';
+          if (!file) {
+            return;
+          }
+          void handleImportVideoPackageFile(file);
+        }}
+      />
+
       <VideoSettingsPanel
         settings={videoSettings}
         puzzles={batch}
@@ -218,6 +308,8 @@ export default function VideoSetupPage() {
           const target = videoPackageLibrary.packages.find((entry) => entry.id === packageId) ?? null;
           setDeleteTarget(target);
         }}
+        onExportVideoPackage={handleExportVideoPackage}
+        onImportVideoPackage={() => importPackageInputRef.current?.click()}
         onExport={handleExport}
         isExporting={isExporting}
         exportProgress={exportProgress}

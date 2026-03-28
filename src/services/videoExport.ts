@@ -117,6 +117,11 @@ interface ActivePreviewFrameRequest {
   cleanupAbort: () => void;
 }
 
+export interface VideoFramePreviewRenderer {
+  render: (options: RenderVideoFramePreviewOptions) => Promise<RenderedVideoFramePreview>;
+  dispose: () => void;
+}
+
 const activeSessions = new Set<ActiveVideoExportSession>();
 let nextVideoExportSessionId = 1;
 let previewWorker: Worker | null = null;
@@ -197,6 +202,179 @@ const ensurePreviewWorker = () => {
   };
 
   return previewWorker;
+};
+
+export const createIsolatedVideoFramePreviewRenderer = (): VideoFramePreviewRenderer => {
+  let worker: Worker | null = null;
+  let nextRequestId = 1;
+  let activeRequest: ActivePreviewFrameRequest | null = null;
+
+  const resetWorker = () => {
+    if (worker) {
+      worker.terminate();
+      worker = null;
+    }
+  };
+
+  const clearRequest = (request: ActivePreviewFrameRequest | null) => {
+    if (!request) return;
+    if (activeRequest?.id === request.id) {
+      activeRequest = null;
+    }
+    request.cleanupAbort();
+  };
+
+  const ensureWorker = () => {
+    if (worker) {
+      return worker;
+    }
+
+    worker = new Worker(new URL('../workers/videoExport.worker.ts', import.meta.url), {
+      type: 'module'
+    });
+
+    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+      const message = event.data;
+      const request = activeRequest;
+      if (!request) return;
+
+      if ('requestId' in message && typeof message.requestId === 'number' && message.requestId !== request.id) {
+        return;
+      }
+
+      if (message.type === 'preview-frame-done') {
+        clearRequest(request);
+        request.resolve({
+          blob: new Blob([message.buffer], { type: message.mimeType }),
+          mimeType: message.mimeType
+        });
+        return;
+      }
+
+      if (message.type === 'cancelled') {
+        clearRequest(request);
+        request.reject(new DOMException('Preview canceled', 'AbortError'));
+        return;
+      }
+
+      if (message.type === 'error') {
+        clearRequest(request);
+        request.reject(new Error(message.message));
+      }
+    };
+
+    worker.onerror = (event) => {
+      const request = activeRequest;
+      clearRequest(request);
+      resetWorker();
+      if (!request) return;
+      const detail = event.message ? ` ${event.message}` : '';
+      request.reject(new Error(`Video preview worker crashed.${detail}`));
+    };
+
+    return worker;
+  };
+
+  return {
+    dispose: () => {
+      clearRequest(activeRequest);
+      try {
+        worker?.postMessage({ type: 'cancel' });
+      } catch {
+        // Ignore cancellation failures during cleanup.
+      }
+      resetWorker();
+    },
+    render: async ({
+      source = 'legacy',
+      puzzles,
+      settings,
+      timestamp,
+      signal
+    }: RenderVideoFramePreviewOptions) => {
+      const introVideoFile = await resolveIntroVideoFile(settings);
+      if (signal?.aborted) {
+        throw new DOMException('Preview canceled', 'AbortError');
+      }
+
+      return await new Promise<RenderedVideoFramePreview>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new DOMException('Preview canceled', 'AbortError'));
+          return;
+        }
+
+        if (activeRequest) {
+          const previousRequest = activeRequest;
+          clearRequest(previousRequest);
+          try {
+            worker?.postMessage({ type: 'cancel' });
+          } catch {
+            // Ignore worker cancellation failures and reset below.
+          }
+          resetWorker();
+          previousRequest.reject(new DOMException('Preview canceled', 'AbortError'));
+        }
+
+        const liveWorker = ensureWorker();
+        const requestId = nextRequestId++;
+        let settled = false;
+
+        const cleanupAbort = () => {
+          if (signal) {
+            signal.removeEventListener('abort', handleAbort);
+          }
+        };
+
+        const handleAbort = () => {
+          if (settled) return;
+          settled = true;
+          if (activeRequest?.id === requestId) {
+            activeRequest = null;
+          }
+          cleanupAbort();
+          try {
+            liveWorker.postMessage({ type: 'cancel', requestId });
+          } catch {
+            // Ignore worker cancellation failures on abort.
+          }
+          resetWorker();
+          reject(new DOMException('Preview canceled', 'AbortError'));
+        };
+
+        activeRequest = {
+          id: requestId,
+          resolve: (result) => {
+            if (settled) return;
+            settled = true;
+            resolve(result);
+          },
+          reject: (error) => {
+            if (settled) return;
+            settled = true;
+            reject(error);
+          },
+          cleanupAbort
+        };
+
+        if (signal) {
+          signal.addEventListener('abort', handleAbort, { once: true });
+        }
+
+        liveWorker.postMessage({
+          type: 'preview-frame',
+          requestId,
+          payload: {
+            source,
+            puzzles,
+            settings,
+            timestamp,
+            generatedBackgroundPack: resolveGeneratedBackgroundPack(settings),
+            introVideoFile: introVideoFile ?? undefined
+          }
+        });
+      });
+    }
+  };
 };
 
 const downloadBlob = (blob: Blob, fileName: string) => {
@@ -348,7 +526,7 @@ const buildWorkerStartPayload = (
   const audioTransferables = collectAudioTransferables(audioAssets);
   if (options.source === 'binary') {
     // Binary Super Export batches can be rendered more than once
-    // (thumbnail preview first, then full video export). Clone the buffers
+    // across separate render passes. Clone the buffers
     // before transferring so the originals stay usable for later passes.
     const clonedPuzzles = options.puzzles.map((puzzle) => ({
       ...puzzle,

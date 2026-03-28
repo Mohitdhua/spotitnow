@@ -1,4 +1,4 @@
-import { Download, Film, Layers, PencilLine, Play, Trash2, Upload, Wand2 } from 'lucide-react';
+import { Download, Film, Image as ImageIcon, Layers, PencilLine, Play, Trash2, Upload, Wand2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import { ConfirmDialog } from '../../app/components/ConfirmDialog';
@@ -148,6 +148,13 @@ export default function CreateReviewPage() {
           >
             <Wand2 size={14} strokeWidth={2.5} />
             Editor Studio
+          </Link>
+          <Link
+            to="/tools/thumbnail"
+            className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-[#FFF7ED] px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-900 hover:bg-[#FDE68A]"
+          >
+            <ImageIcon size={14} strokeWidth={2.5} />
+            Batch Thumbnails
           </Link>
           <button
             type="button"

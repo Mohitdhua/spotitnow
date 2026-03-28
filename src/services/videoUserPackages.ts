@@ -52,6 +52,32 @@ const isFiniteNumber = (value: unknown): value is number =>
 const createPackageId = () =>
   `video-package-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+const normalizeNameKey = (value: string) => value.trim().toLocaleLowerCase();
+
+const resolveUniqueImportedPackageName = (
+  preferredName: string,
+  existingNames: string[]
+) => {
+  const safeBase = preferredName.trim() || 'Imported Package';
+  const takenNames = new Set(existingNames.map(normalizeNameKey));
+
+  if (!takenNames.has(normalizeNameKey(safeBase))) {
+    return safeBase;
+  }
+
+  const importedBase = `${safeBase} (Imported)`;
+  if (!takenNames.has(normalizeNameKey(importedBase))) {
+    return importedBase;
+  }
+
+  let suffix = 2;
+  while (takenNames.has(normalizeNameKey(`${safeBase} (Imported ${suffix})`))) {
+    suffix += 1;
+  }
+
+  return `${safeBase} (Imported ${suffix})`;
+};
+
 const mergeVideoSettings = (
   input: Partial<VideoSettings>,
   fallbackSettings: VideoSettings
@@ -569,4 +595,31 @@ export const deleteVideoUserPackageFromLibrary = (
   );
 
   return nextLibrary;
+};
+
+export const createImportedVideoUserPackage = (
+  input: unknown,
+  library: VideoUserPackageLibraryState,
+  defaultSettings: VideoSettings = DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults
+): VideoUserPackage | null => {
+  const importedPackage = sanitizeVideoUserPackage(input, defaultSettings);
+  if (!importedPackage) {
+    return null;
+  }
+
+  const uniqueName = resolveUniqueImportedPackageName(
+    importedPackage.name,
+    library.packages.map((entry) => entry.name)
+  );
+
+  return createVideoUserPackageFromSettings(
+    uniqueName,
+    applyVideoUserPackageToSettings(importedPackage, defaultSettings),
+    {
+      createdAt: importedPackage.createdAt,
+      updatedAt: Date.now(),
+      lastUsedAt: Date.now(),
+      existingAspectLayouts: importedPackage.aspectLayouts
+    }
+  );
 };

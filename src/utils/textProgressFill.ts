@@ -10,6 +10,16 @@ export interface TextProgressFillColors {
   end: string;
 }
 
+export interface TextProgressSpan {
+  left: number;
+  width: number;
+}
+
+export interface TextProgressFillSpan extends TextProgressSpan {
+  fillRatio: number;
+  fillWidth: number;
+}
+
 export const TEXT_PROGRESS_EMPTY_FILL = '#FFFFFF';
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -59,6 +69,80 @@ const mixPalette = (from: TextProgressFillColors, to: TextProgressFillColors, am
   middle: mixHexColor(from.middle, to.middle, amount),
   end: mixHexColor(from.end, to.end, amount)
 });
+
+let textProgressMeasureCanvas: HTMLCanvasElement | null = null;
+
+const resolveMeasuredTextProgressWidth = (
+  containerWidth: number,
+  metricsOrWidth:
+    | number
+    | Pick<TextMetrics, 'width' | 'actualBoundingBoxLeft' | 'actualBoundingBoxRight'>
+) => {
+  if (typeof metricsOrWidth === 'number') {
+    return Math.max(1, Math.min(containerWidth, metricsOrWidth));
+  }
+
+  return Math.max(
+    1,
+    Math.min(
+      containerWidth,
+      Math.max(
+        metricsOrWidth.width,
+        (metricsOrWidth.actualBoundingBoxLeft || 0) + (metricsOrWidth.actualBoundingBoxRight || 0)
+      )
+    )
+  );
+};
+
+export const resolveTextProgressSpanFromMetrics = (
+  containerWidth: number,
+  metricsOrWidth:
+    | number
+    | Pick<TextMetrics, 'width' | 'actualBoundingBoxLeft' | 'actualBoundingBoxRight'>
+): TextProgressSpan => {
+  const safeWidth = Math.max(1, containerWidth);
+  const measuredWidth = resolveMeasuredTextProgressWidth(safeWidth, metricsOrWidth);
+  return {
+    left: Math.max(0, (safeWidth - measuredWidth) / 2),
+    width: measuredWidth
+  };
+};
+
+export const measureTextProgressSpan = (
+  text: string,
+  containerWidth: number,
+  fontSize: number,
+  fontFamily: string,
+  fontWeight: number | string
+): TextProgressSpan => {
+  const safeWidth = Math.max(1, containerWidth);
+  if (typeof document === 'undefined') {
+    return { left: 0, width: safeWidth };
+  }
+
+  textProgressMeasureCanvas ??= document.createElement('canvas');
+  const ctx = textProgressMeasureCanvas.getContext('2d');
+  if (!ctx) {
+    return { left: 0, width: safeWidth };
+  }
+
+  ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  return resolveTextProgressSpanFromMetrics(safeWidth, ctx.measureText(text.trim() || 'PROGRESS'));
+};
+
+export const resolveTextProgressFillSpan = (
+  span: TextProgressSpan,
+  fillRatio: number
+): TextProgressFillSpan => {
+  const safeWidth = Math.max(1, span.width);
+  const clampedRatio = clamp(fillRatio, 0, 1);
+  return {
+    left: span.left,
+    width: safeWidth,
+    fillRatio: clampedRatio,
+    fillWidth: safeWidth * clampedRatio
+  };
+};
 
 export const resolveSmoothTextProgressFillColors = (
   remainingPercent: number,

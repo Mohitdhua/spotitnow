@@ -170,7 +170,16 @@ export type GeneratedProgressBarStyle =
   | 'arcade'
   | 'ivory'
   | 'storybook'
-  | 'heat';
+  | 'heat'
+  | 'voltage'
+  | 'sunburst'
+  | 'hyperpop'
+  | 'laser'
+  | 'toxic'
+  | 'inferno'
+  | 'blackout'
+  | 'obsidian_gold'
+  | 'chrome_furnace';
 
 export type GeneratedProgressBarRenderMode = 'bar' | 'text_fill';
 
@@ -238,6 +247,7 @@ export type VideoAudioCuePoolKey =
 
 export interface VideoAudioCuePool {
   enabled: boolean;
+  volume: number;
   sources: string[];
 }
 
@@ -496,6 +506,7 @@ export type AppRoute =
   | '/video/setup'
   | '/video/preview'
   | '/video/overlay'
+  | '/tools/thumbnail'
   | '/tools/splitter'
   | '/tools/extractor'
   | '/tools/upscaler'

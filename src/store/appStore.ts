@@ -1,5 +1,6 @@
 import type { SetStateAction } from 'react';
 import { create } from 'zustand';
+import { normalizeAppRoute } from '../app/normalizeAppRoute';
 import type {
   AppRoute,
   ExportJob,
@@ -555,7 +556,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         },
         ui: {
           ...state.ui,
-          lastRoute: project.uiSnapshot.lastRoute
+          lastRoute: normalizeAppRoute(project.uiSnapshot?.lastRoute)
         },
         projects: {
           ...state.projects,

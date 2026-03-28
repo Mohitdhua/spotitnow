@@ -1,5 +1,10 @@
 import type { VideoAudioCuePool, VideoAudioCuePoolKey, VideoAudioCuePools } from '../types';
 
+export const VIDEO_AUDIO_CUE_POOL_MAX_VOLUME = 1.5;
+
+const clampPoolVolume = (value: number) =>
+  Math.min(VIDEO_AUDIO_CUE_POOL_MAX_VOLUME, Math.max(0, value));
+
 export const VIDEO_AUDIO_POOL_KEYS: VideoAudioCuePoolKey[] = [
   'progress_fill_intro',
   'puzzle_play',
@@ -48,6 +53,7 @@ export const VIDEO_AUDIO_POOL_DEFINITIONS: Array<{
 
 const createDefaultPool = (): VideoAudioCuePool => ({
   enabled: true,
+  volume: 1,
   sources: []
 });
 
@@ -77,6 +83,10 @@ export const sanitizeVideoAudioCuePools = (
     const poolRecord = rawPool && typeof rawPool === 'object' ? (rawPool as Partial<VideoAudioCuePool>) : {};
     next[key] = {
       enabled: typeof poolRecord.enabled === 'boolean' ? poolRecord.enabled : safeFallback[key]?.enabled ?? defaults[key].enabled,
+      volume:
+        Number.isFinite(Number(poolRecord.volume))
+          ? clampPoolVolume(Number(poolRecord.volume))
+          : clampPoolVolume(safeFallback[key]?.volume ?? defaults[key].volume),
       sources: normalizeSources(poolRecord.sources).length > 0 ? normalizeSources(poolRecord.sources) : safeFallback[key]?.sources ?? defaults[key].sources
     };
   });

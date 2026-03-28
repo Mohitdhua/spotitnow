@@ -9,7 +9,16 @@ import {
   resolveProgressBarFillStyle,
   type ProgressBarVisualStyle
 } from '../constants/progressBarThemes';
-import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import {
+  measureTextProgressSpan,
+  resolveSmoothTextProgressFillColors,
+  resolveTextProgressFillSpan
+} from '../utils/textProgressFill';
+import {
+  resolveTextProgressBaseAccent,
+  resolveTextProgressEffectFrame,
+  resolveTextProgressShellStyle
+} from '../utils/textProgressEffects';
 
 interface ProgressBarModeProps {
   settings: VideoSettings;
@@ -53,13 +62,40 @@ const TextFillProgressPreview: React.FC<{
   remainingRatio: number;
   width: number;
   height: number;
-}> = ({ style, theme, label, remainingRatio, width, height }) => {
+  animationSeconds: number;
+}> = ({ style, theme, label, remainingRatio, width, height, animationSeconds }) => {
   const svgId = useId().replace(/:/g, '');
-  const fillWidth = Math.max(0, Math.min(width, width * remainingRatio));
   const safeLabel = label.trim() || 'PROGRESS';
-  const fontSize = resolveTextProgressFontSize(safeLabel, width, height, Math.max(16, height * 0.56));
-  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08));
   const fillColors = resolveTextProgressFillColors(remainingRatio * 100, style, theme);
+  const shellStyle = resolveTextProgressShellStyle(style, fillColors);
+  const fontSize = Math.max(
+    12,
+    Math.round(
+      resolveTextProgressFontSize(safeLabel, width, height, Math.max(16, height * 0.56)) *
+        shellStyle.fontScale
+    )
+  );
+  const textSpan = measureTextProgressSpan(
+    safeLabel,
+    width,
+    fontSize,
+    '"Arial Black", "Segoe UI", sans-serif',
+    900
+  );
+  const fillSpan = resolveTextProgressFillSpan(textSpan, remainingRatio);
+  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08 * shellStyle.strokeScale));
+  const textEffects = resolveTextProgressEffectFrame({
+    style,
+    width,
+    height,
+    fillX: fillSpan.left,
+    fillWidth: fillSpan.fillWidth,
+    spanWidth: fillSpan.width,
+    fillRatio: fillSpan.fillRatio,
+    animationSeconds,
+    fillColors
+  });
+  const baseAccent = resolveTextProgressBaseAccent(style, fillColors);
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="block h-full w-full overflow-visible" preserveAspectRatio="none">
@@ -89,15 +125,41 @@ const TextFillProgressPreview: React.FC<{
         fontFamily='"Arial Black", "Segoe UI", sans-serif'
         fontWeight="900"
         fontSize={fontSize}
-        fill={TEXT_PROGRESS_EMPTY_FILL}
-        stroke="#111827"
+        fill={shellStyle.fill}
+        stroke={shellStyle.stroke}
         strokeWidth={strokeWidth}
         paintOrder="stroke fill"
       >
         {safeLabel}
       </text>
       <g clipPath={`url(#${svgId}-clip)`}>
-        <rect x="0" y="0" width={fillWidth} height={height} fill={`url(#${svgId}-gradient)`} />
+        <rect x={fillSpan.left} y="0" width={fillSpan.fillWidth} height={height} fill={`url(#${svgId}-gradient)`} />
+        {baseAccent && (
+          <rect x={fillSpan.left} y="0" width={fillSpan.fillWidth} height={height} fill={baseAccent} opacity={0.08} />
+        )}
+        {textEffects.bands.map((band, index) => (
+          <rect
+            key={`band-${index}`}
+            x={band.x - band.width / 2}
+            y={band.y - band.height / 2}
+            width={band.width}
+            height={band.height}
+            fill={band.color}
+            opacity={band.opacity}
+            transform={`rotate(${band.angle} ${band.x} ${band.y})`}
+          />
+        ))}
+        {textEffects.orbs.map((orb, index) => (
+          <ellipse
+            key={`orb-${index}`}
+            cx={orb.cx}
+            cy={orb.cy}
+            rx={orb.rx}
+            ry={orb.ry}
+            fill={orb.color}
+            opacity={orb.opacity}
+          />
+        ))}
       </g>
     </svg>
   );
@@ -389,6 +451,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                       remainingRatio={remainingRatio}
                       width={720}
                       height={56}
+                      animationSeconds={previewTime}
                     />
                   </div>
                 ) : (
@@ -664,6 +727,7 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                           remainingRatio={0.72}
                           width={220}
                           height={34}
+                          animationSeconds={1.6}
                         />
                       </div>
                     ) : (

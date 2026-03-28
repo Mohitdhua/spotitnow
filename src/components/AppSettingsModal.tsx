@@ -11,9 +11,7 @@ import {
 } from '../services/appSettings';
 import { CustomVideoLayout, VideoSettings } from '../types';
 import { VIDEO_PACKAGE_PRESETS, VIDEO_REVEAL_BEHAVIOR_OPTIONS } from '../constants/videoPackages';
-import { SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES } from '../constants/superExportThumbnailCopyTemplates';
 import { VIDEO_TRANSITION_STYLE_OPTIONS } from '../constants/videoStyleModules';
-import { SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS } from '../constants/superExportThumbnailStyles';
 import { TimestampPresetPicker } from './TimestampPresetPicker';
 import { loadGameAudioMuted } from '../services/gameAudio';
 import { loadWatermarkPresets } from '../services/watermarkPresets';
@@ -76,29 +74,6 @@ const labelize = (value: string) =>
     .join(' ');
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-const buildThumbnailCopyText = (title: string, subtitle: string) =>
-  [title.trim(), subtitle.trim()].filter(Boolean).join('\n');
-
-const parseThumbnailCopyText = (value: string) => {
-  const lines = value
-    .replace(/\r/g, '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    return {
-      title: '',
-      subtitle: ''
-    };
-  }
-
-  return {
-    title: lines[0] ?? '',
-    subtitle: lines.slice(1).join(' ')
-  };
-};
 
 const SPLITTER_MODE_OPTIONS: Array<{ value: SplitterModePreference; label: string }> = [
   { value: 'shared_area', label: 'Shared Area' },
@@ -205,20 +180,6 @@ export function AppSettingsModal({
       }
     }));
   };
-  const updateFrameExtractorThumbnailDefaults = (
-    patch: Partial<FrameExtractorDefaults['superExportThumbnail']>
-  ) => {
-    setDraft((current) => ({
-      ...current,
-      frameExtractorDefaults: {
-        ...current.frameExtractorDefaults,
-        superExportThumbnail: {
-          ...current.frameExtractorDefaults.superExportThumbnail,
-          ...patch
-        }
-      }
-    }));
-  };
   const hasSavedVideoLayout = Boolean(savedVideoLayout);
   const setTransferFeedback = (tone: 'success' | 'error', message: string) => {
     setTransferTone(tone);
@@ -313,8 +274,9 @@ export function AppSettingsModal({
               <div>
                 <div className="text-sm font-black uppercase">Backup + Sync</div>
                 <div className="mt-1 text-[11px] font-bold uppercase tracking-wide text-slate-600">
-                  Export one JSON backup with app defaults, splitter setup, timestamp presets, watermark presets,
-                  video packages, saved background packs, the saved video layout snapshot, and game sound preference.
+                  Export one JSON backup with app defaults, splitter setup, splitter presets, timestamp presets,
+                  watermark presets, video packages, saved background packs, the saved video layout snapshot, and
+                  game sound preference.
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -875,7 +837,7 @@ export function AppSettingsModal({
             <div>
               <div className="text-sm font-black uppercase">Frame Extractor Defaults</div>
               <div className="mt-1 text-[11px] font-bold uppercase tracking-wide text-slate-600">
-                Super Export now follows the current video package and video mode settings. These defaults only cover extraction output, watermark cleanup, and thumbnail behavior.
+                Super Export now follows the current video package and video mode settings. These defaults only cover extraction output and watermark cleanup.
               </div>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -986,173 +948,6 @@ export function AppSettingsModal({
                   ))}
                 </select>
               </label>
-            </div>
-
-            <div className="rounded-xl border-2 border-black bg-[#EFF6FF] p-3 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-xs font-black uppercase">Super Export Thumbnail</div>
-                  <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-600">
-                    Renders one thumbnail from the first puzzle of each Super Export batch with timer and progress hidden.
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateFrameExtractorThumbnailDefaults({
-                      enabled: !draft.frameExtractorDefaults.superExportThumbnail.enabled
-                    })
-                  }
-                  className={`rounded-lg border-2 border-black px-3 py-2 text-xs font-black uppercase ${
-                    draft.frameExtractorDefaults.superExportThumbnail.enabled ? 'bg-[#BFDBFE]' : 'bg-white'
-                  }`}
-                >
-                  {draft.frameExtractorDefaults.superExportThumbnail.enabled ? 'On' : 'Off'}
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="text-xs font-black uppercase sm:col-span-2">
-                  Thumbnail Export Mode
-                  <select
-                    value={draft.frameExtractorDefaults.superExportThumbnail.exportMode}
-                    onChange={(event) =>
-                      updateFrameExtractorThumbnailDefaults({
-                        exportMode: event.target.value as typeof draft.frameExtractorDefaults.superExportThumbnail.exportMode
-                      })
-                    }
-                    className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-bold"
-                  >
-                    <option value="with_video">Video + Thumbnail</option>
-                    <option value="thumbnail_only">Thumbnail Only</option>
-                  </select>
-                </label>
-
-                <label className="text-xs font-black uppercase sm:col-span-2">
-                  Thumbnail Style
-                  <select
-                    value={draft.frameExtractorDefaults.superExportThumbnail.stylePreset}
-                    onChange={(event) =>
-                      updateFrameExtractorThumbnailDefaults({
-                        stylePreset: event.target.value as typeof draft.frameExtractorDefaults.superExportThumbnail.stylePreset
-                      })
-                    }
-                    className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-bold"
-                  >
-                    {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.label}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-600">
-                    {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.find(
-                      (preset) => preset.id === draft.frameExtractorDefaults.superExportThumbnail.stylePreset
-                    )?.description ?? 'Use the selected thumbnail preset.'}
-                  </div>
-                </label>
-
-                <label className="text-xs font-black uppercase sm:col-span-2">
-                  Thumbnail Copy
-                  <textarea
-                    rows={3}
-                    value={buildThumbnailCopyText(
-                      draft.frameExtractorDefaults.superExportThumbnail.title,
-                      draft.frameExtractorDefaults.superExportThumbnail.subtitle
-                    )}
-                    onChange={(event) => {
-                      const next = parseThumbnailCopyText(event.target.value);
-                      updateFrameExtractorThumbnailDefaults(next);
-                    }}
-                    className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-bold"
-                    placeholder={'SPOT THE 3 DIFFERENCES\nCan you find them before the reveal?'}
-                  />
-                </label>
-                <div className="sm:col-span-2">
-                  <div className="mb-1 text-[10px] font-black uppercase tracking-wide text-slate-600">
-                    Quick Templates
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES.map((template) => (
-                      <button
-                        key={template.id}
-                        type="button"
-                        onClick={() => updateFrameExtractorThumbnailDefaults(parseThumbnailCopyText(template.text))}
-                        className="rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase hover:bg-slate-100"
-                      >
-                        {template.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="sm:col-span-2 rounded-lg border border-black bg-white p-3">
-                  <div className="mb-3 text-[10px] font-black uppercase tracking-wide text-slate-700">
-                    Default Text Layout
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                    <label className="text-xs font-black uppercase">
-                      <div className="mb-1 flex items-center justify-between">
-                        <span>Text Size</span>
-                        <span>{Math.round(draft.frameExtractorDefaults.superExportThumbnail.textScale * 100)}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0.6"
-                        max="2.4"
-                        step="0.05"
-                        value={draft.frameExtractorDefaults.superExportThumbnail.textScale}
-                        onChange={(event) =>
-                          updateFrameExtractorThumbnailDefaults({
-                            textScale: clamp(Number(event.target.value), 0.6, 2.4)
-                          })
-                        }
-                        className="w-full accent-slate-900"
-                      />
-                    </label>
-                    <label className="text-xs font-black uppercase">
-                      <div className="mb-1 flex items-center justify-between">
-                        <span>Text X</span>
-                        <span>{draft.frameExtractorDefaults.superExportThumbnail.textOffsetX}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="-320"
-                        max="320"
-                        step="4"
-                        value={draft.frameExtractorDefaults.superExportThumbnail.textOffsetX}
-                        onChange={(event) =>
-                          updateFrameExtractorThumbnailDefaults({
-                            textOffsetX: clamp(Math.round(Number(event.target.value)), -320, 320)
-                          })
-                        }
-                        className="w-full accent-slate-900"
-                      />
-                    </label>
-                    <label className="text-xs font-black uppercase">
-                      <div className="mb-1 flex items-center justify-between">
-                        <span>Text Y</span>
-                        <span>{draft.frameExtractorDefaults.superExportThumbnail.textOffsetY}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="-180"
-                        max="180"
-                        step="4"
-                        value={draft.frameExtractorDefaults.superExportThumbnail.textOffsetY}
-                        onChange={(event) =>
-                          updateFrameExtractorThumbnailDefaults({
-                            textOffsetY: clamp(Math.round(Number(event.target.value)), -180, 180)
-                          })
-                        }
-                        className="w-full accent-slate-900"
-                      />
-                    </label>
-                  </div>
-                </div>
-                <div className="sm:col-span-2 rounded-lg border border-black bg-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-600">
-                  One box controls the visible thumbnail copy. Press Enter if you want an optional second line. These defaults also control thumbnail text size and position.
-                </div>
-              </div>
             </div>
 
             <label className="block text-xs font-black uppercase">

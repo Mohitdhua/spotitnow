@@ -1,10 +1,6 @@
 import { VideoSettings } from '../types';
 import { buildDefaultCustomVideoLayout } from '../constants/videoLayoutCustom';
 import {
-  SUPER_EXPORT_THUMBNAIL_STYLE_PRESET_IDS,
-  type SuperExportThumbnailStylePresetId
-} from '../constants/superExportThumbnailStyles';
-import {
   DEFAULT_VIDEO_SCENE_SETTINGS,
   DEFAULT_VIDEO_TEXT_TEMPLATES,
   VIDEO_PACKAGE_PRESETS,
@@ -24,22 +20,7 @@ export interface FrameExtractorDefaults {
   superImageExportMode: SuperImageExportMode;
   superExportWatermarkRemoval: boolean;
   superExportWatermarkPresetId: string;
-  superExportThumbnail: SuperExportThumbnailDefaults;
 }
-
-export interface SuperExportThumbnailDefaults {
-  enabled: boolean;
-  exportMode: SuperExportThumbnailExportMode;
-  stylePreset: SuperExportThumbnailStylePresetId;
-  title: string;
-  subtitle: string;
-  badgeLabel: string;
-  textScale: number;
-  textOffsetX: number;
-  textOffsetY: number;
-}
-
-export type SuperExportThumbnailExportMode = 'with_video' | 'thumbnail_only';
 
 export interface SplitterDefaults {
   filenamePrefix: string;
@@ -73,6 +54,13 @@ export interface SplitterSetupSnapshot {
   sharedPair: SplitterSharedPair | null;
 }
 
+export interface SplitterSetupPreset {
+  id: string;
+  name: string;
+  updatedAt: string;
+  setup: SplitterSetupSnapshot;
+}
+
 export interface AppGlobalSettings {
   videoDefaults: VideoSettings;
   frameExtractorDefaults: FrameExtractorDefaults;
@@ -84,6 +72,7 @@ export const SPLITTER_NEXT_SEQUENCE_KEY = 'spotdiff.splitter.next-sequence';
 export const SPLITTER_SHARED_REGION_KEY = 'spotdiff.splitter.shared-region';
 export const SPLITTER_SHARED_PAIR_KEY = 'spotdiff.splitter.shared-pair';
 export const SPLITTER_MODE_KEY = 'spotdiff.splitter.mode';
+export const SPLITTER_PRESETS_KEY = 'spotdiff.splitter.presets';
 
 export const DEFAULT_SPLITTER_SETUP: SplitterSetupSnapshot = {
   kind: 'spotdiff-splitter-setup',
@@ -206,18 +195,7 @@ export const DEFAULT_APP_GLOBAL_SETTINGS: AppGlobalSettings = {
     superExportImagesPerVideo: 5,
     superImageExportMode: 'zip',
     superExportWatermarkRemoval: false,
-    superExportWatermarkPresetId: '',
-    superExportThumbnail: {
-      enabled: false,
-      exportMode: 'with_video',
-      stylePreset: 'inherit',
-      title: DEFAULT_VIDEO_TEXT_TEMPLATES.playTitle,
-      subtitle: DEFAULT_VIDEO_TEXT_TEMPLATES.playSubtitle,
-      badgeLabel: DEFAULT_VIDEO_TEXT_TEMPLATES.puzzleBadgeLabel,
-      textScale: 1,
-      textOffsetX: 0,
-      textOffsetY: 0
-    }
+    superExportWatermarkPresetId: ''
   },
   splitterDefaults: {
     filenamePrefix: 'puzzle',
@@ -277,6 +255,11 @@ const sanitizeSharedPair = (value: unknown): SplitterSharedPair | null => {
 const sanitizeSplitterMode = (value: unknown): SplitterModePreference =>
   value === 'manual_pair' ? 'manual_pair' : 'shared_area';
 
+const sanitizeSplitterPresetName = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ').slice(0, 80);
+};
+
 const sanitizeSplitterSetupSnapshot = (value: unknown): SplitterSetupSnapshot | null => {
   if (!value || typeof value !== 'object') return null;
   const candidate = value as Partial<SplitterSetupSnapshot>;
@@ -290,6 +273,50 @@ const sanitizeSplitterSetupSnapshot = (value: unknown): SplitterSetupSnapshot | 
     sharedRegion: sanitizeSharedRegion(candidate.sharedRegion),
     sharedPair: sanitizeSharedPair(candidate.sharedPair)
   };
+};
+
+const sanitizeIsoDateString = (value: unknown) => {
+  if (typeof value !== 'string' || !value.trim()) {
+    return new Date(0).toISOString();
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(0).toISOString();
+};
+
+const sanitizeSplitterSetupPreset = (value: unknown): SplitterSetupPreset | null => {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<SplitterSetupPreset> & { setup?: unknown };
+  const name = sanitizeSplitterPresetName(candidate.name);
+  const setup = sanitizeSplitterSetupSnapshot(candidate.setup);
+  const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
+
+  if (!id || !name || !setup) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    updatedAt: sanitizeIsoDateString(candidate.updatedAt),
+    setup
+  };
+};
+
+const sanitizeSplitterSetupPresetList = (value: unknown): SplitterSetupPreset[] => {
+  if (!Array.isArray(value)) return [];
+
+  const byId = new Map<string, SplitterSetupPreset>();
+  for (const entry of value) {
+    const preset = sanitizeSplitterSetupPreset(entry);
+    if (!preset) continue;
+    const existing = byId.get(preset.id);
+    if (!existing || Date.parse(preset.updatedAt) >= Date.parse(existing.updatedAt)) {
+      byId.set(preset.id, preset);
+    }
+  }
+
+  return Array.from(byId.values()).sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
 };
 
 const VIDEO_PACKAGE_PRESET_VALUES = Object.keys(VIDEO_PACKAGE_PRESETS) as VideoSettings['videoPackagePreset'][];
@@ -428,7 +455,16 @@ const GENERATED_PROGRESS_STYLE_VALUES: VideoSettings['generatedProgressStyle'][]
   'arcade',
   'ivory',
   'storybook',
-  'heat'
+  'heat',
+  'voltage',
+  'sunburst',
+  'hyperpop',
+  'laser',
+  'toxic',
+  'inferno',
+  'blackout',
+  'obsidian_gold',
+  'chrome_furnace'
 ];
 const GENERATED_PROGRESS_RENDER_MODE_VALUES: VideoSettings['generatedProgressRenderMode'][] = [
   'bar',
@@ -472,16 +508,6 @@ const sanitizeNumber = (value: unknown, fallback: number, min: number, max: numb
 const sanitizeSuperImageExportMode = (value: unknown): SuperImageExportMode =>
   value === 'folder' ? 'folder' : 'zip';
 
-const sanitizeSuperExportThumbnailStylePreset = (
-  value: unknown
-): SuperExportThumbnailStylePresetId =>
-  SUPER_EXPORT_THUMBNAIL_STYLE_PRESET_IDS.includes(value as SuperExportThumbnailStylePresetId)
-    ? (value as SuperExportThumbnailStylePresetId)
-    : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.stylePreset;
-
-const sanitizeSuperExportThumbnailExportMode = (value: unknown): SuperExportThumbnailExportMode =>
-  value === 'thumbnail_only' ? 'thumbnail_only' : 'with_video';
-
 const sanitizeHexColor = (value: unknown, fallback: string) => {
   if (typeof value !== 'string') return fallback;
   const normalized = value.trim();
@@ -504,6 +530,7 @@ const mergeUniqueAudioSources = (...groups: unknown[]) => {
 const resolveLegacyAudioCuePools = (mergedVideo: Record<string, unknown>) => ({
   progress_fill_intro: {
     enabled: true,
+    volume: 1,
     sources: []
   },
   puzzle_play: {
@@ -511,6 +538,7 @@ const resolveLegacyAudioCuePools = (mergedVideo: Record<string, unknown>) => ({
       typeof mergedVideo.playSoundEnabled === 'boolean'
         ? mergedVideo.playSoundEnabled
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.puzzle_play.enabled,
+    volume: 1,
     sources: mergeUniqueAudioSources(mergedVideo.playSoundSrc)
   },
   low_time_warning: {
@@ -518,6 +546,7 @@ const resolveLegacyAudioCuePools = (mergedVideo: Record<string, unknown>) => ({
       typeof mergedVideo.countdownSoundEnabled === 'boolean'
         ? mergedVideo.countdownSoundEnabled
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.low_time_warning.enabled,
+    volume: 1,
     sources: mergeUniqueAudioSources(mergedVideo.countdownSoundSrc)
   },
   marker_reveal: {
@@ -527,6 +556,7 @@ const resolveLegacyAudioCuePools = (mergedVideo: Record<string, unknown>) => ({
         : typeof mergedVideo.revealSoundEnabled === 'boolean'
         ? mergedVideo.revealSoundEnabled
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.marker_reveal.enabled,
+    volume: 1,
     sources: mergeUniqueAudioSources(
       mergedVideo.markerSoundSrc,
       mergedVideo.revealSoundSrc,
@@ -538,6 +568,7 @@ const resolveLegacyAudioCuePools = (mergedVideo: Record<string, unknown>) => ({
       typeof mergedVideo.blinkSoundEnabled === 'boolean'
         ? mergedVideo.blinkSoundEnabled
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.blink.enabled,
+    volume: 1,
     sources: mergeUniqueAudioSources(mergedVideo.blinkSoundSrc)
   },
   transition: {
@@ -545,6 +576,7 @@ const resolveLegacyAudioCuePools = (mergedVideo: Record<string, unknown>) => ({
       typeof mergedVideo.transitionSoundEnabled === 'boolean'
         ? mergedVideo.transitionSoundEnabled
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.audioCuePools.transition.enabled,
+    volume: 1,
     sources: mergeUniqueAudioSources(mergedVideo.transitionSoundSrc)
   }
 });
@@ -1054,49 +1086,7 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
         mergedFrame.superExportWatermarkRemoval,
         DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportWatermarkRemoval
       ),
-      superExportWatermarkPresetId: sanitizeOptionalText(mergedFrame.superExportWatermarkPresetId),
-      superExportThumbnail: {
-        enabled: sanitizeBoolean(
-          mergedFrame.superExportThumbnail?.enabled,
-          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.enabled
-        ),
-        exportMode: sanitizeSuperExportThumbnailExportMode(
-          mergedFrame.superExportThumbnail?.exportMode
-        ),
-        stylePreset: sanitizeSuperExportThumbnailStylePreset(
-          mergedFrame.superExportThumbnail?.stylePreset
-        ),
-        title:
-          typeof mergedFrame.superExportThumbnail?.title === 'string'
-            ? mergedFrame.superExportThumbnail.title
-            : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.title,
-        subtitle:
-          typeof mergedFrame.superExportThumbnail?.subtitle === 'string'
-            ? mergedFrame.superExportThumbnail.subtitle
-            : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.subtitle,
-        badgeLabel:
-          typeof mergedFrame.superExportThumbnail?.badgeLabel === 'string'
-            ? mergedFrame.superExportThumbnail.badgeLabel
-            : DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.badgeLabel,
-        textScale: sanitizeNumber(
-          mergedFrame.superExportThumbnail?.textScale,
-          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.textScale,
-          0.6,
-          2.4
-        ),
-        textOffsetX: sanitizeInteger(
-          mergedFrame.superExportThumbnail?.textOffsetX,
-          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.textOffsetX,
-          -640,
-          640
-        ),
-        textOffsetY: sanitizeInteger(
-          mergedFrame.superExportThumbnail?.textOffsetY,
-          DEFAULT_APP_GLOBAL_SETTINGS.frameExtractorDefaults.superExportThumbnail.textOffsetY,
-          -360,
-          360
-        )
-      }
+      superExportWatermarkPresetId: sanitizeOptionalText(mergedFrame.superExportWatermarkPresetId)
     },
     splitterDefaults: {
       filenamePrefix: sanitizePrefix(mergedSplitter.filenamePrefix),
@@ -1211,6 +1201,71 @@ export const readSplitterMode = (): SplitterModePreference => {
 export const saveSplitterMode = (mode: SplitterModePreference) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(SPLITTER_MODE_KEY, sanitizeSplitterMode(mode));
+};
+
+export const loadSplitterSetupPresets = (): SplitterSetupPreset[] => {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = window.localStorage.getItem(SPLITTER_PRESETS_KEY);
+    if (!raw) return [];
+    return sanitizeSplitterSetupPresetList(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+};
+
+export const replaceSplitterSetupPresets = (value: unknown): SplitterSetupPreset[] => {
+  const safePresets = sanitizeSplitterSetupPresetList(value);
+  if (typeof window !== 'undefined') {
+    if (safePresets.length > 0) {
+      window.localStorage.setItem(SPLITTER_PRESETS_KEY, JSON.stringify(safePresets));
+    } else {
+      window.localStorage.removeItem(SPLITTER_PRESETS_KEY);
+    }
+  }
+  return safePresets;
+};
+
+export const saveSplitterSetupPreset = (input: {
+  id?: string;
+  name: string;
+  splitterMode: SplitterModePreference;
+  nextSequence: number;
+  sharedRegion: SplitterSharedRegion | null;
+  sharedPair: SplitterSharedPair | null;
+}): SplitterSetupPreset | null => {
+  const name = sanitizeSplitterPresetName(input.name);
+  if (!name) return null;
+
+  const preset: SplitterSetupPreset = {
+    id: typeof input.id === 'string' && input.id.trim()
+      ? input.id.trim()
+      : `splitter-preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    updatedAt: new Date().toISOString(),
+    setup: createSplitterSetupSnapshot({
+      splitterMode: input.splitterMode,
+      nextSequence: input.nextSequence,
+      sharedRegion: input.sharedRegion,
+      sharedPair: input.sharedPair
+    })
+  };
+
+  replaceSplitterSetupPresets([
+    preset,
+    ...loadSplitterSetupPresets().filter((existing) => existing.id !== preset.id)
+  ]);
+
+  return preset;
+};
+
+export const deleteSplitterSetupPreset = (id: string): SplitterSetupPreset[] => {
+  const safeId = typeof id === 'string' ? id.trim() : '';
+  if (!safeId) return loadSplitterSetupPresets();
+  return replaceSplitterSetupPresets(
+    loadSplitterSetupPresets().filter((preset) => preset.id !== safeId)
+  );
 };
 
 export const createSplitterSetupSnapshot = (input: {

@@ -97,21 +97,24 @@ const buildExportFilename = (
   return `${baseName}-upscaled${modelSuffix}${deblurSuffix}-x${scaleFactor}.${extension}`;
 };
 
-const PRESET_VALUES: Record<UpscalePreset, Pick<ImageUpscaleOptions, 'detailBoost' | 'localContrast' | 'edgeThreshold'>> = {
+const PRESET_VALUES: Record<UpscalePreset, Pick<ImageUpscaleOptions, 'noiseReduction' | 'detailBoost' | 'localContrast' | 'edgeThreshold'>> = {
   balanced: {
-    detailBoost: 46,
-    localContrast: 28,
-    edgeThreshold: 9
+    noiseReduction: 4,
+    detailBoost: 58,
+    localContrast: 36,
+    edgeThreshold: 6
   },
   crisp: {
-    detailBoost: 64,
-    localContrast: 42,
-    edgeThreshold: 7
+    noiseReduction: 0,
+    detailBoost: 74,
+    localContrast: 48,
+    edgeThreshold: 4
   },
   soft: {
-    detailBoost: 28,
-    localContrast: 16,
-    edgeThreshold: 13
+    noiseReduction: 10,
+    detailBoost: 38,
+    localContrast: 22,
+    edgeThreshold: 10
   }
 };
 
@@ -127,6 +130,7 @@ export function ImageUpscalerMode({ onBack }: ImageUpscalerModeProps) {
   const [aiModel, setAiModel] = useState<ImageUpscaleAiModel>('medium');
   const [useAiDeblur, setUseAiDeblur] = useState(false);
   const [scaleFactor, setScaleFactor] = useState<2 | 4>(2);
+  const [noiseReduction, setNoiseReduction] = useState(PRESET_VALUES.balanced.noiseReduction);
   const [detailBoost, setDetailBoost] = useState(PRESET_VALUES.balanced.detailBoost);
   const [localContrast, setLocalContrast] = useState(PRESET_VALUES.balanced.localContrast);
   const [edgeThreshold, setEdgeThreshold] = useState(PRESET_VALUES.balanced.edgeThreshold);
@@ -145,11 +149,12 @@ export function ImageUpscalerMode({ onBack }: ImageUpscalerModeProps) {
       scaleFactor,
       aiModel,
       useAiDeblur,
+      noiseReduction,
       detailBoost,
       localContrast,
       edgeThreshold
     }),
-    [engine, scaleFactor, aiModel, useAiDeblur, detailBoost, localContrast, edgeThreshold]
+    [engine, scaleFactor, aiModel, useAiDeblur, noiseReduction, detailBoost, localContrast, edgeThreshold]
   );
   const optionSignature = useMemo(() => JSON.stringify(options), [options]);
   const readyCount = items.filter((item) => item.resultDataUrl).length;
@@ -158,6 +163,7 @@ export function ImageUpscalerMode({ onBack }: ImageUpscalerModeProps) {
 
   const applyPreset = (preset: UpscalePreset) => {
     const values = PRESET_VALUES[preset];
+    setNoiseReduction(values.noiseReduction);
     setDetailBoost(values.detailBoost);
     setLocalContrast(values.localContrast);
     setEdgeThreshold(values.edgeThreshold);
@@ -566,79 +572,24 @@ export function ImageUpscalerMode({ onBack }: ImageUpscalerModeProps) {
                     </div>
                   </label>
 
-                  {engine === 'fast_enhance' ? (
-                    <>
-                      <div className="grid grid-cols-3 gap-2">
-                        {(['balanced', 'crisp', 'soft'] as UpscalePreset[]).map((preset) => (
-                          <button
-                            key={preset}
-                            onClick={() => applyPreset(preset)}
-                            disabled={isProcessing}
-                            className={`rounded-2xl border-2 border-black px-3 py-2 text-[11px] font-black uppercase ${
-                              preset === 'balanced'
-                                ? 'bg-[#FDE68A]'
-                                : preset === 'crisp'
-                                  ? 'bg-[#BFDBFE]'
-                                  : 'bg-[#E2E8F0]'
-                            }`}
-                          >
-                            {preset}
-                          </button>
-                        ))}
-                      </div>
+                  <label className="block">
+                    <div className="mb-2 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
+                      <span>Noise Reduction</span>
+                      <span>{noiseReduction}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={noiseReduction}
+                      onChange={(event) => setNoiseReduction(Number(event.target.value))}
+                      disabled={isProcessing}
+                      className="w-full"
+                    />
+                  </label>
 
-                      <label className="block">
-                        <div className="mb-2 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
-                          <span>Detail Boost</span>
-                          <span>{detailBoost}</span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          step={1}
-                          value={detailBoost}
-                          onChange={(event) => setDetailBoost(Number(event.target.value))}
-                          disabled={isProcessing}
-                          className="w-full"
-                        />
-                      </label>
-
-                      <label className="block">
-                        <div className="mb-2 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
-                          <span>Local Contrast</span>
-                          <span>{localContrast}</span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          step={1}
-                          value={localContrast}
-                          onChange={(event) => setLocalContrast(Number(event.target.value))}
-                          disabled={isProcessing}
-                          className="w-full"
-                        />
-                      </label>
-
-                      <label className="block">
-                        <div className="mb-2 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
-                          <span>Edge Threshold</span>
-                          <span>{edgeThreshold}</span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={32}
-                          step={1}
-                          value={edgeThreshold}
-                          onChange={(event) => setEdgeThreshold(Number(event.target.value))}
-                          disabled={isProcessing}
-                          className="w-full"
-                        />
-                      </label>
-                    </>
-                  ) : (
+                  {engine === 'ai_super_resolution' && (
                     <>
                       <div className="grid grid-cols-2 gap-2">
                         {(
@@ -685,14 +636,97 @@ export function ImageUpscalerMode({ onBack }: ImageUpscalerModeProps) {
                           <span>Thick pushes stronger edge reconstruction, but it is much slower and heavier.</span>
                         )}
                         {useAiDeblur && (
-                          <span className="block mt-2">MAXIM Deblur will run first to clean blur before the selected ESRGAN model upscales the image.</span>
+                          <span className="block mt-2">MAXIM Deblur runs first in a background worker, and large inputs are capped before deblur so it does not dominate runtime.</span>
                         )}
                         {!useAiDeblur && (
                           <span className="block mt-2">Turn on MAXIM Deblur if the source looks soft when zoomed or the linework is smeared before upscaling.</span>
                         )}
+                        <span className="block mt-2">This image style benefits from the post-upscale tuning controls below.</span>
                       </div>
                     </>
                   )}
+
+                  <div className="rounded-2xl border-2 border-black bg-[#FFF7D6] px-4 py-4 space-y-4">
+                    <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+                      {engine === 'ai_super_resolution' ? 'Post Upscale Tuning' : 'Fast Tuning'}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['balanced', 'crisp', 'soft'] as UpscalePreset[]).map((preset) => (
+                        <button
+                          key={preset}
+                          onClick={() => applyPreset(preset)}
+                          disabled={isProcessing}
+                          className={`rounded-2xl border-2 border-black px-3 py-2 text-[11px] font-black uppercase ${
+                            preset === 'balanced'
+                              ? 'bg-[#FDE68A]'
+                              : preset === 'crisp'
+                                ? 'bg-[#BFDBFE]'
+                                : 'bg-[#E2E8F0]'
+                          }`}
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
+
+                    <label className="block">
+                      <div className="mb-2 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
+                        <span>Detail Boost</span>
+                        <span>{detailBoost}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={detailBoost}
+                        onChange={(event) => setDetailBoost(Number(event.target.value))}
+                        disabled={isProcessing}
+                        className="w-full"
+                      />
+                    </label>
+
+                    <label className="block">
+                      <div className="mb-2 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
+                        <span>Local Contrast</span>
+                        <span>{localContrast}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={localContrast}
+                        onChange={(event) => setLocalContrast(Number(event.target.value))}
+                        disabled={isProcessing}
+                        className="w-full"
+                      />
+                    </label>
+
+                    <label className="block">
+                      <div className="mb-2 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
+                        <span>Edge Threshold</span>
+                        <span>{edgeThreshold}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={32}
+                        step={1}
+                        value={edgeThreshold}
+                        onChange={(event) => setEdgeThreshold(Number(event.target.value))}
+                        disabled={isProcessing}
+                        className="w-full"
+                      />
+                    </label>
+
+                    <div className="text-xs font-bold text-slate-700">
+                      {engine === 'ai_super_resolution'
+                        ? 'These controls now refine AI output after ESRGAN finishes.'
+                        : 'These controls shape the fast resize and enhancement pass.'}
+                    </div>
+                  </div>
                 </div>
               </div>
 

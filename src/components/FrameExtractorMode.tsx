@@ -2,8 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Clock3, Download, Layers, LoaderCircle, Sparkles, Trash2, Upload, Video } from 'lucide-react';
 import { ConfirmDialog } from '../app/components/ConfirmDialog';
 import { VIDEO_PACKAGE_PRESETS } from '../constants/videoPackages';
-import { SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES } from '../constants/superExportThumbnailCopyTemplates';
-import { SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS } from '../constants/superExportThumbnailStyles';
 import { TimestampPresetPicker } from './TimestampPresetPicker';
 import {
   ExtractFramesSummary,
@@ -14,15 +12,17 @@ import {
 } from '../services/frameExtractor';
 import {
   FrameExtractorDefaults,
+  loadSplitterSetupPresets,
   readSplitterSharedRegion,
   SplitterDefaults,
+  type SplitterSetupPreset,
+  type SplitterSharedRegion,
   type SuperImageExportMode
 } from '../services/appSettings';
 import { type VideoSettings, type VideoUserPackage } from '../types';
 import { runFrameAutoAligner, type FrameAutoAlignerResult } from '../services/frameAutoAligner';
 import {
   canUseSuperImageDirectoryExport,
-  renderSuperExportThumbnailPreview,
   requestSuperImageOutputDirectory,
   runFrameSuperExport,
   runFrameSuperImageExport,
@@ -60,6 +60,8 @@ interface PendingWatermarkConfirm {
   currentPreset: WatermarkSelectionPreset | null;
   targetDirectory?: FileSystemDirectoryHandle | null;
 }
+
+type SplitterRegionSourceId = 'current' | `preset:${string}`;
 
 const pad = (value: number) => String(value).padStart(2, '0');
 
@@ -101,29 +103,6 @@ const triggerBlobDownload = (blob: Blob, filename: string) => {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const buildThumbnailCopyText = (title: string, subtitle: string) =>
-  [title.trim(), subtitle.trim()].filter(Boolean).join('\n');
-
-const parseThumbnailCopyText = (value: string) => {
-  const lines = value
-    .replace(/\r/g, '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    return {
-      title: '',
-      subtitle: ''
-    };
-  }
-
-  return {
-    title: lines[0] ?? '',
-    subtitle: lines.slice(1).join(' ')
-  };
-};
-
 export function FrameExtractorMode({
   onBack,
   defaults,
@@ -150,30 +129,6 @@ export function FrameExtractorMode({
   const [jpegQuality, setJpegQuality] = useState(defaults.jpegQuality);
   const [superExportImagesPerVideo, setSuperExportImagesPerVideo] = useState(defaults.superExportImagesPerVideo);
   const [superImageExportMode, setSuperImageExportMode] = useState<SuperImageExportMode>(defaults.superImageExportMode);
-  const [superExportThumbnailEnabled, setSuperExportThumbnailEnabled] = useState(
-    defaults.superExportThumbnail.enabled
-  );
-  const [superExportThumbnailExportMode, setSuperExportThumbnailExportMode] = useState(
-    defaults.superExportThumbnail.exportMode
-  );
-  const [superExportThumbnailStylePreset, setSuperExportThumbnailStylePreset] = useState(
-    defaults.superExportThumbnail.stylePreset
-  );
-  const [superExportThumbnailCopyText, setSuperExportThumbnailCopyText] = useState(
-    buildThumbnailCopyText(defaults.superExportThumbnail.title, defaults.superExportThumbnail.subtitle)
-  );
-  const [superExportThumbnailTextScale, setSuperExportThumbnailTextScale] = useState(
-    defaults.superExportThumbnail.textScale
-  );
-  const [superExportThumbnailTextOffsetX, setSuperExportThumbnailTextOffsetX] = useState(
-    defaults.superExportThumbnail.textOffsetX
-  );
-  const [superExportThumbnailTextOffsetY, setSuperExportThumbnailTextOffsetY] = useState(
-    defaults.superExportThumbnail.textOffsetY
-  );
-  const [thumbnailPreviewUrl, setThumbnailPreviewUrl] = useState<string | null>(null);
-  const [thumbnailPreviewStatus, setThumbnailPreviewStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [thumbnailPreviewError, setThumbnailPreviewError] = useState('');
   const [isReadingMetadata, setIsReadingMetadata] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isSuperAligning, setIsSuperAligning] = useState(false);
@@ -190,6 +145,9 @@ export function FrameExtractorMode({
   );
   const [watermarkPresets, setWatermarkPresets] = useState<WatermarkSelectionPreset[]>([]);
   const [selectedWatermarkPresetId, setSelectedWatermarkPresetId] = useState(defaults.superExportWatermarkPresetId);
+  const [splitterPresets, setSplitterPresets] = useState<SplitterSetupPreset[]>([]);
+  const [selectedSplitterRegionSourceId, setSelectedSplitterRegionSourceId] =
+    useState<SplitterRegionSourceId>('current');
   const [pendingWatermarkConfirm, setPendingWatermarkConfirm] = useState<PendingWatermarkConfirm | null>(null);
 
   useEffect(() => {
@@ -198,15 +156,6 @@ export function FrameExtractorMode({
     setJpegQuality(defaults.jpegQuality);
     setSuperExportImagesPerVideo(defaults.superExportImagesPerVideo);
     setSuperImageExportMode(defaults.superImageExportMode);
-    setSuperExportThumbnailEnabled(defaults.superExportThumbnail.enabled);
-    setSuperExportThumbnailExportMode(defaults.superExportThumbnail.exportMode);
-    setSuperExportThumbnailStylePreset(defaults.superExportThumbnail.stylePreset);
-    setSuperExportThumbnailCopyText(
-      buildThumbnailCopyText(defaults.superExportThumbnail.title, defaults.superExportThumbnail.subtitle)
-    );
-    setSuperExportThumbnailTextScale(defaults.superExportThumbnail.textScale);
-    setSuperExportThumbnailTextOffsetX(defaults.superExportThumbnail.textOffsetX);
-    setSuperExportThumbnailTextOffsetY(defaults.superExportThumbnail.textOffsetY);
     setUseSuperExportWatermarkRemoval(defaults.superExportWatermarkRemoval);
     setSelectedWatermarkPresetId(defaults.superExportWatermarkPresetId);
   }, [defaults, defaultsSessionId]);
@@ -214,6 +163,15 @@ export function FrameExtractorMode({
   useEffect(() => {
     const nextPresets = loadWatermarkPresets();
     setWatermarkPresets(nextPresets);
+  }, [defaultsSessionId]);
+
+  useEffect(() => {
+    const nextSplitterPresets = loadSplitterSetupPresets().filter((preset) => Boolean(preset.setup.sharedRegion));
+    setSplitterPresets(nextSplitterPresets);
+    setSelectedSplitterRegionSourceId((current) => {
+      if (current === 'current') return current;
+      return nextSplitterPresets.some((preset) => `preset:${preset.id}` === current) ? current : 'current';
+    });
   }, [defaultsSessionId]);
 
   useEffect(() => {
@@ -235,11 +193,20 @@ export function FrameExtractorMode({
   const parsedTimestamps = useMemo(() => parseTimestampInput(timestampsText), [timestampsText]);
   const requestedFrames = videos.length * parsedTimestamps.timestamps.length;
   const savedSharedRegion = readSplitterSharedRegion();
-  const hasSavedSharedRegion = Boolean(savedSharedRegion);
+  const selectedSplitterPreset = useMemo(
+    () =>
+      selectedSplitterRegionSourceId === 'current'
+        ? null
+        : splitterPresets.find((preset) => `preset:${preset.id}` === selectedSplitterRegionSourceId) ?? null,
+    [selectedSplitterRegionSourceId, splitterPresets]
+  );
+  const selectedSplitterRegion: SplitterSharedRegion | null =
+    selectedSplitterPreset?.setup.sharedRegion ?? savedSharedRegion;
+  const hasSelectedSplitterRegion = Boolean(selectedSplitterRegion);
   const isBusy = isReadingMetadata || isExtracting || isSuperAligning || isSuperImaging || isSuperExporting;
   const canExtract =
     !isBusy && videos.length > 0 && parsedTimestamps.timestamps.length > 0;
-  const canSuperAlign = canExtract && hasSavedSharedRegion;
+  const canSuperAlign = canExtract && hasSelectedSplitterRegion;
   const canSuperImage = canExtract;
   const canSuperExport = canExtract;
   const selectedWatermarkPreset = useMemo(
@@ -250,130 +217,24 @@ export function FrameExtractorMode({
     () => videoPackages.find((entry) => entry.id === activeVideoPackageId) ?? videoPackages[0] ?? null,
     [activeVideoPackageId, videoPackages]
   );
-  const parsedThumbnailCopy = useMemo(() => parseThumbnailCopyText(superExportThumbnailCopyText), [superExportThumbnailCopyText]);
   const effectiveSuperExportPackageLabel =
     activeVideoPackage?.name ??
     VIDEO_PACKAGE_PRESETS[videoSettings.videoPackagePreset]?.label ??
     videoSettings.videoPackagePreset;
   const currentVideoPresetLabel =
     VIDEO_PACKAGE_PRESETS[videoSettings.videoPackagePreset]?.label ?? videoSettings.videoPackagePreset;
-  const effectiveThumbnailBadgeLabel = videoSettings.textTemplates.puzzleBadgeLabel;
   const supportsDirectoryExport = canUseSuperImageDirectoryExport();
   const superImageExportTargetLabel = superImageExportMode === 'folder' ? 'folder' : 'zip';
-  const thumbnailPreviewAspectRatio = videoSettings.aspectRatio.replace(':', ' / ');
+  const selectedSplitterRegionLabel =
+    selectedSplitterRegionSourceId === 'current'
+      ? 'Current shared splitter area'
+      : selectedSplitterPreset?.name ?? 'Saved splitter preset';
 
   useEffect(() => {
     if (!supportsDirectoryExport && superImageExportMode === 'folder') {
       setSuperImageExportMode('zip');
     }
   }, [superImageExportMode, supportsDirectoryExport]);
-
-  useEffect(() => {
-    return () => {
-      if (thumbnailPreviewUrl) {
-        URL.revokeObjectURL(thumbnailPreviewUrl);
-      }
-    };
-  }, [thumbnailPreviewUrl]);
-
-  useEffect(() => {
-    if (
-      !superExportThumbnailEnabled ||
-      isBusy ||
-      videos.length === 0 ||
-      parsedTimestamps.timestamps.length === 0
-    ) {
-      setThumbnailPreviewStatus('idle');
-      setThumbnailPreviewError('');
-      return;
-    }
-
-    const firstVideo = videos[0]?.file;
-    const firstTimestamp = parsedTimestamps.timestamps[0];
-    if (!firstVideo || !firstTimestamp) {
-      setThumbnailPreviewStatus('idle');
-      setThumbnailPreviewError('');
-      return;
-    }
-
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      setThumbnailPreviewStatus('loading');
-      setThumbnailPreviewError('');
-
-      try {
-        const previewBlob = await renderSuperExportThumbnailPreview({
-          video: firstVideo,
-          timestamp: firstTimestamp,
-          format: imageFormat,
-          jpegQuality,
-          videoSettings,
-          sharedRegion: readSplitterSharedRegion(),
-          thumbnail: {
-            enabled: true,
-            exportMode: superExportThumbnailExportMode,
-            stylePreset: superExportThumbnailStylePreset,
-            title: parsedThumbnailCopy.title,
-            subtitle: parsedThumbnailCopy.subtitle,
-            badgeLabel: effectiveThumbnailBadgeLabel,
-            textScale: superExportThumbnailTextScale,
-            textOffsetX: superExportThumbnailTextOffsetX,
-            textOffsetY: superExportThumbnailTextOffsetY
-          },
-          watermarkRemoval: {
-            enabled: useSuperExportWatermarkRemoval,
-            selectionPreset: useSuperExportWatermarkRemoval ? selectedWatermarkPreset : null
-          },
-          signal: controller.signal
-        });
-
-        const nextUrl = URL.createObjectURL(previewBlob);
-        if (controller.signal.aborted) {
-          URL.revokeObjectURL(nextUrl);
-          return;
-        }
-
-        setThumbnailPreviewUrl((current) => {
-          if (current) {
-            URL.revokeObjectURL(current);
-          }
-          return nextUrl;
-        });
-        setThumbnailPreviewStatus('ready');
-      } catch (error) {
-        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
-          return;
-        }
-        setThumbnailPreviewStatus('error');
-        setThumbnailPreviewError(
-          error instanceof Error ? error.message : 'Thumbnail preview render failed.'
-        );
-      }
-    }, 260);
-
-    return () => {
-      controller.abort();
-      window.clearTimeout(timer);
-    };
-  }, [
-    imageFormat,
-    isBusy,
-    jpegQuality,
-    parsedThumbnailCopy.subtitle,
-    parsedThumbnailCopy.title,
-    parsedTimestamps.timestamps,
-    selectedWatermarkPreset,
-    effectiveThumbnailBadgeLabel,
-    superExportThumbnailEnabled,
-    superExportThumbnailExportMode,
-    superExportThumbnailStylePreset,
-    superExportThumbnailTextOffsetX,
-    superExportThumbnailTextOffsetY,
-    superExportThumbnailTextScale,
-    useSuperExportWatermarkRemoval,
-    videoSettings,
-    videos
-  ]);
 
   const handleAddVideos = async (files: FileList | null) => {
     const selected = files ? Array.from(files).filter((file) => file.type.startsWith('video/')) : [];
@@ -474,9 +335,9 @@ export function FrameExtractorMode({
   const handleSuperAligner = async () => {
     if (!canSuperAlign) return;
 
-    const sharedRegion = readSplitterSharedRegion();
+    const sharedRegion = selectedSplitterRegion;
     if (!sharedRegion) {
-      alert('Set a shared split area in Splitter mode first. The aligner uses that saved area.');
+      alert('Choose a saved splitter area first. The aligner uses that shared area to prepare split pairs.');
       return;
     }
 
@@ -551,7 +412,7 @@ export function FrameExtractorMode({
         splitterDefaults,
         outputMode: superImageExportMode,
         targetDirectory,
-        sharedRegion: readSplitterSharedRegion(),
+        sharedRegion: selectedSplitterRegion,
         watermarkRemoval: {
           enabled: useSuperExportWatermarkRemoval,
           selectionPreset: useSuperExportWatermarkRemoval ? currentPreset : null
@@ -647,21 +508,10 @@ export function FrameExtractorMode({
         splitterDefaults,
         videoSettings,
         imagesPerVideo: superExportImagesPerVideo,
-        sharedRegion: readSplitterSharedRegion(),
+        sharedRegion: selectedSplitterRegion,
         watermarkRemoval: {
           enabled: useSuperExportWatermarkRemoval,
           selectionPreset: useSuperExportWatermarkRemoval ? currentPreset : null
-        },
-        thumbnail: {
-          enabled: superExportThumbnailEnabled,
-          exportMode: superExportThumbnailExportMode,
-          stylePreset: superExportThumbnailStylePreset,
-          title: parsedThumbnailCopy.title,
-          subtitle: parsedThumbnailCopy.subtitle,
-          badgeLabel: effectiveThumbnailBadgeLabel,
-          textScale: superExportThumbnailTextScale,
-          textOffsetX: superExportThumbnailTextOffsetX,
-          textOffsetY: superExportThumbnailTextOffsetY
         },
         onProgress: (next) => {
           setProgress(Math.max(0, Math.min(1, next.progress)));
@@ -671,17 +521,11 @@ export function FrameExtractorMode({
 
       setSuperSummary(result);
       setProgress(1);
-      if (result.exportedVideoCount > 0 || result.exportedThumbnailCount > 0) {
+      if (result.exportedVideoCount > 0) {
         setStatus(
-          result.exportMode === 'thumbnails_only'
-            ? `Exported ${result.exportedThumbnailCount} thumbnail${result.exportedThumbnailCount === 1 ? '' : 's'} from ${
-                result.validPuzzleCount
-              } puzzle${result.validPuzzleCount === 1 ? '' : 's'}.`
-            : `Exported ${result.exportedVideoCount} video${result.exportedVideoCount === 1 ? '' : 's'}${
-                result.thumbnailEnabled
-                  ? ` and ${result.exportedThumbnailCount} thumbnail${result.exportedThumbnailCount === 1 ? '' : 's'}`
-                  : ''
-              } from ${result.validPuzzleCount} puzzle${result.validPuzzleCount === 1 ? '' : 's'}.`
+          `Exported ${result.exportedVideoCount} video${result.exportedVideoCount === 1 ? '' : 's'} from ${
+            result.validPuzzleCount
+          } puzzle${result.validPuzzleCount === 1 ? '' : 's'}.`
         );
       } else {
         setStatus('Super Export finished, but no exact 3-difference puzzles were available to export.');
@@ -817,7 +661,7 @@ export function FrameExtractorMode({
               <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Package</div>
               <div className="mt-2 text-sm font-black uppercase text-slate-900">{effectiveSuperExportPackageLabel}</div>
               <div className="mt-2 text-[11px] font-bold text-slate-700">
-                Split area {hasSavedSharedRegion ? 'saved' : 'missing'}
+                Split area {hasSelectedSplitterRegion ? 'ready' : 'missing'}
               </div>
             </div>
           </div>
@@ -1112,7 +956,8 @@ export function FrameExtractorMode({
                 </div>
                 <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700">
                   <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Split Area</div>
-                  <div className="mt-2 text-lg font-black text-slate-900">{hasSavedSharedRegion ? 'Saved' : 'Missing'}</div>
+                  <div className="mt-2 text-lg font-black text-slate-900">{hasSelectedSplitterRegion ? 'Ready' : 'Missing'}</div>
+                  <div className="mt-1 text-[11px] font-bold text-slate-600">{selectedSplitterRegionLabel}</div>
                 </div>
                   <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700">
                     <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Watermark</div>
@@ -1205,182 +1050,6 @@ export function FrameExtractorMode({
                 </div>
               </div>
 
-              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-3 xl:col-span-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm font-black uppercase text-slate-900">Super Export Thumbnail</div>
-                  <button
-                    onClick={() => setSuperExportThumbnailEnabled((current) => !current)}
-                    disabled={isBusy}
-                    className={`px-3 py-2 rounded-lg border-2 border-black text-[11px] font-black uppercase ${
-                      superExportThumbnailEnabled ? 'bg-[#BFDBFE]' : 'bg-white hover:bg-slate-100'
-                    } ${isBusy ? 'cursor-not-allowed bg-slate-200 text-slate-500' : ''}`}
-                  >
-                    {superExportThumbnailEnabled ? 'On' : 'Off'}
-                  </button>
-                </div>
-
-                <div className="rounded-xl border border-black bg-[#EFF6FF] px-3 py-2 text-[11px] font-bold text-slate-700">
-                  Uses the first puzzle of each exported batch. Timer and progress bar are always removed.
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <label className="block sm:col-span-2">
-                    <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Thumbnail Export Mode</div>
-                    <select
-                      value={superExportThumbnailExportMode}
-                      onChange={(event) =>
-                        setSuperExportThumbnailExportMode(event.target.value as typeof superExportThumbnailExportMode)
-                      }
-                      disabled={isBusy || !superExportThumbnailEnabled}
-                      className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
-                    >
-                      <option value="with_video">Video + Thumbnail</option>
-                      <option value="thumbnail_only">Thumbnail Only</option>
-                    </select>
-                  </label>
-                  <label className="block sm:col-span-2">
-                    <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Thumbnail Style</div>
-                    <select
-                      value={superExportThumbnailStylePreset}
-                      onChange={(event) => setSuperExportThumbnailStylePreset(event.target.value as typeof superExportThumbnailStylePreset)}
-                      disabled={isBusy || !superExportThumbnailEnabled}
-                      className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
-                    >
-                      {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.label}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="mt-1 text-[11px] font-bold text-slate-600">
-                      {SUPER_EXPORT_THUMBNAIL_STYLE_PRESETS.find((preset) => preset.id === superExportThumbnailStylePreset)
-                        ?.description ?? 'Use the selected thumbnail style preset.'}
-                    </div>
-                  </label>
-                  <label className="block sm:col-span-2">
-                    <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Thumbnail Copy</div>
-                    <textarea
-                      rows={3}
-                      value={superExportThumbnailCopyText}
-                      onChange={(event) => setSuperExportThumbnailCopyText(event.target.value)}
-                      disabled={isBusy || !superExportThumbnailEnabled}
-                      className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
-                      placeholder={'SPOT THE 3 DIFFERENCES\nCan you find them before the reveal?'}
-                    />
-                  </label>
-                  <div className="sm:col-span-2">
-                    <div className="mb-2 text-[11px] font-black uppercase text-slate-600">Quick Templates</div>
-                    <div className="flex flex-wrap gap-2">
-                      {SUPER_EXPORT_THUMBNAIL_COPY_TEMPLATES.map((template) => (
-                        <button
-                          key={template.id}
-                          type="button"
-                          onClick={() => setSuperExportThumbnailCopyText(template.text)}
-                          disabled={isBusy || !superExportThumbnailEnabled}
-                          className="rounded-full border-2 border-black bg-white px-3 py-1.5 text-[10px] font-black uppercase hover:bg-slate-100 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
-                        >
-                          {template.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="sm:col-span-2 rounded-xl border border-black bg-white p-3">
-                    <div className="mb-3 text-[11px] font-black uppercase text-slate-700">Text Layout</div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                      <label className="block">
-                        <div className="mb-1 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
-                          <span>Text Size</span>
-                          <span>{Math.round(superExportThumbnailTextScale * 100)}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0.6"
-                          max="2.4"
-                          step="0.05"
-                          value={superExportThumbnailTextScale}
-                          onChange={(event) => setSuperExportThumbnailTextScale(Number(event.target.value))}
-                          disabled={isBusy || !superExportThumbnailEnabled}
-                          className="w-full accent-slate-900 disabled:cursor-not-allowed"
-                        />
-                      </label>
-                      <label className="block">
-                        <div className="mb-1 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
-                          <span>Text X</span>
-                          <span>{superExportThumbnailTextOffsetX}</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="-320"
-                          max="320"
-                          step="4"
-                          value={superExportThumbnailTextOffsetX}
-                          onChange={(event) => setSuperExportThumbnailTextOffsetX(Number(event.target.value))}
-                          disabled={isBusy || !superExportThumbnailEnabled}
-                          className="w-full accent-slate-900 disabled:cursor-not-allowed"
-                        />
-                      </label>
-                      <label className="block">
-                        <div className="mb-1 flex items-center justify-between text-[11px] font-black uppercase text-slate-600">
-                          <span>Text Y</span>
-                          <span>{superExportThumbnailTextOffsetY}</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="-180"
-                          max="180"
-                          step="4"
-                          value={superExportThumbnailTextOffsetY}
-                          onChange={(event) => setSuperExportThumbnailTextOffsetY(Number(event.target.value))}
-                          disabled={isBusy || !superExportThumbnailEnabled}
-                          className="w-full accent-slate-900 disabled:cursor-not-allowed"
-                        />
-                      </label>
-                    </div>
-                  </div>
-                  <div className="sm:col-span-2 rounded-xl border-2 border-black bg-[#F8FAFC] p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-[11px] font-black uppercase text-slate-900">Thumbnail Preview</div>
-                        <div className="text-[10px] font-bold uppercase text-slate-600">
-                          First uploaded video + first timestamp
-                        </div>
-                      </div>
-                      <div className="rounded-full border-2 border-black bg-white px-2 py-1 text-[10px] font-black uppercase">
-                        {videoSettings.aspectRatio}
-                      </div>
-                    </div>
-                    <div
-                      className="mt-3 overflow-hidden rounded-xl border-2 border-black bg-slate-200"
-                      style={{ aspectRatio: thumbnailPreviewAspectRatio }}
-                    >
-                      {thumbnailPreviewStatus === 'ready' && thumbnailPreviewUrl ? (
-                        <img
-                          src={thumbnailPreviewUrl}
-                          alt="Super export thumbnail preview"
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-full items-center justify-center px-4 text-center text-[11px] font-black uppercase text-slate-600">
-                          {thumbnailPreviewStatus === 'loading' ? (
-                            <span className="inline-flex items-center gap-2">
-                              <LoaderCircle size={14} className="animate-spin" strokeWidth={3} />
-                              Rendering preview
-                            </span>
-                          ) : thumbnailPreviewStatus === 'error' ? (
-                            thumbnailPreviewError || 'Thumbnail preview failed.'
-                          ) : (
-                            'Add a video and timestamp to preview the thumbnail.'
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-black bg-slate-50 px-3 py-2 text-[11px] font-bold text-slate-600">
-                    One box controls the visible thumbnail copy. Press Enter if you want an optional second line under the headline. Use the sliders to scale the text and move it inside the thumbnail preview.
-                  </div>
-                </div>
-              </div>
-
               <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm font-black uppercase text-slate-900">Watermark Removal</div>
@@ -1438,6 +1107,33 @@ export function FrameExtractorMode({
 
               <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4 xl:col-span-2">
                 <div className="text-sm font-black uppercase text-slate-900">Run</div>
+                <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4 space-y-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[11px] font-black uppercase text-slate-500">Splitter Area Source</div>
+                      <div className="text-sm font-black text-slate-900">{selectedSplitterRegionLabel}</div>
+                    </div>
+                    <div className="rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase">
+                      {splitterPresets.length} saved area preset{splitterPresets.length === 1 ? '' : 's'}
+                    </div>
+                  </div>
+                  <select
+                    value={selectedSplitterRegionSourceId}
+                    onChange={(event) => setSelectedSplitterRegionSourceId(event.target.value as SplitterRegionSourceId)}
+                    className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold"
+                  >
+                    <option value="current">Current shared splitter area</option>
+                    {splitterPresets.map((preset) => (
+                      <option key={preset.id} value={`preset:${preset.id}`}>
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="text-[11px] font-bold text-slate-600">
+                    Super Image Aligner always uses the selected splitter area. Super Image Export and Super Export
+                    Videos reuse it when one is chosen.
+                  </div>
+                </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <button
                     onClick={handleExtractFrames}
@@ -1506,9 +1202,10 @@ export function FrameExtractorMode({
                   </button>
                 </div>
 
-                {!hasSavedSharedRegion && (
+                {!hasSelectedSplitterRegion && (
                   <div className="rounded-2xl border-2 border-black bg-[#FDE68A] px-4 py-3 text-[11px] font-bold text-slate-800">
-                    Save a shared split area in Splitter mode to unlock Super Image Aligner.
+                    Save a shared split area in Splitter mode, or choose one of the saved area presets, to unlock
+                    Super Image Aligner.
                   </div>
                 )}
               </div>
@@ -1589,15 +1286,6 @@ export function FrameExtractorMode({
                       <div className="text-sm font-black uppercase">Super Video Export</div>
                       <div className="text-xs font-bold text-slate-700">
                         {superSummary.validPuzzleCount} valid | {superSummary.exportedVideoCount} videos
-                        {superSummary.thumbnailEnabled ? ` | ${superSummary.exportedThumbnailCount} thumbnails` : ''}
-                      </div>
-                      <div className="text-xs font-bold text-slate-700">
-                        Mode:{' '}
-                        {superSummary.exportMode === 'thumbnails_only'
-                          ? 'Thumbnails only'
-                          : superSummary.exportMode === 'videos_and_thumbnails'
-                          ? 'Videos + thumbnails'
-                          : 'Videos only'}
                       </div>
                       <div className="text-xs font-bold text-slate-700">
                         Batch sizes: {superSummary.batchSizes.length > 0 ? superSummary.batchSizes.join(', ') : 'none'}

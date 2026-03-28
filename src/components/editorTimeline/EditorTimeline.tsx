@@ -148,7 +148,7 @@ const WaveformPreview = React.memo(function WaveformPreview({ waveform }: { wave
   );
 });
 
-const ThumbnailStrip = React.memo(function ThumbnailStrip({
+const FrameStrip = React.memo(function FrameStrip({
   clip,
   frameCount
 }: {
@@ -159,7 +159,7 @@ const ThumbnailStrip = React.memo(function ThumbnailStrip({
     <div className="absolute inset-x-1 bottom-1 flex h-6 gap-1 overflow-hidden rounded-lg">
       {Array.from({ length: frameCount }, (_, index) => (
         <div
-          key={`${clip.id}-thumb-${index}`}
+          key={`${clip.id}-frame-${index}`}
           className="relative min-w-0 flex-1 overflow-hidden rounded-md border border-white/10"
           style={{
             background:
@@ -213,7 +213,7 @@ const TimelineClipBlock = React.memo(function TimelineClipBlock({
   const showCompact = detailLevel !== 'minimal' && detailAllowed;
   const showDetailed = detailLevel === 'detailed' && width > 150;
   const showTrimHandles = isEditable && selected && width > 56;
-  const thumbnailFrames = Math.min(7, Math.max(3, Math.floor(width / 66)));
+  const frameStripCount = Math.min(7, Math.max(3, Math.floor(width / 66)));
 
   return (
     <button
@@ -242,7 +242,7 @@ const TimelineClipBlock = React.memo(function TimelineClipBlock({
     >
       <div className="absolute inset-0 opacity-70">
         {(clip.type === 'video' || clip.type === 'overlay') && showDetailed && (
-          <ThumbnailStrip clip={clip} frameCount={thumbnailFrames} />
+          <FrameStrip clip={clip} frameCount={frameStripCount} />
         )}
         {clip.type === 'audio' && clip.waveform && <WaveformPreview waveform={clip.waveform} />}
         {clip.previewUrl && showDetailed && (

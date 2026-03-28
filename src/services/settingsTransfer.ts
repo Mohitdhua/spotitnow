@@ -2,11 +2,14 @@ import type { CustomVideoLayout, GeneratedBackgroundPack, VideoSettings } from '
 import type { WatermarkSelectionPreset } from './watermarkRemoval';
 import {
   applySplitterSetupSnapshot,
+  loadSplitterSetupPresets,
   loadAppGlobalSettings,
   readCurrentSplitterSetupSnapshot,
+  replaceSplitterSetupPresets,
   sanitizeAppGlobalSettings,
   saveAppGlobalSettings,
   type AppGlobalSettings,
+  type SplitterSetupPreset,
   type SplitterSetupSnapshot
 } from './appSettings';
 import { loadGameAudioMuted, saveGameAudioMuted } from './gameAudio';
@@ -48,11 +51,12 @@ import { loadWatermarkPresets, replaceWatermarkPresets } from './watermarkPreset
 import { VIDEO_AUDIO_POOL_KEYS } from '../utils/videoAudioPools';
 
 export interface AppSettingsTransferBundle {
-  kind: 'spotitnow-settings-transfer@v5';
-  version: 5;
+  kind: 'spotitnow-settings-transfer@v6';
+  version: 6;
   exportedAt: string;
   appSettings: AppGlobalSettings;
   splitterSetup: SplitterSetupSnapshot;
+  splitterPresets: SplitterSetupPreset[];
   timestampPresets: FrameTimestampPreset[];
   watermarkPresets: WatermarkSelectionPreset[];
   videoPackages: VideoUserPackage[];
@@ -67,6 +71,7 @@ export interface AppSettingsTransferBundle {
 export interface ApplyAppSettingsTransferResult {
   appSettings: AppGlobalSettings;
   splitterSetup: SplitterSetupSnapshot;
+  splitterPresetCount: number;
   timestampPresetCount: number;
   watermarkPresetCount: number;
   videoPackageCount: number;
@@ -83,8 +88,10 @@ interface CreateBundleOverrides {
   gameAudioMuted?: boolean;
 }
 
-const TRANSFER_KIND = 'spotitnow-settings-transfer@v5';
-const TRANSFER_VERSION = 5;
+const TRANSFER_KIND = 'spotitnow-settings-transfer@v6';
+const TRANSFER_VERSION = 6;
+const LEGACY_TRANSFER_KIND_V5 = 'spotitnow-settings-transfer@v5';
+const LEGACY_TRANSFER_VERSION_V5 = 5;
 const LEGACY_TRANSFER_KIND_V4 = 'spotitnow-settings-transfer@v4';
 const LEGACY_TRANSFER_VERSION_V4 = 4;
 const LEGACY_TRANSFER_KIND_V3 = 'spotitnow-settings-transfer@v3';
@@ -100,6 +107,7 @@ const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
 const hasKnownTransferField = (value: Record<string, unknown>) =>
   'appSettings' in value ||
   'splitterSetup' in value ||
+  'splitterPresets' in value ||
   'timestampPresets' in value ||
   'watermarkPresets' in value ||
   'sceneCopyPresets' in value ||
@@ -118,6 +126,7 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
   if (
     'kind' in value &&
     value.kind !== TRANSFER_KIND &&
+    value.kind !== LEGACY_TRANSFER_KIND_V5 &&
     value.kind !== LEGACY_TRANSFER_KIND_V4 &&
     value.kind !== LEGACY_TRANSFER_KIND_V3 &&
     value.kind !== LEGACY_TRANSFER_KIND_V2 &&
@@ -129,6 +138,7 @@ const parseTransferCandidate = (value: unknown): Record<string, unknown> | null 
   if (
     'version' in value &&
     value.version !== TRANSFER_VERSION &&
+    value.version !== LEGACY_TRANSFER_VERSION_V5 &&
     value.version !== LEGACY_TRANSFER_VERSION_V4 &&
     value.version !== LEGACY_TRANSFER_VERSION_V3 &&
     value.version !== LEGACY_TRANSFER_VERSION_V2 &&
@@ -268,6 +278,7 @@ export const createAppSettingsTransferBundle = async (
     exportedAt: new Date().toISOString(),
     appSettings,
     splitterSetup: readCurrentSplitterSetupSnapshot(),
+    splitterPresets: loadSplitterSetupPresets(),
     timestampPresets: loadFrameTimestampPresets(),
     watermarkPresets: loadWatermarkPresets(),
     videoPackages: videoPackageLibrary.packages,
@@ -327,6 +338,10 @@ export const applyAppSettingsTransferBundle = async (
       ? (candidate.splitterSetup as unknown as SplitterSetupSnapshot)
       : currentBundle.splitterSetup
   );
+  const splitterPresets =
+    'splitterPresets' in candidate
+      ? replaceSplitterSetupPresets(candidate.splitterPresets)
+      : currentBundle.splitterPresets;
   const timestampPresets =
     'timestampPresets' in candidate
       ? replaceFrameTimestampPresets(candidate.timestampPresets)
@@ -380,6 +395,7 @@ export const applyAppSettingsTransferBundle = async (
   return {
     appSettings,
     splitterSetup,
+    splitterPresetCount: splitterPresets.length,
     timestampPresetCount: timestampPresets.length,
     watermarkPresetCount: watermarkPresets.length,
     videoPackageCount: videoPackageLibrary.packages.length,

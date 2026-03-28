@@ -9,7 +9,17 @@ import {
 import { PROGRESS_BAR_THEMES, resolveProgressBarFillColors, type ProgressBarVisualStyle } from '../constants/progressBarThemes';
 import { VideoSettings } from '../types';
 import type { ProgressBarRenderMode } from '../services/progressBarExport';
-import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import {
+  resolveSmoothTextProgressFillColors,
+  resolveTextProgressFillSpan,
+  resolveTextProgressSpanFromMetrics
+} from '../utils/textProgressFill';
+import {
+  resolveTextProgressBaseAccent,
+  resolveTextProgressEffectFrame,
+  resolveTextProgressShellStyle
+} from '../utils/textProgressEffects';
+import { drawTextProgressCanvasEffects } from '../utils/textProgressCanvasEffects';
 import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
 
 type ProgressBarExportSettings = Pick<
@@ -266,15 +276,22 @@ const drawTextFillProgress = (
   remainingPercent: number,
   style: ProgressBarVisualStyle,
   theme: (typeof PROGRESS_BAR_THEMES)[ProgressBarVisualStyle],
-  scale: number
+  scale: number,
+  animationSeconds: number
 ) => {
   const safeLabel = label.trim() || 'PROGRESS';
-  const fontSize = resolveTextProgressFontSize(safeLabel, rect.width, rect.height, Math.max(22, 38 * scale));
-  const fillWidth = Math.max(0, Math.min(rect.width, (rect.width * clamp(remainingPercent, 0, 100)) / 100));
   const textX = rect.x + rect.width / 2;
   const textY = rect.y + rect.height * 0.68;
-  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08));
   const fillColors = resolveTextProgressFillColors(remainingPercent, style, theme);
+  const shellStyle = resolveTextProgressShellStyle(style, fillColors);
+  const fontSize = Math.max(
+    12,
+    Math.round(
+      resolveTextProgressFontSize(safeLabel, rect.width, rect.height, Math.max(22, 38 * scale)) *
+        shellStyle.fontScale
+    )
+  );
+  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08 * shellStyle.strokeScale));
   const textCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(rect.width)), Math.max(1, Math.ceil(rect.height)));
   const textCtx = textCanvas.getContext('2d');
 
@@ -284,6 +301,19 @@ const drawTextFillProgress = (
   textCtx.textAlign = 'center';
   textCtx.textBaseline = 'alphabetic';
   textCtx.font = `900 ${fontSize}px "Arial Black", "Segoe UI", sans-serif`;
+  const textSpan = resolveTextProgressSpanFromMetrics(rect.width, textCtx.measureText(safeLabel));
+  const fillSpan = resolveTextProgressFillSpan(textSpan, clamp(remainingPercent, 0, 100) / 100);
+  const textEffects = resolveTextProgressEffectFrame({
+    style,
+    width: rect.width,
+    height: rect.height,
+    fillX: fillSpan.left,
+    fillWidth: fillSpan.fillWidth,
+    spanWidth: fillSpan.width,
+    fillRatio: fillSpan.fillRatio,
+    animationSeconds,
+    fillColors
+  });
   textCtx.fillStyle = '#000000';
   textCtx.fillText(safeLabel, rect.width / 2, rect.height * 0.68);
   textCtx.globalCompositeOperation = 'source-in';
@@ -292,15 +322,23 @@ const drawTextFillProgress = (
   gradient.addColorStop(0.58, fillColors.middle);
   gradient.addColorStop(1, fillColors.end);
   textCtx.fillStyle = gradient;
-  textCtx.fillRect(0, 0, fillWidth, rect.height);
+  textCtx.fillRect(fillSpan.left, 0, fillSpan.fillWidth, rect.height);
+  drawTextProgressCanvasEffects(
+    textCtx,
+    textEffects,
+    fillSpan.left,
+    fillSpan.fillWidth,
+    rect.height,
+    resolveTextProgressBaseAccent(style, fillColors)
+  );
 
   ctx.save();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   ctx.font = `900 ${fontSize}px "Arial Black", "Segoe UI", sans-serif`;
   ctx.lineWidth = strokeWidth;
-  ctx.strokeStyle = '#111827';
-  ctx.fillStyle = TEXT_PROGRESS_EMPTY_FILL;
+  ctx.strokeStyle = shellStyle.stroke;
+  ctx.fillStyle = shellStyle.fill;
   ctx.strokeText(safeLabel, textX, textY);
   ctx.fillText(safeLabel, textX, textY);
   ctx.drawImage(textCanvas, rect.x, rect.y, rect.width, rect.height);
@@ -348,7 +386,7 @@ const drawFrame = (
   };
 
   if (renderMode === 'text_fill') {
-    drawTextFillProgress(ctx, trackRect, progressLabel, remaining * 100, style, theme, width / 1280);
+    drawTextFillProgress(ctx, trackRect, progressLabel, remaining * 100, style, theme, width / 1280, timestamp);
     return;
   }
 

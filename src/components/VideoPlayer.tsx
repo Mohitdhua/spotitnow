@@ -23,7 +23,13 @@ import { loadGeneratedBackgroundPacks } from '../services/backgroundPacks';
 import { resolveGeneratedBackgroundForIndex } from '../services/generatedBackgrounds';
 import { resolveVisualThemeStyle } from '../constants/videoThemes';
 import { clampLogoZoom } from '../utils/logoProcessing';
-import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import { createIsolatedVideoFramePreviewRenderer } from '../services/videoExport';
+import { resolveSmoothTextProgressFillColors } from '../utils/textProgressFill';
+import {
+  resolveTextProgressBaseAccent,
+  resolveTextProgressEffectFrame,
+  resolveTextProgressShellStyle
+} from '../utils/textProgressEffects';
 import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
 import {
   revealTypewriterText,
@@ -35,6 +41,7 @@ import { decodeAudioBufferFromSource } from '../utils/audioDecode';
 import { useProcessedLogoSrc } from '../hooks/useProcessedLogoSrc';
 import { loadVideoAssetBlob } from '../services/videoAssetStore';
 import {
+  VIDEO_AUDIO_CUE_POOL_MAX_VOLUME,
   VIDEO_AUDIO_POOL_KEYS,
   resolveVideoAudioCyclePoolIndex,
   resolveVideoAudioEventPoolIndex
@@ -762,6 +769,7 @@ const resolvePhaseAudioLevel = (
 };
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+const INTRO_PREVIEW_FRAME_RATE = 12;
 
 const HUD_PRESETS = {
   rightStack: {
@@ -1051,7 +1059,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [introVideoUrl, setIntroVideoUrl] = useState<string | null>(null);
   const [introVideoReady, setIntroVideoReady] = useState(false);
   const [introVideoError, setIntroVideoError] = useState(false);
+  const [introPreviewFrameUrl, setIntroPreviewFrameUrl] = useState<string | null>(null);
+  const [introPreviewFrameError, setIntroPreviewFrameError] = useState(false);
   const introVideoRef = useRef<HTMLVideoElement | null>(null);
+  const introPreviewRendererRef = useRef<ReturnType<typeof createIsolatedVideoFramePreviewRenderer> | null>(null);
+  if (!introPreviewRendererRef.current) {
+    introPreviewRendererRef.current = createIsolatedVideoFramePreviewRenderer();
+  }
   const introVideoEnabled = settings.introVideoEnabled;
   const introVideoSrc = settings.introVideoSrc;
   const introClipActive = introVideoEnabled && Boolean(introVideoSrc);
@@ -1151,6 +1165,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       }
     };
   }, [introVideoUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (introPreviewFrameUrl) {
+        URL.revokeObjectURL(introPreviewFrameUrl);
+      }
+    };
+  }, [introPreviewFrameUrl]);
+
+  useEffect(() => {
+    const renderer = introPreviewRendererRef.current;
+    return () => {
+      renderer?.dispose();
+    };
+  }, []);
 
   useEffect(() => {
     if (phase === 'intro' && introVideoUrl) {
@@ -1373,10 +1402,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       const nodes = ensureAudioGraph(ctx);
       const phaseGain = resolvePhaseAudioLevel(settings.sfxPhaseLevels, phase);
-      const masterVolume = clamp01(settings.soundEffectsVolume) * phaseGain;
-      if (masterVolume <= 0) return;
-
       const pool = settings.audioCuePools[kind];
+      const poolVolume = Math.min(
+        VIDEO_AUDIO_CUE_POOL_MAX_VOLUME,
+        Math.max(0, pool.volume ?? 1)
+      );
+      const masterVolume = clamp01(settings.soundEffectsVolume) * phaseGain * poolVolume;
+      if (masterVolume <= 0) return;
       if (!pool.enabled) return 0;
       const buffers = audioBuffersRef.current.sfxPools[kind];
       if (!buffers.length) return 0;
@@ -2200,7 +2232,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : 0;
   const visualTimeLeft = isPlaying ? smoothedTimeLeft : timeLeft;
   const phaseElapsed = Math.max(0, phaseDuration - visualTimeLeft);
-  const showIntroClip = phase === 'intro' && Boolean(introVideoUrl) && introVideoReady;
+  const introPreviewTimestamp =
+    phase === 'intro' && introClipActive && hasPuzzles
+      ? Math.floor(Math.max(0, phaseElapsed) * INTRO_PREVIEW_FRAME_RATE) /
+        INTRO_PREVIEW_FRAME_RATE
+      : null;
+  const showIntroClip = phase === 'intro' && Boolean(introPreviewFrameUrl);
   const introClipAudioEnabled = settings.previewSoundEnabled;
   const generatedBackgroundCoversHeader =
     Boolean(currentGeneratedBackground) &&
@@ -2208,25 +2245,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     !showIntroClip;
 
   useEffect(() => {
-    if (!showIntroClip || !introVideoUrl) return;
     const video = introVideoRef.current;
-    if (!video || !introVideoReady) return;
+    if (!video || !introVideoReady || !introVideoUrl || phase !== 'intro') return;
     const safeDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : introDuration;
     const targetTime = Math.min(Math.max(0, phaseElapsed), Math.max(0, safeDuration - 0.04));
     if (!Number.isFinite(targetTime)) return;
-    if (Math.abs(video.currentTime - targetTime) > 0.03) {
+    if (Math.abs(video.currentTime - targetTime) > (isPlaying ? 0.2 : 0.03)) {
       try {
         video.currentTime = targetTime;
       } catch {
         // Ignore sync errors while metadata is still loading.
       }
     }
-  }, [showIntroClip, introVideoUrl, introVideoReady, phaseElapsed, introDuration]);
+  }, [phase, introVideoUrl, introVideoReady, phaseElapsed, introDuration, isPlaying]);
 
   useEffect(() => {
     const video = introVideoRef.current;
     if (!video) return;
-    const shouldPlay = showIntroClip && Boolean(introVideoUrl) && introClipAudioEnabled && isPlaying;
+    const shouldPlay =
+      phase === 'intro' &&
+      Boolean(introVideoUrl) &&
+      introVideoReady &&
+      introClipAudioEnabled &&
+      isPlaying;
     video.muted = !introClipAudioEnabled;
     if (shouldPlay) {
       const playPromise = video.play();
@@ -2242,7 +2283,65 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         // Ignore pause errors for partially loaded clips.
       }
     }
-  }, [showIntroClip, introVideoUrl, introClipAudioEnabled, isPlaying]);
+  }, [phase, introVideoUrl, introVideoReady, introClipAudioEnabled, isPlaying]);
+
+  useEffect(() => {
+    if (introPreviewTimestamp == null) {
+      setIntroPreviewFrameError(false);
+      setIntroPreviewFrameUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+        return null;
+      });
+      return;
+    }
+
+    const abortController = new AbortController();
+    let cancelled = false;
+
+    const loadIntroPreviewFrame = async () => {
+      try {
+        const renderer = introPreviewRendererRef.current;
+        if (!renderer) {
+          return;
+        }
+        const result = await renderer.render({
+          puzzles,
+          settings,
+          timestamp: introPreviewTimestamp,
+          signal: abortController.signal
+        });
+        if (cancelled) {
+          return;
+        }
+        const nextUrl = URL.createObjectURL(result.blob);
+        setIntroPreviewFrameUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return nextUrl;
+        });
+        setIntroPreviewFrameError(false);
+      } catch (error) {
+        if (
+          cancelled ||
+          (error instanceof DOMException && error.name === 'AbortError')
+        ) {
+          return;
+        }
+        console.error('Failed to render intro clip frame for preview', error);
+        setIntroPreviewFrameError(true);
+      }
+    };
+
+    void loadIntroPreviewFrame();
+
+    return () => {
+      cancelled = true;
+      abortController.abort();
+    };
+  }, [introPreviewTimestamp, puzzles, settings]);
 
   const progressPercent =
     phaseDuration <= 0
@@ -3364,11 +3463,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const sweepGradientId = `${textProgressId}-sweep`;
     const width = progressTextWidthPx;
     const height = progressTextHeightPx;
-    const fontSize = textProgressFontSize;
-    const strokeWidth = textProgressStrokeWidth;
+    const generatedTextProgressStyle = settings.generatedProgressEnabled ? settings.generatedProgressStyle : null;
+    const textProgressShellStyle = resolveTextProgressShellStyle(
+      generatedTextProgressStyle,
+      textProgressFillColors
+    );
+    const fontSize = Math.max(12, Math.round(textProgressFontSize * textProgressShellStyle.fontScale));
+    const strokeWidth = Math.max(2, Math.round(textProgressStrokeWidth * textProgressShellStyle.strokeScale));
     const textY = Math.round(height * 0.68);
-    const shellFill = TEXT_PROGRESS_EMPTY_FILL;
-    const shellStroke = '#111827';
+    const shellFill = textProgressShellStyle.fill;
+    const shellStroke = textProgressShellStyle.stroke;
     const textSpan = measureTextProgressSpan(
       styledProgressLabel,
       width,
@@ -3378,6 +3482,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     );
     const fillX = Math.max(0, Math.min(width, textSpan.left));
     const fillWidth = Math.max(0, Math.min(textSpan.width, (textSpan.width * displayedProgressPercent) / 100));
+    const textProgressEffects = resolveTextProgressEffectFrame({
+      style: generatedTextProgressStyle,
+      width,
+      height,
+      fillX,
+      fillWidth,
+      spanWidth: textSpan.width,
+      fillRatio: textSpan.width > 0 ? fillWidth / textSpan.width : 0,
+      animationSeconds: phaseElapsed,
+      fillColors: textProgressFillColors
+    });
+    const textProgressBaseAccent = resolveTextProgressBaseAccent(
+      generatedTextProgressStyle,
+      textProgressFillColors
+    );
     const shouldShowTextProgressSweep = progressMotionState.sweepActive;
     const textSweepWidth = Math.max(18, Math.round(textSpan.width * 0.18));
     const textSweepX = fillX + textSpan.width * progressMotionState.sweepProgress - textSweepWidth / 2;
@@ -3434,6 +3553,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </text>
           <g clipPath={`url(#${clipId})`}>
             <rect x={fillX} y="0" width={fillWidth} height={height} fill={`url(#${gradientId})`} />
+            {textProgressBaseAccent && (
+              <rect
+                x={fillX}
+                y="0"
+                width={fillWidth}
+                height={height}
+                fill={textProgressBaseAccent}
+                opacity={0.08}
+              />
+            )}
+            {textProgressEffects.bands.map((band, index) => (
+              <rect
+                key={`band-${index}`}
+                x={band.x - band.width / 2}
+                y={band.y - band.height / 2}
+                width={band.width}
+                height={band.height}
+                fill={band.color}
+                opacity={band.opacity}
+                transform={`rotate(${band.angle} ${band.x} ${band.y})`}
+              />
+            ))}
+            {textProgressEffects.orbs.map((orb, index) => (
+              <ellipse
+                key={`orb-${index}`}
+                cx={orb.cx}
+                cy={orb.cy}
+                rx={orb.rx}
+                ry={orb.ry}
+                fill={orb.color}
+                opacity={orb.opacity}
+              />
+            ))}
             {shouldShowTextProgressSweep && (
               <rect
                 x={textSweepX}
@@ -3831,9 +3983,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             muted={!introClipAudioEnabled}
             playsInline
             preload="auto"
-            className={`absolute inset-0 h-full w-full object-cover pointer-events-none z-0 ${
-              introVideoReady ? 'opacity-100' : 'opacity-0'
-            }`}
+            className="absolute h-0 w-0 opacity-0 pointer-events-none"
+            aria-hidden="true"
             onLoadedData={() => {
               setIntroVideoReady(true);
               setIntroVideoError(false);
@@ -3854,6 +4005,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               setIntroVideoReady(false);
               setIntroVideoError(true);
             }}
+          />
+        )}
+        {showIntroClip && introPreviewFrameUrl && (
+          <img
+            src={introPreviewFrameUrl}
+            alt="Intro clip preview"
+            className="absolute inset-0 h-full w-full object-cover pointer-events-none z-0"
           />
         )}
         {generatedBackgroundCoversHeader && currentGeneratedBackground && (
@@ -4286,7 +4444,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           {phase === 'intro' && !showIntroClip && renderSceneCard('intro')}
           {phase === 'intro' && !showIntroClip && introClipActive && (
             <div className="absolute top-4 right-4 z-40 rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase">
-              {introVideoError ? 'Intro Clip Failed' : 'Intro Clip Loading'}
+              {introVideoError || introPreviewFrameError ? 'Intro Clip Failed' : 'Intro Clip Loading'}
             </div>
           )}
           {phase === 'transitioning' && renderTransitionOverlay()}

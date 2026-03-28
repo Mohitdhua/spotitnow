@@ -32,7 +32,6 @@ export const createSeededEditorTimeline = (): EditorTimelineState => ({
           sourceIn: 0,
           sourceOut: 8.3,
           color: '#2563EB',
-          thumbnailHints: ['wide', 'puzzle', 'intro'],
           effects: [{ id: 'fx-main-color', label: 'Color Boost', tone: '#93C5FD' }],
           editable: true
         },
@@ -47,7 +46,6 @@ export const createSeededEditorTimeline = (): EditorTimelineState => ({
           sourceIn: 1.4,
           sourceOut: 11,
           color: '#1D4ED8',
-          thumbnailHints: ['reveal', 'close', 'motion'],
           editable: true
         }
       ]
@@ -70,7 +68,6 @@ export const createSeededEditorTimeline = (): EditorTimelineState => ({
           sourceIn: 0.8,
           sourceOut: 10.9,
           color: '#0F766E',
-          thumbnailHints: ['phone', 'detail', 'insert'],
           editable: true
         },
         {

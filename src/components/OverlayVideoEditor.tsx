@@ -48,7 +48,16 @@ import {
 } from '../constants/progressBarThemes';
 import { VISUAL_THEMES } from '../constants/videoThemes';
 import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
-import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import {
+  measureTextProgressSpan,
+  resolveSmoothTextProgressFillColors,
+  resolveTextProgressFillSpan
+} from '../utils/textProgressFill';
+import {
+  resolveTextProgressBaseAccent,
+  resolveTextProgressEffectFrame,
+  resolveTextProgressShellStyle
+} from '../utils/textProgressEffects';
 
 interface DragState {
   pointerId: number;
@@ -341,16 +350,42 @@ const resolveTextProgressFontSize = (text: string, width: number, height: number
 };
 
 const OverlayTextFillProgress: React.FC<{
+  style: VideoSettings['generatedProgressStyle'] | null;
   fillRatio: number;
   label: string;
   start: string;
   middle: string;
   end: string;
-}> = ({ fillRatio, label, start, middle, end }) => {
+  animationSeconds: number;
+}> = ({ style, fillRatio, label, start, middle, end, animationSeconds }) => {
   const safeLabel = label.trim() || 'SPOT THE 3 DIFFERENCES';
   const svgId = React.useId().replace(/:/g, '');
-  const fillWidth = 320 * clamp(fillRatio, 0, 1);
-  const fontSize = resolveTextProgressFontSize(safeLabel, 320, 54, 30);
+  const fillColors = { start, middle, end };
+  const shellStyle = resolveTextProgressShellStyle(style, fillColors);
+  const fontSize = Math.max(
+    12,
+    Math.round(resolveTextProgressFontSize(safeLabel, 320, 54, 30) * shellStyle.fontScale)
+  );
+  const textSpan = measureTextProgressSpan(
+    safeLabel,
+    320,
+    fontSize,
+    '"Arial Black", "Segoe UI", sans-serif',
+    900
+  );
+  const fillSpan = resolveTextProgressFillSpan(textSpan, fillRatio);
+  const textEffects = resolveTextProgressEffectFrame({
+    style,
+    width: 320,
+    height: 54,
+    fillX: fillSpan.left,
+    fillWidth: fillSpan.fillWidth,
+    spanWidth: fillSpan.width,
+    fillRatio: fillSpan.fillRatio,
+    animationSeconds,
+    fillColors
+  });
+  const baseAccent = resolveTextProgressBaseAccent(style, fillColors);
 
   return (
     <svg viewBox="0 0 320 54" className="block h-full w-full overflow-visible" preserveAspectRatio="none">
@@ -380,15 +415,48 @@ const OverlayTextFillProgress: React.FC<{
         fontFamily='"Arial Black", "Segoe UI", sans-serif'
         fontWeight="900"
         fontSize={fontSize}
-        fill={TEXT_PROGRESS_EMPTY_FILL}
-        stroke="#111827"
-        strokeWidth={Math.max(2, Math.round(fontSize * 0.08))}
+        fill={shellStyle.fill}
+        stroke={shellStyle.stroke}
+        strokeWidth={Math.max(2, Math.round(fontSize * 0.08 * shellStyle.strokeScale))}
         paintOrder="stroke fill"
       >
         {safeLabel}
       </text>
       <g clipPath={`url(#${svgId}-clip)`}>
-        <rect x="0" y="0" width={fillWidth} height="54" fill={`url(#${svgId}-gradient)`} />
+        <rect x={fillSpan.left} y="0" width={fillSpan.fillWidth} height="54" fill={`url(#${svgId}-gradient)`} />
+        {baseAccent && (
+          <rect
+            x={fillSpan.left}
+            y="0"
+            width={fillSpan.fillWidth}
+            height="54"
+            fill={baseAccent}
+            opacity={0.08}
+          />
+        )}
+        {textEffects.bands.map((band, index) => (
+          <rect
+            key={`band-${index}`}
+            x={band.x - band.width / 2}
+            y={band.y - band.height / 2}
+            width={band.width}
+            height={band.height}
+            fill={band.color}
+            opacity={band.opacity}
+            transform={`rotate(${band.angle} ${band.x} ${band.y})`}
+          />
+        ))}
+        {textEffects.orbs.map((orb, index) => (
+          <ellipse
+            key={`orb-${index}`}
+            cx={orb.cx}
+            cy={orb.cy}
+            rx={orb.rx}
+            ry={orb.ry}
+            fill={orb.color}
+            opacity={orb.opacity}
+          />
+        ))}
       </g>
     </svg>
   );
@@ -1362,6 +1430,8 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
       renderMode,
       fillRatio,
       fillPercent: fillRatio * 100,
+      generatedStyle: settings.generatedProgressEnabled ? settings.generatedProgressStyle : null,
+      animationSeconds: elapsed,
       label: settings.textTemplates.progressLabel || 'SPOT THE 3 DIFFERENCES',
       trackBg: previewProgressTheme.progressTrackBg,
       trackBorder: previewProgressTheme.progressTrackBorder,
@@ -3535,11 +3605,13 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
                     {previewProgressPresentation.renderMode === 'text_fill' ? (
                       <div className="mx-auto h-12 max-w-[320px] rounded-xl border-2 border-black bg-black/72 px-3 py-1 shadow-[0_10px_24px_rgba(0,0,0,0.28)]">
                         <OverlayTextFillProgress
+                          style={previewProgressPresentation.generatedStyle}
                           fillRatio={previewProgressPresentation.fillRatio}
                           label={previewProgressPresentation.label}
                           start={previewProgressPresentation.textFillColors.start}
                           middle={previewProgressPresentation.textFillColors.middle}
                           end={previewProgressPresentation.textFillColors.end}
+                          animationSeconds={previewProgressPresentation.animationSeconds}
                         />
                       </div>
                     ) : (

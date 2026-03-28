@@ -582,6 +582,99 @@ const upsertAssistPlacementCandidate = (
   }
 };
 
+const createAssistAlignmentViewport = (source: HTMLCanvasElement): HTMLCanvasElement => {
+  const minSize = 24;
+  const trimX = clamp(Math.round(source.width * 0.05), 0, Math.max(0, Math.floor((source.width - minSize) / 2)));
+  const trimTop = clamp(Math.round(source.height * 0.1), 0, Math.max(0, source.height - minSize));
+  const trimBottom = clamp(
+    Math.round(source.height * 0.05),
+    0,
+    Math.max(0, source.height - trimTop - minSize)
+  );
+  const width = Math.max(minSize, source.width - trimX * 2);
+  const height = Math.max(minSize, source.height - trimTop - trimBottom);
+
+  if (width >= source.width && height >= source.height) {
+    return source;
+  }
+
+  return cropCanvas(source, {
+    x: trimX,
+    y: trimTop,
+    width,
+    height
+  });
+};
+
+const estimateBestHorizontalAlignmentOffset = (
+  first: HTMLCanvasElement,
+  second: HTMLCanvasElement,
+  maxShiftRatio = 0.18
+): AlignmentOffset => {
+  const targetWidth = Math.max(1, Math.min(first.width, second.width));
+  const targetHeight = Math.max(1, Math.min(first.height, second.height));
+  const sampleScale = Math.min(1, 320 / Math.max(targetWidth, targetHeight));
+  const sampleWidth = Math.max(64, Math.round(targetWidth * sampleScale));
+  const sampleHeight = Math.max(64, Math.round(targetHeight * sampleScale));
+  const grayA = toGrayscale(first, sampleWidth, sampleHeight);
+  const grayB = toGrayscale(second, sampleWidth, sampleHeight);
+  const maxShift = Math.max(4, Math.floor(sampleWidth * maxShiftRatio));
+  const minOverlapRatio = 0.72;
+  const strideX = sampleWidth >= 240 ? 2 : 1;
+  const strideY = sampleHeight >= 180 ? 2 : 1;
+
+  const evaluateShift = (dx: number): number => {
+    const xStart = Math.max(0, dx);
+    const xEnd = Math.min(sampleWidth, sampleWidth + dx);
+    const overlapWidth = xEnd - xStart;
+    if (overlapWidth <= 2) return Number.POSITIVE_INFINITY;
+
+    const overlapRatio = overlapWidth / sampleWidth;
+    if (overlapRatio < minOverlapRatio) return Number.POSITIVE_INFINITY;
+
+    let diffSum = 0;
+    let count = 0;
+
+    for (let y = 0; y < sampleHeight; y += strideY) {
+      const rowOffset = y * sampleWidth;
+      for (let x = xStart; x < xEnd; x += strideX) {
+        const aIndex = rowOffset + x;
+        const bIndex = rowOffset + (x - dx);
+        diffSum += Math.abs(grayA[aIndex] - grayB[bIndex]);
+        count += 1;
+      }
+    }
+
+    if (!count) return Number.POSITIVE_INFINITY;
+    return diffSum / count + Math.abs(dx) * 0.03;
+  };
+
+  let bestDx = 0;
+  let bestScore = evaluateShift(0);
+
+  for (let dx = -maxShift; dx <= maxShift; dx += 2) {
+    const score = evaluateShift(dx);
+    if (score < bestScore) {
+      bestScore = score;
+      bestDx = dx;
+    }
+  }
+
+  for (let dx = bestDx - 3; dx <= bestDx + 3; dx += 1) {
+    const score = evaluateShift(dx);
+    if (score < bestScore) {
+      bestScore = score;
+      bestDx = dx;
+    }
+  }
+
+  return {
+    dx: Math.round(bestDx * (targetWidth / sampleWidth)),
+    dy: 0,
+    score: bestScore
+  };
+};
+
 const scoreLinkedSplitPairDetectorPass = (
   regionCount: number,
   totalAreaRatio: number,
@@ -715,7 +808,7 @@ const searchLinkedSplitPairAssistOffset = async (
     source.width,
     source.height
   );
-  const scale = Math.min(1, 160 / Math.max(1, normalizedSelection.size));
+  const scale = Math.min(1, 224 / Math.max(1, normalizedSelection.size));
   const scaledWidth = Math.max(64, Math.round(source.width * scale));
   const scaledHeight = Math.max(64, Math.round(source.height * scale));
   const gray = toGrayscale(source, scaledWidth, scaledHeight);
@@ -736,33 +829,25 @@ const searchLinkedSplitPairAssistOffset = async (
   const stride = scaledSize >= 96 ? 3 : 2;
   const minCandidateX = clamp(safeFirstX + scaledSize, 0, Math.max(0, scaledWidth - scaledSize));
   const maxCandidateX = Math.max(minCandidateX, scaledWidth - scaledSize);
-  const maxShiftX = Math.max(10, Math.round(scaledSize * 1.4));
-  const maxShiftY = Math.max(8, Math.round(scaledSize * 0.32));
+  const maxShiftX = Math.max(14, Math.round(scaledSize * 2.25));
   const searchStartX = clamp(safeSecondX - maxShiftX, minCandidateX, maxCandidateX);
   const searchEndX = clamp(safeSecondX + maxShiftX, minCandidateX, maxCandidateX);
-  const searchStartY = clamp(safeSecondY - maxShiftY, 0, Math.max(0, scaledHeight - scaledSize));
-  const searchEndY = clamp(safeSecondY + maxShiftY, 0, Math.max(0, scaledHeight - scaledSize));
 
-  const evaluateAt = (candidateX: number, candidateY: number): number =>
+  const evaluateAt = (candidateX: number): number =>
     evaluateGrayPatchDifference(
       referencePatch,
       gray,
       scaledWidth,
       candidateX,
-      candidateY,
+      safeSecondY,
       scaledSize,
       stride,
-      (Math.abs(candidateX - safeSecondX) + Math.abs(candidateY - safeSecondY)) * 0.18
+      Math.abs(candidateX - safeSecondX) * 0.05
     );
 
   const candidates: AssistPlacementCandidate[] = [];
-  const considerCandidate = (candidateX: number, candidateY: number) => {
-    if (
-      candidateX < minCandidateX ||
-      candidateX > maxCandidateX ||
-      candidateY < 0 ||
-      candidateY > scaledHeight - scaledSize
-    ) {
+  const considerCandidate = (candidateX: number) => {
+    if (candidateX < minCandidateX || candidateX > maxCandidateX) {
       return;
     }
 
@@ -770,46 +855,45 @@ const searchLinkedSplitPairAssistOffset = async (
       candidates,
       {
         x: candidateX,
-        y: candidateY,
-        patchScore: evaluateAt(candidateX, candidateY)
+        y: safeSecondY,
+        patchScore: evaluateAt(candidateX)
       },
-      10
+      24
     );
   };
 
-  considerCandidate(safeSecondX, safeSecondY);
+  considerCandidate(safeSecondX);
+  considerCandidate(searchStartX);
+  considerCandidate(searchEndX);
+  considerCandidate(minCandidateX);
+  considerCandidate(maxCandidateX);
 
-  const coarseStep = Math.max(2, Math.round(scaledSize * 0.06));
-  for (let candidateY = searchStartY; candidateY <= searchEndY; candidateY += coarseStep) {
-    for (let candidateX = searchStartX; candidateX <= searchEndX; candidateX += coarseStep) {
-      considerCandidate(candidateX, candidateY);
-    }
+  const localStep = Math.max(1, Math.round(scaledSize * 0.03));
+  for (let candidateX = searchStartX; candidateX <= searchEndX; candidateX += localStep) {
+    considerCandidate(candidateX);
   }
 
-  const wideStep = Math.max(3, Math.round(scaledSize * 0.08));
-  for (let candidateY = 0; candidateY <= Math.max(0, scaledHeight - scaledSize); candidateY += wideStep) {
-    for (let candidateX = minCandidateX; candidateX <= maxCandidateX; candidateX += wideStep) {
-      considerCandidate(candidateX, candidateY);
-    }
+  const wideStep = Math.max(2, Math.round(scaledSize * 0.05));
+  for (let candidateX = minCandidateX; candidateX <= maxCandidateX; candidateX += wideStep) {
+    considerCandidate(candidateX);
   }
 
   const refinementSeeds = [...candidates];
-  for (const seed of refinementSeeds) {
-    for (let candidateY = seed.y - coarseStep; candidateY <= seed.y + coarseStep; candidateY += 1) {
-      for (let candidateX = seed.x - coarseStep; candidateX <= seed.x + coarseStep; candidateX += 1) {
-        considerCandidate(candidateX, candidateY);
-      }
+  for (const seed of refinementSeeds.slice(0, 12)) {
+    for (let candidateX = seed.x - localStep * 2; candidateX <= seed.x + localStep * 2; candidateX += 1) {
+      considerCandidate(candidateX);
     }
   }
 
   const scaleX = source.width / scaledWidth;
-  const scaleY = source.height / scaledHeight;
   const firstCanvas = cropCanvas(source, first);
+  const alignmentFirstCanvas = createAssistAlignmentViewport(firstCanvas);
   let bestFinalCandidate: AssistPlacementCandidate | null = null;
+  let bestFinalSourceSecondX = second.x;
   let bestFinalScore = Number.POSITIVE_INFINITY;
 
-  for (const candidate of candidates.slice(0, 6)) {
-    const sourceSecondX = clamp(
+  for (const candidate of candidates.slice(0, 10)) {
+    let sourceSecondX = clamp(
       Math.round(candidate.x * scaleX),
       normalizedSelection.x + normalizedSelection.size,
       Math.max(
@@ -817,17 +901,32 @@ const searchLinkedSplitPairAssistOffset = async (
         source.width - normalizedSelection.size
       )
     );
-    const sourceSecondY = clamp(
-      Math.round(candidate.y * scaleY),
-      0,
-      Math.max(0, source.height - normalizedSelection.size)
-    );
-    const secondCanvas = cropCanvas(source, {
+    let secondCanvas = cropCanvas(source, {
       x: sourceSecondX,
-      y: sourceSecondY,
+      y: normalizedSelection.y,
       width: normalizedSelection.size,
       height: normalizedSelection.size
     });
+    const alignmentOffset = estimateBestHorizontalAlignmentOffset(
+      alignmentFirstCanvas,
+      createAssistAlignmentViewport(secondCanvas)
+    );
+    if (alignmentOffset.dx !== 0) {
+      sourceSecondX = clamp(
+        sourceSecondX + alignmentOffset.dx,
+        normalizedSelection.x + normalizedSelection.size,
+        Math.max(
+          normalizedSelection.x + normalizedSelection.size,
+          source.width - normalizedSelection.size
+        )
+      );
+      secondCanvas = cropCanvas(source, {
+        x: sourceSecondX,
+        y: normalizedSelection.y,
+        width: normalizedSelection.size,
+        height: normalizedSelection.size
+      });
+    }
     const finalScore = await scoreLinkedSplitPairAssistCandidate(
       firstCanvas,
       secondCanvas,
@@ -836,25 +935,27 @@ const searchLinkedSplitPairAssistOffset = async (
     if (finalScore < bestFinalScore) {
       bestFinalScore = finalScore;
       bestFinalCandidate = candidate;
+      bestFinalSourceSecondX = sourceSecondX;
     }
   }
 
-  const winner = bestFinalCandidate ?? candidates[0] ?? { x: safeSecondX, y: safeSecondY, patchScore: evaluateAt(safeSecondX, safeSecondY) };
-  const adjustedSecondX = clamp(
-    Math.round(winner.x * scaleX),
-    normalizedSelection.x + normalizedSelection.size,
-    Math.max(
-      normalizedSelection.x + normalizedSelection.size,
-      source.width - normalizedSelection.size
-    )
-  );
+  const winner = bestFinalCandidate ?? candidates[0] ?? { x: safeSecondX, y: safeSecondY, patchScore: evaluateAt(safeSecondX) };
+  const adjustedSecondX = bestFinalCandidate
+    ? bestFinalSourceSecondX
+    : clamp(
+        Math.round(winner.x * scaleX),
+        normalizedSelection.x + normalizedSelection.size,
+        Math.max(
+          normalizedSelection.x + normalizedSelection.size,
+          source.width - normalizedSelection.size
+        )
+      );
   const adjustedGap = clamp(
     adjustedSecondX - normalizedSelection.x - normalizedSelection.size,
     0,
     Math.max(0, source.width - normalizedSelection.x - normalizedSelection.size * 2)
   );
   const dx = adjustedSecondX - second.x;
-  const dy = Math.round(winner.y * scaleY) - second.y;
 
   return {
     selection: normalizeLinkedSplitPairSelection(
@@ -866,7 +967,7 @@ const searchLinkedSplitPairAssistOffset = async (
       source.height
     ),
     dx,
-    dy,
+    dy: 0,
     score: Number((bestFinalCandidate ? bestFinalScore : winner.patchScore).toFixed(2))
   };
 };

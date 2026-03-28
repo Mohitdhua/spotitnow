@@ -6,6 +6,7 @@ import type {
   ProjectWorkspaceSnapshot,
   VideoSettings
 } from '../../types';
+import { normalizeAppRoute } from '../../app/normalizeAppRoute';
 import {
   exportStoredImageAssetMap,
   importStoredImageAssetMap
@@ -64,6 +65,14 @@ const createVideoSnapshot = (settings: VideoSettings): ProjectVideoSnapshot => (
   settings
 });
 
+const normalizeProjectRecord = (project: ProjectRecord): ProjectRecord => ({
+  ...project,
+  uiSnapshot: {
+    ...(project.uiSnapshot ?? defaultUiSnapshot('/')),
+    lastRoute: normalizeAppRoute(project.uiSnapshot?.lastRoute)
+  }
+});
+
 const collectProjectAudioSources = (settings: VideoSettings): Array<string | undefined> => [
   settings.backgroundMusicSrc,
   ...VIDEO_AUDIO_POOL_KEYS.flatMap((key) => settings.audioCuePools[key]?.sources ?? [])
@@ -115,7 +124,11 @@ export const listProjects = async (): Promise<ProjectRecord[]> => {
     request.onerror = () => reject(request.error ?? new Error('Failed to list projects.'));
     request.onsuccess = () => {
       const records = (request.result as ProjectRecord[] | undefined) ?? [];
-      resolve([...records].sort((left, right) => right.lastOpenedAt - left.lastOpenedAt));
+      resolve(
+        [...records]
+          .map((record) => normalizeProjectRecord(record))
+          .sort((left, right) => right.lastOpenedAt - left.lastOpenedAt)
+      );
     };
   });
 };
@@ -128,7 +141,10 @@ export const loadProject = async (id: string): Promise<ProjectRecord | null> => 
     const tx = db.transaction(STORE_NAME, 'readonly');
     const request = tx.objectStore(STORE_NAME).get(id);
     request.onerror = () => reject(request.error ?? new Error('Failed to load project.'));
-    request.onsuccess = () => resolve((request.result as ProjectRecord | undefined) ?? null);
+    request.onsuccess = () => {
+      const record = (request.result as ProjectRecord | undefined) ?? null;
+      resolve(record ? normalizeProjectRecord(record) : null);
+    };
   });
 };
 
@@ -139,7 +155,7 @@ export const saveProject = async (project: ProjectRecord): Promise<ProjectRecord
 
   const db = await openProjectDb();
   const nextProject: ProjectRecord = {
-    ...project,
+    ...normalizeProjectRecord(project),
     kind: 'spotitnow-project',
     version: 1,
     updatedAt: Date.now()
@@ -236,7 +252,7 @@ export const parseImportedProject = async (raw: string): Promise<ProjectRecord> 
   );
 
   return {
-    ...envelope.project,
+    ...normalizeProjectRecord(envelope.project),
     id: createProjectId(),
     name: envelope.project.name.trim() || 'Imported Project',
     updatedAt: Date.now(),
@@ -247,6 +263,9 @@ export const parseImportedProject = async (raw: string): Promise<ProjectRecord> 
         ...nextSettings
       }
     },
-    uiSnapshot: envelope.project.uiSnapshot ?? defaultUiSnapshot('/')
+    uiSnapshot: {
+      ...(envelope.project.uiSnapshot ?? defaultUiSnapshot('/')),
+      lastRoute: normalizeAppRoute(envelope.project.uiSnapshot?.lastRoute)
+    }
   };
 };

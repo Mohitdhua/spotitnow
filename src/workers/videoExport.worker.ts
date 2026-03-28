@@ -37,7 +37,13 @@ import { drawGeneratedBackground, resolveGeneratedBackgroundForIndex } from '../
 import { isStoredImageAssetSource, loadImageAssetBlob } from '../services/imageAssetStore';
 import { decodeRuntimeImageBitmapFromBlob } from '../services/canvasRuntime';
 import { clampLogoZoom } from '../utils/logoProcessing';
-import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import { resolveSmoothTextProgressFillColors } from '../utils/textProgressFill';
+import {
+  resolveTextProgressBaseAccent,
+  resolveTextProgressEffectFrame,
+  resolveTextProgressShellStyle
+} from '../utils/textProgressEffects';
+import { drawTextProgressCanvasEffects } from '../utils/textProgressCanvasEffects';
 import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
 import {
   revealTypewriterText,
@@ -47,6 +53,7 @@ import {
 } from '../utils/videoTransitionMotion';
 import { isDesignerTimerStyle } from '../utils/timerPackShared';
 import {
+  VIDEO_AUDIO_CUE_POOL_MAX_VOLUME,
   resolveVideoAudioCyclePoolIndex,
   resolveVideoAudioEventPoolIndex
 } from '../utils/videoAudioPools';
@@ -646,7 +653,12 @@ const buildExportAudioMixSample = (
   if (hasSfx) {
     cueEvents.forEach((event) => {
       const phaseGain = resolvePhaseLevel(settings.sfxPhaseLevels, event.phase);
-      const gain = clamp01(settings.soundEffectsVolume) * phaseGain;
+      const cueVolume = clamp(
+        settings.audioCuePools[event.kind]?.volume ?? 1,
+        0,
+        VIDEO_AUDIO_CUE_POOL_MAX_VOLUME
+      );
+      const gain = clamp01(settings.soundEffectsVolume) * phaseGain * cueVolume;
       if (gain <= 0) return;
 
       const timestamp = clamp(event.timestamp, 0, totalDuration);
@@ -920,6 +932,8 @@ const drawTextProgressLabel = (
   styleModules: ReturnType<typeof resolveVideoStyleModules>,
   visualTheme: VisualTheme,
   scale: number,
+  generatedStyle: VideoSettings['generatedProgressStyle'] | null,
+  animationSeconds: number,
   dynamicFillColors?: ReturnType<typeof resolveProgressBarFillColors>,
   sweep?: {
     active: boolean;
@@ -933,18 +947,20 @@ const drawTextProgressLabel = (
   const x = rect.x;
   const y = rect.y;
   const textRect: Rect = { x, y, width, height, radius: 0 };
-  const fontSize = resolveTextProgressFontSize(
-    safeLabel,
-    width,
-    height,
-    Math.max(18, height * 1.24, width, 28 * scale)
+  const fillColors = resolveTextProgressFillColors(colorPercent, visualTheme, dynamicFillColors);
+  const shellStyle = resolveTextProgressShellStyle(generatedStyle, fillColors);
+  const fontSize = Math.max(
+    12,
+    Math.round(
+      resolveTextProgressFontSize(safeLabel, width, height, Math.max(18, height * 1.24, width, 28 * scale)) *
+        shellStyle.fontScale
+    )
   );
   const textX = x + width / 2;
   const textY = y + height * 0.68;
-  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08));
-  const shellFill = TEXT_PROGRESS_EMPTY_FILL;
-  const shellStroke = '#111827';
-  const fillColors = resolveTextProgressFillColors(colorPercent, visualTheme, dynamicFillColors);
+  const strokeWidth = Math.max(2, Math.round(fontSize * 0.08 * shellStyle.strokeScale));
+  const shellFill = shellStyle.fill;
+  const shellStroke = shellStyle.stroke;
   const textCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
   const textCtx = textCanvas.getContext('2d');
 
@@ -963,6 +979,19 @@ const drawTextProgressLabel = (
   );
   const fillX = Math.max(0, (width - textSpanWidth) / 2);
   const fillWidth = Math.max(0, Math.min(textSpanWidth, (textSpanWidth * clamp(fillPercent, 0, 100)) / 100));
+  const fillRatio = textSpanWidth > 0 ? fillWidth / textSpanWidth : 0;
+  const textProgressEffects = resolveTextProgressEffectFrame({
+    style: generatedStyle,
+    width,
+    height,
+    fillX,
+    fillWidth,
+    spanWidth: textSpanWidth,
+    fillRatio,
+    animationSeconds,
+    fillColors
+  });
+  const textProgressBaseAccent = resolveTextProgressBaseAccent(generatedStyle, fillColors);
   textCtx.fillStyle = '#000000';
   textCtx.fillText(safeLabel, width / 2, height * 0.68);
   textCtx.globalCompositeOperation = 'source-in';
@@ -972,6 +1001,14 @@ const drawTextProgressLabel = (
   gradient.addColorStop(1, fillColors.end);
   textCtx.fillStyle = gradient;
   textCtx.fillRect(fillX, 0, fillWidth, height);
+  drawTextProgressCanvasEffects(
+    textCtx,
+    textProgressEffects,
+    fillX,
+    fillWidth,
+    height,
+    textProgressBaseAccent
+  );
   if (sweep?.active && sweep.opacity > 0) {
     const sweepWidth = Math.max(18, textSpanWidth * 0.18);
     const sweepCenterX = fillX + textSpanWidth * sweep.progress;
@@ -3353,6 +3390,8 @@ const drawFrame = (
           styleModules,
           progressTrackTheme,
           uiScale,
+          settings.generatedProgressEnabled ? settings.generatedProgressStyle : null,
+          scene.phaseElapsed,
           generatedProgressFillColors,
           {
             active: shouldShowProgressSweep,
@@ -3660,6 +3699,8 @@ const drawFrame = (
               styleModules,
               progressTrackTheme,
               classicLayoutScale,
+              settings.generatedProgressEnabled ? settings.generatedProgressStyle : null,
+              scene.phaseElapsed,
               generatedProgressFillColors,
               {
                 active: shouldShowProgressSweep,
@@ -3760,6 +3801,8 @@ const drawFrame = (
             styleModules,
             progressTrackTheme,
             classicLayoutScale,
+            settings.generatedProgressEnabled ? settings.generatedProgressStyle : null,
+            scene.phaseElapsed,
             generatedProgressFillColors,
             {
               active: shouldShowProgressSweep,
@@ -4112,6 +4155,8 @@ const drawFrame = (
             styleModules,
             progressTrackTheme,
             nonClassicScale,
+            settings.generatedProgressEnabled ? settings.generatedProgressStyle : null,
+            scene.phaseElapsed,
             generatedProgressFillColors,
             {
               active: shouldShowProgressSweep,

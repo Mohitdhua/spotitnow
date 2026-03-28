@@ -44,7 +44,13 @@ import type {
   OverlayWorkerOutputTarget,
   OverlayWorkerStartPayload
 } from '../services/overlayVideoExport';
-import { resolveSmoothTextProgressFillColors, TEXT_PROGRESS_EMPTY_FILL } from '../utils/textProgressFill';
+import { resolveSmoothTextProgressFillColors } from '../utils/textProgressFill';
+import {
+  resolveTextProgressBaseAccent,
+  resolveTextProgressEffectFrame,
+  resolveTextProgressShellStyle
+} from '../utils/textProgressEffects';
+import { drawTextProgressCanvasEffects } from '../utils/textProgressCanvasEffects';
 import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
 
 interface WorkerStartMessage {
@@ -390,6 +396,8 @@ const drawTextProgressLabel = (
   styleModules: ReturnType<typeof resolveVideoStyleModules>,
   visualTheme: VisualTheme,
   scale: number,
+  generatedStyle: OverlayExportSettings['generatedProgressStyle'] | null,
+  animationSeconds: number,
   dynamicFillColors?: ReturnType<typeof resolveProgressBarFillColors>,
   sweep?: {
     active: boolean;
@@ -400,13 +408,15 @@ const drawTextProgressLabel = (
   const safeLabel = label.trim() || 'PROGRESS';
   const width = Math.max(1, rect.width);
   const height = Math.max(1, rect.height);
-  const fontSize = resolveTextProgressFontSize(
-    safeLabel,
-    width,
-    height,
-    Math.max(18, height * 1.24, width, 28 * scale)
-  );
   const fillColors = resolveSmoothTextProgressFillColors(colorPercent, visualTheme, dynamicFillColors);
+  const shellStyle = resolveTextProgressShellStyle(generatedStyle, fillColors);
+  const fontSize = Math.max(
+    12,
+    Math.round(
+      resolveTextProgressFontSize(safeLabel, width, height, Math.max(18, height * 1.24, width, 28 * scale)) *
+        shellStyle.fontScale
+    )
+  );
   const textCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
   const textCtx = textCanvas.getContext('2d');
   if (!textCtx) return;
@@ -422,6 +432,19 @@ const drawTextProgressLabel = (
   );
   const fillX = Math.max(0, (width - textSpanWidth) / 2);
   const fillWidth = Math.max(0, Math.min(textSpanWidth, (textSpanWidth * clamp(fillPercent, 0, 100)) / 100));
+  const fillRatio = textSpanWidth > 0 ? fillWidth / textSpanWidth : 0;
+  const textProgressEffects = resolveTextProgressEffectFrame({
+    style: generatedStyle,
+    width,
+    height,
+    fillX,
+    fillWidth,
+    spanWidth: textSpanWidth,
+    fillRatio,
+    animationSeconds,
+    fillColors
+  });
+  const textProgressBaseAccent = resolveTextProgressBaseAccent(generatedStyle, fillColors);
   textCtx.fillStyle = '#000000';
   textCtx.fillText(safeLabel, width / 2, height * 0.68);
   textCtx.globalCompositeOperation = 'source-in';
@@ -431,6 +454,14 @@ const drawTextProgressLabel = (
   gradient.addColorStop(1, fillColors.end);
   textCtx.fillStyle = gradient;
   textCtx.fillRect(fillX, 0, fillWidth, height);
+  drawTextProgressCanvasEffects(
+    textCtx,
+    textProgressEffects,
+    fillX,
+    fillWidth,
+    height,
+    textProgressBaseAccent
+  );
 
   if (sweep?.active && sweep.opacity > 0) {
     const sweepWidth = Math.max(18, textSpanWidth * 0.18);
@@ -453,9 +484,9 @@ const drawTextProgressLabel = (
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   ctx.font = `${styleModules.text.titleCanvasWeight} ${fontSize}px ${styleModules.text.titleCanvasFamily}`;
-  ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
-  ctx.strokeStyle = '#111827';
-  ctx.fillStyle = TEXT_PROGRESS_EMPTY_FILL;
+  ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.08 * shellStyle.strokeScale));
+  ctx.strokeStyle = shellStyle.stroke;
+  ctx.fillStyle = shellStyle.fill;
   ctx.strokeText(safeLabel, rect.x + width / 2, rect.y + height * 0.68);
   ctx.fillText(safeLabel, rect.x + width / 2, rect.y + height * 0.68);
   ctx.drawImage(textCanvas, rect.x, rect.y, width, height);
@@ -661,6 +692,8 @@ const drawOverlayProgressBar = (options: {
       styleModules,
       visualTheme,
       scale,
+      settings.generatedProgressEnabled ? settings.generatedProgressStyle : null,
+      elapsed,
       generatedFillColors,
       {
         active: motionState.sweepActive,
