@@ -18,7 +18,12 @@ import {
   createVideoPackageTransferBundle,
   resolveImportedVideoPackageSettings
 } from '../../services/videoPackageTransfer';
-import { cancelVideoExport, exportVideoWithWebCodecs, getVideoExportPlan } from '../../services/videoExport';
+import {
+  cancelVideoExport,
+  exportVideoWithWebCodecs,
+  getVideoExportPlan,
+  promptVideoExportTargetFromUserGesture
+} from '../../services/videoExport';
 import {
   getCurrentVideoSnapshot,
   getCurrentWorkspaceSnapshot,
@@ -243,6 +248,23 @@ export default function VideoSetupPage() {
     }
     if (isExporting) return;
 
+    let saveTarget = null;
+    try {
+      saveTarget = await promptVideoExportTargetFromUserGesture({
+        settings: videoSettings,
+        outputCount: exportPlan.outputCount,
+        preferredOutputMode: mode === 'resume' ? resumeRecovery?.outputMode : undefined
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Export failed. Try again.';
+      if (message === 'Export canceled') {
+        notifyInfo('Video export canceled.');
+      } else {
+        notifyError(message);
+      }
+      return;
+    }
+
     const jobId = beginExportJob({
       kind: 'video',
       label:
@@ -266,6 +288,7 @@ export default function VideoSetupPage() {
       const result = await exportVideoWithWebCodecs({
         puzzles: batch,
         settings: videoSettings,
+        saveTarget,
         recoveryMode: recoveryEnabled ? mode : undefined,
         recoveryManifestId: recoveryEnabled && mode === 'resume' ? resumeRecovery?.id ?? null : null,
         recoveryProjectId: recoveryEnabled ? recoveryProjectId : undefined,

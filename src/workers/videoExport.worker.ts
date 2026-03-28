@@ -3395,7 +3395,7 @@ const drawFrame = (
     : isStorybookStyle
     ? Math.round(18 * uiScale)
     : Math.round(styleFrameLayout.panelRadius * layoutScale);
-  const imagePanelOutlineWidth = 0;
+  const imagePanelOutlineWidth = Math.max(0, settings.imagePanelOutlineThickness) * uiScale;
   const imagePanelOutlineColor = settings.imagePanelOutlineColor || '#CEC3A5';
   const usesImagePanelOutline = imagePanelOutlineWidth > 0;
   const gamePadding = isStorybookStyle
@@ -4527,7 +4527,7 @@ const drawFrame = (
       ctx.restore();
     }
 
-    if (!isStorybookStyle && imagePanelOutlineWidth > 0) {
+    if (imagePanelOutlineWidth > 0) {
       drawRoundedRect(ctx, originalPanel, {
         stroke: imagePanelOutlineColor,
         lineWidth: imagePanelOutlineWidth

@@ -30,6 +30,7 @@ interface ExportVideoBaseOptions {
   onProgress?: (progress: number, status?: string) => void;
   diagnosticsJob?: MediaJobController | null;
   manageDiagnosticsLifecycle?: boolean;
+  saveTarget?: VideoExportSaveTarget | null;
   puzzleIndexOffset?: number;
   recoveryMode?: 'fresh' | 'resume';
   recoveryManifestId?: string | null;
@@ -71,6 +72,14 @@ interface RenderedVideoFramePreview {
   blob: Blob;
   mimeType: string;
 }
+
+type SaveFilePickerHandle = {
+  createWritable: () => Promise<FileSystemWritableFileStream>;
+};
+
+export type VideoExportSaveTarget =
+  | { kind: 'directory'; handle: FileSystemDirectoryHandle }
+  | { kind: 'file'; handle: SaveFilePickerHandle };
 
 type RenderVideoFramePreviewOptions =
   | {
@@ -782,6 +791,13 @@ const getDirectoryPicker = (): DirectoryPicker | null => {
   return (window as Window & { showDirectoryPicker?: DirectoryPicker }).showDirectoryPicker ?? null;
 };
 
+const getSaveFilePicker = () => {
+  if (typeof window === 'undefined') return null;
+  return (window as any).showSaveFilePicker as
+    | ((options?: any) => Promise<SaveFilePickerHandle>)
+    | undefined;
+};
+
 const requestVideoExportDirectory = async () => {
   const picker = getDirectoryPicker();
   if (!picker) return null;
@@ -827,6 +843,56 @@ const createDirectoryWritable = async (
 ): Promise<FileSystemWritableFileStream> => {
   const fileHandle = await directory.getFileHandle(filename, { create: true });
   return await fileHandle.createWritable();
+};
+
+export const promptVideoExportTargetFromUserGesture = async ({
+  settings,
+  outputCount,
+  preferredOutputMode
+}: {
+  settings: VideoSettings;
+  outputCount: number;
+  preferredOutputMode?: 'downloads' | 'directory';
+}): Promise<VideoExportSaveTarget | null> => {
+  if (outputCount > 1) {
+    if (!supportsDirectorySave() || preferredOutputMode === 'downloads') {
+      return null;
+    }
+
+    const directoryHandle = await requestVideoExportDirectory();
+    return directoryHandle ? { kind: 'directory', handle: directoryHandle } : null;
+  }
+
+  if (!supportsStreamingSave()) {
+    return null;
+  }
+
+  const showSaveFilePicker = getSaveFilePicker();
+  if (!showSaveFilePicker) {
+    return null;
+  }
+
+  try {
+    const fileHandle = await showSaveFilePicker({
+      suggestedName: getSuggestedFileName(settings),
+      types: [
+        {
+          description: settings.exportCodec === 'h264' ? 'MP4 Video' : 'WebM Video',
+          accept: {
+            [CODEC_MIME[settings.exportCodec]]: [`.${CODEC_EXTENSION[settings.exportCodec]}`]
+          }
+        }
+      ]
+    });
+
+    return { kind: 'file', handle: fileHandle };
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error('Export canceled');
+    }
+
+    return null;
+  }
 };
 
 export const cancelVideoExport = () => {
@@ -1258,12 +1324,19 @@ const exportVideoBatchWithWebCodecs = async (
       plan.outputCount > 1 &&
       supportsDirectorySave() &&
       (recoveryManifest ? recoveryManifest.outputMode === 'directory' : true);
-    let directoryHandle: FileSystemDirectoryHandle | null = null;
+    let directoryHandle: FileSystemDirectoryHandle | null =
+      options.saveTarget?.kind === 'directory' ? options.saveTarget.handle : null;
+
+    if (directoryHandle && recoveryManifest?.id) {
+      await saveVideoExportRecoveryDirectoryHandle(recoveryManifest.id, directoryHandle);
+    }
 
     if (shouldUseDirectoryExport && recoveryManifest?.id) {
-      const persistedHandle = await loadVideoExportRecoveryDirectoryHandle(recoveryManifest.id);
-      if (persistedHandle && (await ensureVideoExportDirectoryPermission(persistedHandle))) {
-        directoryHandle = persistedHandle;
+      if (!directoryHandle) {
+        const persistedHandle = await loadVideoExportRecoveryDirectoryHandle(recoveryManifest.id);
+        if (persistedHandle && (await ensureVideoExportDirectoryPermission(persistedHandle))) {
+          directoryHandle = persistedHandle;
+        }
       }
     }
 
@@ -1457,10 +1530,18 @@ export const exportVideoWithWebCodecs = async (options: ExportVideoOptions): Pro
     return await exportVideoBatchWithWebCodecs(options, plan);
   }
 
+  if (options.saveTarget?.kind === 'file') {
+    const writable = await options.saveTarget.handle.createWritable();
+    await streamVideoWithWebCodecs({
+      ...options,
+      writable,
+      outputFileName: getSuggestedFileName(options.settings)
+    });
+    return createVideoExportSummary(plan, false);
+  }
+
   if (supportsStreamingSave()) {
-    const showSaveFilePicker = (window as any).showSaveFilePicker as
-      | ((options?: any) => Promise<{ createWritable: () => Promise<FileSystemWritableFileStream> }>)
-      | undefined;
+    const showSaveFilePicker = getSaveFilePicker();
 
     if (showSaveFilePicker) {
       try {

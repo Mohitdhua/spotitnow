@@ -2850,7 +2850,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : 'highlight_soft';
   const circleStroke = Math.max(2, settings.circleThickness);
   const outlineStroke = Math.max(0, settings.outlineThickness);
-  const imagePanelOutlineThickness = 0;
+  const imagePanelOutlineThickness = Math.max(0, settings.imagePanelOutlineThickness);
   const usesImagePanelOutline = imagePanelOutlineThickness > 0;
   const effectiveGamePadding = !isStorybookStyle && usesImagePanelOutline ? 0 : frameLayout.gamePadding;
   const imagePanelOutlineShadow =
