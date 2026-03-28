@@ -13,6 +13,7 @@ import { CustomVideoLayout, VideoSettings } from '../types';
 import { VIDEO_PACKAGE_PRESETS, VIDEO_REVEAL_BEHAVIOR_OPTIONS } from '../constants/videoPackages';
 import { VIDEO_TRANSITION_STYLE_OPTIONS } from '../constants/videoStyleModules';
 import { TimestampPresetPicker } from './TimestampPresetPicker';
+import { DeferredNumberInput } from './DeferredNumberInput';
 import { loadGameAudioMuted } from '../services/gameAudio';
 import { loadWatermarkPresets } from '../services/watermarkPresets';
 import type { WatermarkSelectionPreset } from '../services/watermarkRemoval';
@@ -417,65 +418,56 @@ export function AppSettingsModal({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               <label className="text-xs font-black uppercase">
                 Show (s)
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={1}
                   max={90}
                   step={0.5}
                   value={draft.videoDefaults.showDuration}
-                  onChange={(event) => updateVideo('showDuration', clamp(Number(event.target.value) || 1, 1, 90))}
+                  onValueChange={(value) => updateVideo('showDuration', clamp(value, 1, 90))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
               <label className="text-xs font-black uppercase">
                 Reveal (s)
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={1}
                   max={60}
                   step={0.5}
                   value={draft.videoDefaults.revealDuration}
-                  onChange={(event) => updateVideo('revealDuration', clamp(Number(event.target.value) || 1, 1, 60))}
+                  onValueChange={(value) => updateVideo('revealDuration', clamp(value, 1, 60))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
               <label className="text-xs font-black uppercase">
                 Reveal Step (s)
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={0.5}
                   max={10}
                   step={0.5}
                   value={draft.videoDefaults.sequentialRevealStep}
-                  onChange={(event) =>
-                    updateVideo('sequentialRevealStep', clamp(Number(event.target.value) || 0.5, 0.5, 10))
-                  }
+                  onValueChange={(value) => updateVideo('sequentialRevealStep', clamp(value, 0.5, 10))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
               <label className="text-xs font-black uppercase">
                 Blink Speed (s)
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={0.2}
                   max={5}
                   step={0.1}
                   value={draft.videoDefaults.blinkSpeed}
-                  onChange={(event) => updateVideo('blinkSpeed', clamp(Number(event.target.value) || 0.2, 0.2, 5))}
+                  onValueChange={(value) => updateVideo('blinkSpeed', clamp(value, 0.2, 5))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
               <label className="text-xs font-black uppercase">
                 Transition (s)
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={0}
                   max={5}
                   step={0.5}
                   value={draft.videoDefaults.transitionDuration}
-                  onChange={(event) =>
-                    updateVideo('transitionDuration', clamp(Number(event.target.value) || 0, 0, 5))
-                  }
+                  onValueChange={(value) => updateVideo('transitionDuration', clamp(value, 0, 5))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
@@ -493,15 +485,14 @@ export function AppSettingsModal({
                   >
                     {draft.videoDefaults.sceneSettings.introEnabled ? 'On' : 'Off'}
                   </button>
-                  <input
-                    type="number"
+                  <DeferredNumberInput
                     min={0.5}
                     max={180}
                     step={0.5}
                     value={draft.videoDefaults.sceneSettings.introDuration}
-                    onChange={(event) =>
+                    onValueChange={(value) =>
                       updateVideoSceneSettings({
-                        introDuration: clamp(Number(event.target.value) || 0.5, 0.5, 180)
+                        introDuration: clamp(value, 0.5, 180)
                       })
                     }
                     className="w-full p-2 border-2 border-black rounded-lg font-bold"
@@ -522,15 +513,14 @@ export function AppSettingsModal({
                   >
                     {draft.videoDefaults.sceneSettings.outroEnabled ? 'On' : 'Off'}
                   </button>
-                  <input
-                    type="number"
+                  <DeferredNumberInput
                     min={0.5}
                     max={180}
                     step={0.5}
                     value={draft.videoDefaults.sceneSettings.outroDuration}
-                    onChange={(event) =>
+                    onValueChange={(value) =>
                       updateVideoSceneSettings({
-                        outroDuration: clamp(Number(event.target.value) || 0.5, 0.5, 180)
+                        outroDuration: clamp(value, 0.5, 180)
                       })
                     }
                     className="w-full p-2 border-2 border-black rounded-lg font-bold"
@@ -542,27 +532,21 @@ export function AppSettingsModal({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               <label className="text-xs font-black uppercase">
                 Circle Thickness
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={1}
                   max={30}
                   value={draft.videoDefaults.circleThickness}
-                  onChange={(event) =>
-                    updateVideo('circleThickness', clamp(Number(event.target.value) || 1, 1, 30))
-                  }
+                  onValueChange={(value) => updateVideo('circleThickness', clamp(value, 1, 30))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
               <label className="text-xs font-black uppercase">
                 Outline Thickness
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={0}
                   max={20}
                   value={draft.videoDefaults.outlineThickness}
-                  onChange={(event) =>
-                    updateVideo('outlineThickness', clamp(Number(event.target.value) || 0, 0, 20))
-                  }
+                  onValueChange={(value) => updateVideo('outlineThickness', clamp(value, 0, 20))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
@@ -598,15 +582,12 @@ export function AppSettingsModal({
               </label>
               <label className="text-xs font-black uppercase">
                 Bitrate (Mbps)
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={1}
                   max={80}
                   step={0.5}
                   value={draft.videoDefaults.exportBitrateMbps}
-                  onChange={(event) =>
-                    updateVideo('exportBitrateMbps', clamp(Number(event.target.value) || 1, 1, 80))
-                  }
+                  onValueChange={(value) => updateVideo('exportBitrateMbps', clamp(value, 1, 80))}
                   className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold"
                 />
               </label>
@@ -813,17 +794,11 @@ export function AppSettingsModal({
                   </label>
                   <label className="text-xs font-black uppercase">
                     Chroma Tolerance
-                    <input
-                      type="number"
+                    <DeferredNumberInput
                       min={0}
                       max={255}
                       value={draft.videoDefaults.logoChromaKeyTolerance}
-                      onChange={(event) =>
-                        updateVideo(
-                          'logoChromaKeyTolerance',
-                          clamp(Number(event.target.value) || 0, 0, 255)
-                        )
-                      }
+                      onValueChange={(value) => updateVideo('logoChromaKeyTolerance', clamp(value, 0, 255))}
                       disabled={!draft.videoDefaults.logoChromaKeyEnabled}
                       className="mt-1 w-full p-2 border-2 border-black rounded-lg font-bold disabled:opacity-50"
                     />
@@ -997,17 +972,16 @@ export function AppSettingsModal({
               </label>
               <label className="text-xs font-black uppercase">
                 Number Padding
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={0}
                   max={8}
                   value={draft.splitterDefaults.filenamePadDigits}
-                  onChange={(event) =>
+                  onValueChange={(value) =>
                     setDraft((current) => ({
                       ...current,
                       splitterDefaults: {
                         ...current.splitterDefaults,
-                        filenamePadDigits: clamp(Number(event.target.value) || 0, 0, 8)
+                        filenamePadDigits: clamp(value, 0, 8)
                       }
                     }))
                   }
@@ -1046,11 +1020,10 @@ export function AppSettingsModal({
               <label className="text-xs font-black uppercase">
                 Next Split Number
                 <div className="mt-1 flex gap-2">
-                  <input
-                    type="number"
+                  <DeferredNumberInput
                     min={1}
                     value={splitterCounterInput}
-                    onChange={(event) => setSplitterCounterInput(Math.max(1, Number(event.target.value) || 1))}
+                    onValueChange={(value) => setSplitterCounterInput(Math.max(1, Math.floor(value)))}
                     className="w-full p-2 border-2 border-black rounded-lg bg-white font-bold"
                   />
                   <button

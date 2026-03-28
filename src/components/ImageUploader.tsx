@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Image as ImageIcon, X, Layers, AlertTriangle, FileWarning, Check, Trash2, Wand2, BrainCircuit, MousePointer2, Download, Play, Edit, Video } from 'lucide-react';
+import { Upload, Image as ImageIcon, X, Layers, AlertTriangle, FileWarning, Check, Trash2, Wand2, BrainCircuit, MousePointer2, Download, Play, Edit, Video, Zap } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ProcessingMode, Puzzle, Region, PuzzleSet } from '../types';
 import { detectDifferencesClientSide, type DifferenceDetectionOptions } from '../services/imageProcessing';
 import { detectDifferences } from '../services/ai';
+import { cancelImageDetectionWorker, runImageDetectionBatchInWorker } from '../services/imageDetectionWorker';
 import { EditorCanvas } from './EditorCanvas';
 
 interface ImageUploaderProps {
@@ -83,12 +84,19 @@ export function ImageUploader({
   const missingFileInputRef = useRef<HTMLInputElement>(null);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [editingPuzzleIndex, setEditingPuzzleIndex] = useState<number | null>(null);
+  const [keepExactThreeOnly, setKeepExactThreeOnly] = useState(false);
 
   useEffect(() => {
     if (!injectedFilesSessionId || !injectedFiles?.length) return;
     processFiles(injectedFiles, injectedProcessingMode ?? undefined);
     onInjectedFilesHandled?.();
   }, [injectedFilesSessionId, injectedFiles, injectedProcessingMode, onInjectedFilesHandled]);
+
+  useEffect(() => {
+    return () => {
+      cancelImageDetectionWorker();
+    };
+  }, []);
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -766,6 +774,7 @@ export function ImageUploader({
   };
 
   const handleSplitFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (processing) return;
     const fileList = e.currentTarget.files;
     const files: File[] = fileList ? Array.from(fileList) : [];
     if (!files.length) return;
@@ -818,6 +827,7 @@ export function ImageUploader({
   };
 
   const processFiles = async (files: FileList | File[], requestedMode?: ProcessingMode) => {
+    if (processing) return;
     setProcessing(true);
     setProcessingStatus("Analyzing files...");
     setPendingSplitPairs([]);
@@ -886,6 +896,7 @@ export function ImageUploader({
   };
 
   const handleProcessingChoice = (mode: ProcessingMode) => {
+    if (processing) return;
     setShowOptionsModal(false);
     if (pendingSplitPairs.length > 0) {
       finalizeSplitPairs(pendingSplitPairs, mode);
@@ -903,6 +914,13 @@ export function ImageUploader({
       return true;
     });
 
+  const sanitizeUltraFastRegions = (regions: Region[]): Region[] =>
+    sanitizeRegions(regions).filter((region) => {
+      if (region.width < 0.011 || region.height < 0.011) return false;
+      if (region.width * region.height < 0.00055) return false;
+      return true;
+    });
+
   const splitAutoDefault: DifferenceDetectionOptions = {
     diffThreshold: 70,
     dilationPasses: 2,
@@ -913,6 +931,19 @@ export function ImageUploader({
     maxRegionAreaRatio: 0.25,
     maxRegions: 10,
     regionPaddingPx: 4
+  };
+  const ultraFastDetectionOptions: DifferenceDetectionOptions = {
+    diffThreshold: 88,
+    dilationPasses: 1,
+    minAreaRatio: 0.00038,
+    mergeDistancePx: 4,
+    blurRadius: 0,
+    borderIgnoreRatio: 0.03,
+    maxRegionAreaRatio: 0.18,
+    maxRegions: 7,
+    regionPaddingPx: 2,
+    enableAlignment: false,
+    processingMaxDimension: 520
   };
   const splitAutoSensitive: DifferenceDetectionOptions = {
     diffThreshold: 52,
@@ -934,7 +965,12 @@ export function ImageUploader({
     let finalImageB = pair.imageB;
     let regions: Region[] = [];
 
-    if (mode === 'auto') {
+    if (mode === 'ultra') {
+      const result = await detectDifferencesClientSide(pair.imageA, pair.imageB, ultraFastDetectionOptions);
+      finalImageA = result.imageA;
+      finalImageB = result.imageB;
+      regions = sanitizeUltraFastRegions(result.regions);
+    } else if (mode === 'auto') {
       const result = await detectDifferencesClientSide(pair.imageA, pair.imageB, splitAutoDefault);
       let bestResult = result;
       if (result.regions.length === 0 || result.regions.length === 1) {
@@ -987,11 +1023,79 @@ export function ImageUploader({
     };
   };
 
+  const processClientDetectionBatch = async (
+    entries: Array<{ id: string; title: string; imageA: string; imageB: string }>,
+    mode: Extract<ProcessingMode, 'ultra' | 'auto'>
+  ): Promise<Puzzle[]> => {
+    if (!entries.length) return [];
+
+    const options = mode === 'ultra' ? ultraFastDetectionOptions : splitAutoDefault;
+    const fallbackOptions = mode === 'auto' ? splitAutoSensitive : null;
+    const modePrefix = mode === 'ultra' ? 'Ultra-fast' : 'Background';
+
+    const results = await runImageDetectionBatchInWorker({
+      tasks: entries.map((entry) => ({
+        id: entry.id,
+        imageA: entry.imageA,
+        imageB: entry.imageB,
+        options,
+        fallbackOptions
+      })),
+      onProgress: ({ label }) => {
+        setProcessingStatus(`${modePrefix} ${label.toLowerCase()}`);
+      }
+    });
+
+    const resultMap = new Map(results.map((entry) => [entry.id, entry.result]));
+    return entries.reduce<Puzzle[]>((accumulator, entry) => {
+        const result = resultMap.get(entry.id);
+        if (!result) {
+          return accumulator;
+        }
+        accumulator.push({
+          imageA: result.imageA ?? entry.imageA,
+          imageB: result.imageB ?? entry.imageB,
+          regions: mode === 'ultra' ? sanitizeUltraFastRegions(result.regions) : sanitizeRegions(result.regions),
+          title: entry.title
+        } satisfies Puzzle);
+        return accumulator;
+      }, []);
+  };
+
   const finalizeSplitPairs = async (pairs: PendingSplitPair[], mode: ProcessingMode) => {
     if (!pairs.length) return;
     setProcessing(true);
 
     try {
+      if (mode === 'ultra' || mode === 'auto') {
+        setProcessingStatus(
+          `${mode === 'ultra' ? 'Ultra-fast' : 'Background'} processing split images on this page...`
+        );
+        const puzzles = await processClientDetectionBatch(
+          pairs.map((pair, index) => ({
+            id: `split-${index}-${pair.baseName}`,
+            title: pair.baseName,
+            imageA: pair.imageA,
+            imageB: pair.imageB
+          })),
+          mode
+        );
+
+        if (puzzles.length === 0) {
+          alert('Failed to process split images.');
+          return;
+        }
+
+        if (onBatchSelected) {
+          setReviewPuzzles(puzzles);
+          setShowReviewModal(true);
+        } else {
+          const firstPuzzle = puzzles[0];
+          onImagesSelected(firstPuzzle.imageA, firstPuzzle.imageB, firstPuzzle.regions);
+        }
+        return;
+      }
+
       const puzzles: Puzzle[] = [];
       let failedCount = 0;
 
@@ -1024,6 +1128,9 @@ export function ImageUploader({
       if (failedCount > 0) {
         alert(`Processed ${puzzles.length} split image(s). Skipped ${failedCount} image(s).`);
       }
+    } catch (err) {
+      console.error('Failed to process split image batch', err);
+      alert('Failed to process split images.');
     } finally {
       setPendingSplitPairs([]);
       setProcessing(false);
@@ -1044,11 +1151,28 @@ export function ImageUploader({
         
         let regions: Region[] = [];
         
-        if (mode === 'auto') {
-          setProcessingStatus("Auto-detecting differences...");
-          const result = await detectDifferencesClientSide(imageA, imageB);
-          // Use the resized images from result for better accuracy with regions
-          onImagesSelected(result.imageA, result.imageB, result.regions);
+        if (mode === 'ultra') {
+          const puzzles = await processClientDetectionBatch(
+            [{ id: 'single-ultra', title: 'Draft Puzzle', imageA, imageB }],
+            'ultra'
+          );
+          const firstPuzzle = puzzles[0];
+          if (!firstPuzzle) {
+            throw new Error('Failed to detect differences.');
+          }
+          onImagesSelected(firstPuzzle.imageA, firstPuzzle.imageB, firstPuzzle.regions);
+          setProcessing(false);
+          return;
+        } else if (mode === 'auto') {
+          const puzzles = await processClientDetectionBatch(
+            [{ id: 'single-auto', title: 'Draft Puzzle', imageA, imageB }],
+            'auto'
+          );
+          const firstPuzzle = puzzles[0];
+          if (!firstPuzzle) {
+            throw new Error('Failed to detect differences.');
+          }
+          onImagesSelected(firstPuzzle.imageA, firstPuzzle.imageB, firstPuzzle.regions);
           setProcessing(false);
           return;
         } else if (mode === 'ai') {
@@ -1080,6 +1204,41 @@ export function ImageUploader({
     const puzzles: Puzzle[] = [];
     let processed = 0;
     const total = pairs.size;
+
+    if (mode === 'ultra' || mode === 'auto') {
+      try {
+        setProcessingStatus(`Preparing ${total} puzzle${total === 1 ? '' : 's'} for background detection...`);
+        const entries: Array<{ id: string; title: string; imageA: string; imageB: string }> = [];
+
+        for (const [baseName, pair] of pairs.entries()) {
+          setProcessingStatus(`Preparing puzzle ${entries.length + 1} of ${total}...`);
+          const imageA = await readFileAsBase64(pair.base);
+          const imageB = await readFileAsBase64(pair.diff);
+          entries.push({
+            id: baseName,
+            title: baseName,
+            imageA,
+            imageB
+          });
+        }
+
+        const detectedPuzzles = await processClientDetectionBatch(entries, mode);
+        setReviewPuzzles(detectedPuzzles);
+        setProcessing(false);
+        setShowBatchModal(false);
+        setIncompletePairs([]);
+        setPendingSplitPairs([]);
+        validPairsRef.current.clear();
+        setShowReviewModal(true);
+        return;
+      } catch (err) {
+        console.error('Failed to process puzzle batch in background', err);
+        alert('Failed to process images.');
+        setProcessing(false);
+        validPairsRef.current.clear();
+        return;
+      }
+    }
     
     for (const [baseName, pair] of pairs.entries()) {
       try {
@@ -1091,12 +1250,7 @@ export function ImageUploader({
         let finalImageA = imageA;
         let finalImageB = imageB;
 
-        if (mode === 'auto') {
-          const result = await detectDifferencesClientSide(imageA, imageB);
-          regions = result.regions;
-          finalImageA = result.imageA;
-          finalImageB = result.imageB;
-        } else if (mode === 'ai') {
+        if (mode === 'ai') {
           const aiRegions = await detectDifferences(imageA, imageB);
           regions = aiRegions.map(r => ({
             id: Math.random().toString(36).substring(2),
@@ -1129,10 +1283,12 @@ export function ImageUploader({
   };
 
   const handleExport = () => {
+    const puzzlesToExport = activeReviewPuzzles;
+    if (!puzzlesToExport.length) return;
     const puzzleSet: PuzzleSet = {
       title: 'Exported Puzzles',
       version: 1,
-      puzzles: reviewPuzzles
+      puzzles: puzzlesToExport
     };
     const blob = new Blob([JSON.stringify(puzzleSet)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1181,13 +1337,14 @@ export function ImageUploader({
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const handleExportImagePairs = async () => {
-    if (!reviewPuzzles.length) return;
+    const puzzlesToExport = activeReviewPuzzles;
+    if (!puzzlesToExport.length) return;
 
     let exported = 0;
     let failed = 0;
 
-    for (let i = 0; i < reviewPuzzles.length; i += 1) {
-      const puzzle = reviewPuzzles[i];
+    for (let i = 0; i < puzzlesToExport.length; i += 1) {
+      const puzzle = puzzlesToExport[i];
       const sequence = i + 1;
       const baseName = `puzzle${sequence}`;
 
@@ -1210,15 +1367,15 @@ export function ImageUploader({
   };
 
   const handleConfirmBatch = () => {
-    if (onBatchSelected) {
-      onBatchSelected(reviewPuzzles);
+    if (onBatchSelected && activeReviewPuzzles.length > 0) {
+      onBatchSelected(activeReviewPuzzles);
       setShowReviewModal(false);
     }
   };
 
   const handleExportVideoFromReview = () => {
-    if (!onExportVideo || reviewPuzzles.length === 0) return;
-    onExportVideo(reviewPuzzles);
+    if (!onExportVideo || activeReviewPuzzles.length === 0) return;
+    onExportVideo(activeReviewPuzzles);
     setShowReviewModal(false);
   };
 
@@ -1235,6 +1392,7 @@ export function ImageUploader({
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
+    if (processing) return;
     
     if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
       processFiles(e.dataTransfer.files);
@@ -1242,6 +1400,7 @@ export function ImageUploader({
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (processing) return;
     if (e.target.files && e.target.files.length > 0) {
       processFiles(e.target.files);
     }
@@ -1297,6 +1456,12 @@ export function ImageUploader({
     setEditingPuzzleIndex(null);
   };
 
+  const activeReviewEntries = reviewPuzzles
+    .map((puzzle, index) => ({ puzzle, index }))
+    .filter((entry) => !keepExactThreeOnly || entry.puzzle.regions.length === 3);
+  const activeReviewPuzzles = activeReviewEntries.map((entry) => entry.puzzle);
+  const filteredOutCount = reviewPuzzles.length - activeReviewPuzzles.length;
+
   return (
     <div className="w-full max-w-2xl mx-auto p-4 sm:p-6">
       <div 
@@ -1324,19 +1489,29 @@ export function ImageUploader({
           
           <div className="mt-6 flex w-full flex-col gap-3 sm:mt-8 sm:flex-row sm:justify-center sm:gap-4">
             <button 
+              disabled={processing}
               onClick={() => fileInputRef.current?.click()}
-              className="w-full justify-center px-6 py-3 bg-white border-2 border-black text-black rounded-xl font-bold hover:bg-slate-50 transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto"
+              className={`w-full justify-center px-6 py-3 border-2 border-black rounded-xl font-bold transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                processing
+                  ? 'cursor-not-allowed bg-slate-200 text-slate-500 shadow-none'
+                  : 'bg-white text-black hover:bg-slate-50 hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+              }`}
             >
               <ImageIcon size={20} strokeWidth={2.5} />
-              <span>SELECT FILES</span>
+              <span>{processing ? 'PROCESSING...' : 'SELECT FILES'}</span>
             </button>
             {onBatchSelected && (
               <button 
+                disabled={processing}
                 onClick={() => batchInputRef.current?.click()}
-                className="w-full justify-center px-6 py-3 bg-[#4ECDC4] border-2 border-black text-black rounded-xl font-bold hover:bg-[#3DBDB4] transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto"
+                className={`w-full justify-center px-6 py-3 border-2 border-black rounded-xl font-bold transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                  processing
+                    ? 'cursor-not-allowed bg-slate-200 text-slate-500 shadow-none'
+                    : 'bg-[#4ECDC4] text-black hover:bg-[#3DBDB4] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                }`}
               >
                 <Layers size={20} strokeWidth={2.5} />
-                <span>BATCH SELECT</span>
+                <span>{processing ? 'WORKING IN BACKGROUND' : 'BATCH SELECT'}</span>
               </button>
             )}
           </div>
@@ -1490,6 +1665,19 @@ export function ImageUploader({
                 </button>
 
                 <button 
+                  onClick={() => handleProcessingChoice('ultra')}
+                  className="w-full flex items-center p-4 bg-[#FEF3C7] hover:bg-[#FDE68A] border-2 border-black rounded-xl transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group text-left"
+                >
+                  <div className="w-14 h-14 bg-amber-200 text-amber-900 border-2 border-black rounded-lg flex items-center justify-center mr-4 group-hover:bg-white transition-all">
+                    <Zap size={28} strokeWidth={2.5} />
+                  </div>
+                  <div>
+                    <div className="font-black text-lg text-black uppercase">Ultra Fast</div>
+                    <div className="text-sm text-slate-600 font-medium">Skip alignment and keep only larger obvious changes for perfectly aligned pairs</div>
+                  </div>
+                </button>
+
+                <button 
                   onClick={() => handleProcessingChoice('auto')}
                   className="w-full flex items-center p-4 bg-[#E0E7FF] hover:bg-[#C7D2FE] border-2 border-black rounded-xl transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] group text-left"
                 >
@@ -1498,7 +1686,7 @@ export function ImageUploader({
                   </div>
                   <div>
                     <div className="font-black text-lg text-black uppercase">Auto Detection (Fast)</div>
-                    <div className="text-sm text-slate-600 font-medium">Instant client-side algorithm</div>
+                    <div className="text-sm text-slate-600 font-medium">Balanced client-side detect with alignment and cleanup</div>
                   </div>
                 </button>
 
@@ -1551,30 +1739,49 @@ export function ImageUploader({
                   <h3 className="text-xl sm:text-2xl font-black text-black font-display uppercase">Review Puzzles</h3>
                   <p className="text-black font-medium text-sm">Check detected differences and confirm.</p>
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className="flex flex-col gap-2 sm:items-end">
+                  <button
+                    type="button"
+                    onClick={() => setKeepExactThreeOnly((current) => !current)}
+                    className={`inline-flex items-center gap-2 rounded-full border-2 border-black px-3 py-1.5 text-[11px] font-black uppercase tracking-wide transition-colors ${
+                      keepExactThreeOnly ? 'bg-[#4ECDC4] text-black' : 'bg-white text-slate-700 hover:bg-slate-100'
+                    }`}
+                    title="Keep only puzzles with exactly 3 differences"
+                  >
+                    <span
+                      className={`h-3 w-3 rounded-full border border-black ${keepExactThreeOnly ? 'bg-black' : 'bg-transparent'}`}
+                    />
+                    Only 3 Diffs
+                  </button>
                   <span className="px-4 py-1 bg-black text-[#FFD93D] border-2 border-black shadow-[2px_2px_0px_0px_rgba(255,255,255,0.5)] rounded-full text-sm font-bold">
-                    {reviewPuzzles.length} PUZZLES
+                    {keepExactThreeOnly ? `${activeReviewPuzzles.length} OF ${reviewPuzzles.length}` : reviewPuzzles.length} PUZZLES
                   </span>
                 </div>
               </div>
               
               <div className="p-6 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-6 bg-[#FFFDF5]">
-                {reviewPuzzles.map((puzzle, idx) => (
-                  <div key={idx} className="bg-white p-4 rounded-xl border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col space-y-3 group hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all">
+                {keepExactThreeOnly && filteredOutCount > 0 ? (
+                  <div className="md:col-span-2 rounded-2xl border-2 border-black bg-[#FFF7ED] px-4 py-3 text-sm font-bold text-slate-700">
+                    Keeping only exact 3-difference puzzles. {filteredOutCount} puzzle{filteredOutCount === 1 ? '' : 's'} hidden.
+                  </div>
+                ) : null}
+
+                {activeReviewEntries.length ? activeReviewEntries.map(({ puzzle, index }) => (
+                  <div key={`${puzzle.title ?? 'puzzle'}-${index}`} className="bg-white p-4 rounded-xl border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col space-y-3 group hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all">
                     <div className="flex items-start justify-between gap-2">
                       <h4 className="min-w-0 font-bold text-black truncate pr-2 font-display text-base sm:text-lg" title={puzzle.title}>
-                        {puzzle.title || `Puzzle ${idx + 1}`}
+                        {puzzle.title || `Puzzle ${index + 1}`}
                       </h4>
                       <div className="flex flex-shrink-0 space-x-2">
                         <button 
-                          onClick={() => handleEditPuzzle(idx)}
+                          onClick={() => handleEditPuzzle(index)}
                           className="text-black hover:text-[#4ECDC4] transition-colors p-1 border-2 border-transparent hover:border-black hover:bg-black rounded"
                           title="Edit Puzzle"
                         >
                           <Edit size={20} strokeWidth={2.5} />
                         </button>
                         <button 
-                          onClick={() => handleRemovePuzzle(idx)}
+                          onClick={() => handleRemovePuzzle(index)}
                           className="text-black hover:text-[#FF6B6B] transition-colors p-1 border-2 border-transparent hover:border-black hover:bg-black rounded"
                           title="Remove Puzzle"
                         >
@@ -1601,7 +1808,14 @@ export function ImageUploader({
                       </div>
                     </div>
                   </div>
-                ))}
+                )) : (
+                  <div className="md:col-span-2 rounded-[20px] border-4 border-black bg-white p-6 text-center shadow-[5px_5px_0px_0px_rgba(0,0,0,1)]">
+                    <div className="text-lg font-black uppercase text-slate-900">No exact 3-diff puzzles</div>
+                    <div className="mt-2 text-sm font-semibold text-slate-600">
+                      Turn off the toggle to review the full batch, or keep it on to only continue with exact 3-difference matches.
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="p-4 sm:p-6 border-t-4 border-black bg-white flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -1615,14 +1829,24 @@ export function ImageUploader({
                 <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:space-x-0">
                   <button 
                     onClick={handleExport}
-                    className="w-full justify-center px-6 py-3 bg-white border-2 border-black text-black rounded-xl font-bold hover:bg-slate-50 transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto"
+                    disabled={activeReviewPuzzles.length === 0}
+                    className={`w-full justify-center px-6 py-3 border-2 border-black rounded-xl font-bold transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                      activeReviewPuzzles.length === 0
+                        ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
+                        : 'bg-white text-black hover:bg-slate-50 hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                    }`}
                   >
                     <Download size={20} strokeWidth={2.5} />
                     <span>EXPORT JSON</span>
                   </button>
                   <button
                     onClick={handleExportImagePairs}
-                    className="w-full justify-center px-4 py-2 bg-white border-2 border-black text-black rounded-xl font-black text-xs uppercase tracking-wide hover:bg-[#FDE68A] transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto"
+                    disabled={activeReviewPuzzles.length === 0}
+                    className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                      activeReviewPuzzles.length === 0
+                        ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
+                        : 'bg-white text-black hover:bg-[#FDE68A] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                    }`}
                   >
                     <ImageIcon size={16} strokeWidth={2.5} />
                     <span>EXPORT IMAGES</span>
@@ -1630,7 +1854,12 @@ export function ImageUploader({
                   {onExportVideo && (
                     <button
                       onClick={handleExportVideoFromReview}
-                      className="w-full justify-center px-4 py-2 bg-white border-2 border-black text-black rounded-xl font-black text-xs uppercase tracking-wide hover:bg-[#E0E7FF] transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto"
+                      disabled={activeReviewPuzzles.length === 0}
+                      className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                        activeReviewPuzzles.length === 0
+                          ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
+                          : 'bg-white text-black hover:bg-[#E0E7FF] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                      }`}
                     >
                       <Video size={16} strokeWidth={2.5} />
                       <span>EXPORT VIDEO</span>
@@ -1639,7 +1868,12 @@ export function ImageUploader({
                    
                   <button 
                     onClick={handleConfirmBatch}
-                    className="w-full justify-center px-8 py-3 bg-[#4ECDC4] text-black border-2 border-black rounded-xl font-black hover:bg-[#3DBDB4] transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 text-base sm:text-lg sm:w-auto"
+                    disabled={activeReviewPuzzles.length === 0}
+                    className={`w-full justify-center px-8 py-3 border-2 border-black rounded-xl font-black transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 text-base sm:text-lg sm:w-auto ${
+                      activeReviewPuzzles.length === 0
+                        ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
+                        : 'bg-[#4ECDC4] text-black hover:bg-[#3DBDB4] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                    }`}
                   >
                     <Play size={24} strokeWidth={3} />
                     <span>START GAME</span>
@@ -1696,10 +1930,20 @@ export function ImageUploader({
       </AnimatePresence>
 
       {processing && (
-        <div className="fixed inset-0 bg-white/90 flex items-center justify-center z-50 backdrop-blur-sm border-4 border-black m-4 rounded-3xl">
-          <div className="flex flex-col items-center space-y-6">
-            <div className="w-20 h-20 border-8 border-black border-t-[#FF6B6B] rounded-full animate-spin" />
-            <p className="text-black font-black text-2xl font-display uppercase tracking-wider">{processingStatus || "Processing..."}</p>
+        <div className="fixed bottom-5 right-5 z-[55] w-[min(24rem,calc(100vw-1.5rem))] rounded-[24px] border-4 border-black bg-white p-4 shadow-[10px_10px_0px_0px_rgba(0,0,0,1)] sm:bottom-6 sm:right-6 sm:p-5">
+          <div className="flex items-start gap-4">
+            <div className="mt-0.5 flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border-2 border-black bg-[#FFF7ED]">
+              <div className="h-9 w-9 rounded-full border-[5px] border-black border-t-[#FF6B6B] animate-spin" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[10px] font-black uppercase tracking-[0.18em] text-[#2563EB]">Background Processing</div>
+              <p className="mt-2 text-sm font-black uppercase leading-5 text-slate-900 sm:text-base">
+                {processingStatus || "Processing..."}
+              </p>
+              <p className="mt-2 text-xs font-semibold leading-5 text-slate-600">
+                Detection is running without taking over the whole screen. This page can stay open while the batch finishes.
+              </p>
+            </div>
           </div>
         </div>
       )}

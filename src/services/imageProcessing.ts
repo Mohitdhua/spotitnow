@@ -3,7 +3,9 @@ import { Region } from '../types';
 import {
   canvasToDataUrl,
   createRuntimeCanvas,
-  getRuntimeCanvasContext
+  getRuntimeCanvasContext,
+  loadRuntimeImageFromSource,
+  type RuntimeImageLike
 } from './canvasRuntime';
 
 export interface DetectedImageAlignment {
@@ -42,6 +44,7 @@ export interface DifferenceDetectionOptions {
   enableAlignment?: boolean;
   maxAlignmentShiftRatio?: number;
   minAlignmentOverlapRatio?: number;
+  processingMaxDimension?: number;
 }
 
 interface AlignmentResult {
@@ -54,6 +57,7 @@ interface AlignmentResult {
 
 const DEFAULT_DILATION_PASSES = 2;
 const DEFAULT_MERGE_DISTANCE_PX = 5;
+const DEFAULT_PROCESSING_MAX_DIMENSION = 800;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -227,26 +231,7 @@ export async function detectDifferencesClientSide(
   imageBSrc: string,
   options: DifferenceDetectionOptions = {}
 ): Promise<ProcessedPuzzleData> {
-  return new Promise((resolve, reject) => {
-    const imgA = new Image();
-    const imgB = new Image();
-    
-    let loadedCount = 0;
-    const onLoad = () => {
-      loadedCount++;
-      if (loadedCount === 2) {
-        processImages(imgA, imgB, imageASrc, imageBSrc, options).then(resolve).catch(reject);
-      }
-    };
-
-    imgA.onload = onLoad;
-    imgB.onload = onLoad;
-    imgA.onerror = () => reject(new Error("Failed to load images"));
-    imgB.onerror = () => reject(new Error("Failed to load images"));
-
-    imgA.src = imageASrc;
-    imgB.src = imageBSrc;
-  });
+  return await processImagesFromSources(imageASrc, imageBSrc, options);
 }
 
 export async function detectDifferencesClientSideCanvases(
@@ -275,31 +260,45 @@ export async function detectDifferencesClientSideCanvases(
   }
 }
 
-async function processImages(
-  imgA: HTMLImageElement,
-  imgB: HTMLImageElement,
+const getRuntimeImageDimensions = (image: RuntimeImageLike) => ({
+  width: Math.max(1, 'naturalWidth' in image ? image.naturalWidth || image.width : image.width),
+  height: Math.max(1, 'naturalHeight' in image ? image.naturalHeight || image.height : image.height)
+});
+
+const releaseRuntimeImage = (image: RuntimeImageLike) => {
+  if ('close' in image && typeof image.close === 'function') {
+    image.close();
+  }
+};
+
+async function processImagesFromSources(
   srcA: string,
   srcB: string,
   options: DifferenceDetectionOptions
 ): Promise<ProcessedPuzzleData> {
-  const width = Math.max(1, imgA.naturalWidth || imgA.width);
-  const height = Math.max(1, imgA.naturalHeight || imgA.height);
-  const sourceCanvasA = drawSourceToCanvas(imgA, width, height);
-  const sourceCanvasB = drawSourceToCanvas(imgB, width, height);
-  const processed = processCanvasImages(sourceCanvasA, sourceCanvasB, options);
-
+  const [imageA, imageB] = await Promise.all([
+    loadRuntimeImageFromSource(srcA),
+    loadRuntimeImageFromSource(srcB)
+  ]);
   try {
-    return {
-      regions: processed.regions,
-      imageA: processed.imageA === sourceCanvasA ? srcA : await canvasToDataUrl(processed.imageA, 'image/png'),
-      imageB:
-        processed.imageB === sourceCanvasB && imgB.width === width && imgB.height === height
-          ? srcB
-          : await canvasToDataUrl(processed.imageB, 'image/png'),
-      alignment: processed.alignment
-    };
+    const { width, height } = getRuntimeImageDimensions(imageA);
+    const sourceCanvasA = drawSourceToCanvas(imageA, width, height);
+    const sourceCanvasB = drawSourceToCanvas(imageB, width, height);
+    const processed = processCanvasImages(sourceCanvasA, sourceCanvasB, options);
+
+    try {
+      return {
+        regions: processed.regions,
+        imageA: processed.imageA === sourceCanvasA ? srcA : await canvasToDataUrl(processed.imageA, 'image/png'),
+        imageB: processed.imageB === sourceCanvasB ? srcB : await canvasToDataUrl(processed.imageB, 'image/png'),
+        alignment: processed.alignment
+      };
+    } finally {
+      releaseCanvases(sourceCanvasA, sourceCanvasB, processed.imageA, processed.imageB);
+    }
   } finally {
-    releaseCanvases(sourceCanvasA, sourceCanvasB, processed.imageA, processed.imageB);
+    releaseRuntimeImage(imageA);
+    releaseRuntimeImage(imageB);
   }
 }
 
@@ -312,61 +311,79 @@ function processCanvasImages(
   const height = Math.max(1, sourceCanvasA.height);
   let workingCanvasA = sourceCanvasA;
   let workingCanvasB = sourceCanvasB;
-  const alignmentScale = Math.min(1, 800 / width);
-  const alignmentWidth = Math.max(1, Math.floor(width * alignmentScale));
-  const alignmentHeight = Math.max(1, Math.floor(height * alignmentScale));
   const blurRadius = options.blurRadius ?? 2;
-  const alignmentCanvasA = createCanvas(alignmentWidth, alignmentHeight);
-  const alignmentCanvasB = createCanvas(alignmentWidth, alignmentHeight);
+  const processingMaxDimension = Math.max(64, Math.floor(options.processingMaxDimension ?? DEFAULT_PROCESSING_MAX_DIMENSION));
+  const maxAlignmentShiftRatio = Math.max(0, Math.min(0.3, options.maxAlignmentShiftRatio ?? 0.1));
+  const minAlignmentOverlapRatio = Math.max(0.4, Math.min(0.95, options.minAlignmentOverlapRatio ?? 0.6));
+  const shouldRunAlignment = options.enableAlignment !== false && maxAlignmentShiftRatio > 0;
+  let alignmentCanvasA: HTMLCanvasElement | null = null;
+  let alignmentCanvasB: HTMLCanvasElement | null = null;
   let smallCanvasA: HTMLCanvasElement | null = null;
   let smallCanvasB: HTMLCanvasElement | null = null;
+  const alignmentInfo: DetectedImageAlignment = {
+    dx: 0,
+    dy: 0,
+    applied: false,
+    baselineScore: 0,
+    bestScore: 0,
+    overlapRatio: 1
+  };
 
   try {
-    const alignmentCtxA = getRuntimeCanvasContext(alignmentCanvasA, { willReadFrequently: true });
-    const alignmentCtxB = getRuntimeCanvasContext(alignmentCanvasB, { willReadFrequently: true });
+    if (shouldRunAlignment) {
+      const alignmentScale = Math.min(1, DEFAULT_PROCESSING_MAX_DIMENSION / width);
+      const alignmentWidth = Math.max(1, Math.floor(width * alignmentScale));
+      const alignmentHeight = Math.max(1, Math.floor(height * alignmentScale));
+      const maxShift = Math.max(0, Math.floor(Math.min(alignmentWidth, alignmentHeight) * maxAlignmentShiftRatio));
 
-    alignmentCtxA.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
-    alignmentCtxA.drawImage(sourceCanvasA, 0, 0, alignmentWidth, alignmentHeight);
-    alignmentCtxB.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
-    alignmentCtxB.drawImage(sourceCanvasB, 0, 0, alignmentWidth, alignmentHeight);
+      if (maxShift >= 1) {
+        alignmentCanvasA = createCanvas(alignmentWidth, alignmentHeight);
+        alignmentCanvasB = createCanvas(alignmentWidth, alignmentHeight);
+        const alignmentCtxA = getRuntimeCanvasContext(alignmentCanvasA, { willReadFrequently: true });
+        const alignmentCtxB = getRuntimeCanvasContext(alignmentCanvasB, { willReadFrequently: true });
 
-    const grayA = rgbaToGrayscale(alignmentCtxA.getImageData(0, 0, alignmentWidth, alignmentHeight).data);
-    const grayB = rgbaToGrayscale(alignmentCtxB.getImageData(0, 0, alignmentWidth, alignmentHeight).data);
+        alignmentCtxA.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
+        alignmentCtxA.drawImage(sourceCanvasA, 0, 0, alignmentWidth, alignmentHeight);
+        alignmentCtxB.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : 'none';
+        alignmentCtxB.drawImage(sourceCanvasB, 0, 0, alignmentWidth, alignmentHeight);
 
-    const maxAlignmentShiftRatio = Math.max(0, Math.min(0.3, options.maxAlignmentShiftRatio ?? 0.1));
-    const maxShift = Math.max(0, Math.floor(Math.min(alignmentWidth, alignmentHeight) * maxAlignmentShiftRatio));
-    const minAlignmentOverlapRatio = Math.max(0.4, Math.min(0.95, options.minAlignmentOverlapRatio ?? 0.6));
-    const alignment =
-      options.enableAlignment === false || maxShift < 1
-        ? ({ dx: 0, dy: 0, baselineScore: 0, bestScore: 0, overlapRatio: 1 } as AlignmentResult)
-        : estimateAlignment(grayA, grayB, alignmentWidth, alignmentHeight, maxShift, minAlignmentOverlapRatio);
+        const grayA = rgbaToGrayscale(alignmentCtxA.getImageData(0, 0, alignmentWidth, alignmentHeight).data);
+        const grayB = rgbaToGrayscale(alignmentCtxB.getImageData(0, 0, alignmentWidth, alignmentHeight).data);
+        const alignment = estimateAlignment(
+          grayA,
+          grayB,
+          alignmentWidth,
+          alignmentHeight,
+          maxShift,
+          minAlignmentOverlapRatio
+        );
 
-    const sourceDx = Math.round(alignment.dx * (width / alignmentWidth));
-    const sourceDy = Math.round(alignment.dy * (height / alignmentHeight));
-    const alignmentInfo: DetectedImageAlignment = {
-      dx: sourceDx,
-      dy: sourceDy,
-      applied: sourceDx !== 0 || sourceDy !== 0,
-      baselineScore: alignment.baselineScore,
-      bestScore: alignment.bestScore,
-      overlapRatio: alignment.overlapRatio
-    };
+        const sourceDx = Math.round(alignment.dx * (width / alignmentWidth));
+        const sourceDy = Math.round(alignment.dy * (height / alignmentHeight));
+        alignmentInfo.dx = sourceDx;
+        alignmentInfo.dy = sourceDy;
+        alignmentInfo.applied = sourceDx !== 0 || sourceDy !== 0;
+        alignmentInfo.baselineScore = alignment.baselineScore;
+        alignmentInfo.bestScore = alignment.bestScore;
+        alignmentInfo.overlapRatio = alignment.overlapRatio;
 
-    if (alignmentInfo.applied) {
-      const aligned = alignSourceCanvases(sourceCanvasA, sourceCanvasB, sourceDx, sourceDy);
-      if (aligned.applied) {
-        workingCanvasA = aligned.canvasA;
-        workingCanvasB = aligned.canvasB;
-      } else {
-        alignmentInfo.applied = false;
-        alignmentInfo.dx = 0;
-        alignmentInfo.dy = 0;
+        if (alignmentInfo.applied) {
+          const aligned = alignSourceCanvases(sourceCanvasA, sourceCanvasB, sourceDx, sourceDy);
+          if (aligned.applied) {
+            workingCanvasA = aligned.canvasA;
+            workingCanvasB = aligned.canvasB;
+          } else {
+            alignmentInfo.applied = false;
+            alignmentInfo.dx = 0;
+            alignmentInfo.dy = 0;
+          }
+        }
       }
     }
 
     const workingWidth = workingCanvasA.width;
     const workingHeight = workingCanvasA.height;
-    const procScale = Math.min(1, 800 / workingWidth);
+    const procScale = Math.min(1, processingMaxDimension / workingWidth);
     const procW = Math.max(1, Math.floor(workingWidth * procScale));
     const procH = Math.max(1, Math.floor(workingHeight * procScale));
 

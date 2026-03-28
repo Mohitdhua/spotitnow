@@ -40,8 +40,9 @@ import {
   VIDEO_TRANSITION_STYLE_OPTIONS
 } from '../constants/videoStyleModules';
 import { PROGRESS_BAR_THEMES } from '../constants/progressBarThemes';
-import { VideoPreviewCompare } from './VideoPreviewCompare';
+import { VideoPreviewCompare, type PreviewOutputTab, type PreviewSetupTab } from './VideoPreviewCompare';
 import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
+import { DeferredNumberInput } from './DeferredNumberInput';
 import { ConfirmDialog } from '../app/components/ConfirmDialog';
 import { TextPromptDialog } from '../app/components/TextPromptDialog';
 import { clampLogoZoom } from '../utils/logoProcessing';
@@ -72,6 +73,7 @@ import {
   saveVideoAssetFromFile
 } from '../services/videoAssetStore';
 import { readVideoFileMetadata } from '../services/frameExtractor';
+import { getVideoExportPlan } from '../services/videoExport';
 import {
   VIDEO_AUDIO_CUE_POOL_MAX_VOLUME,
   VIDEO_AUDIO_POOL_DEFINITIONS
@@ -92,6 +94,16 @@ interface VideoSettingsPanelProps {
   onExportVideoPackage: () => void | Promise<void>;
   onImportVideoPackage: () => void;
   onExport: () => void | Promise<void>;
+  onRestartExport?: () => void | Promise<void>;
+  exportRecovery?: {
+    title: string;
+    detail: string;
+    remainingOutputs: number;
+    completedOutputs: number;
+    totalOutputs: number;
+    lastError: string | null;
+  } | null;
+  onCancelExport: () => void;
   isExporting: boolean;
   exportProgress: number;
   exportStatus: string;
@@ -526,7 +538,6 @@ const EXPORT_RESOLUTION_OPTIONS: Array<{
   { value: '2160p', label: '4K', subLabel: 'UHD' }
 ];
 
-type PanelTab = 'package' | 'theme' | 'text' | 'motion' | 'layout' | 'audio' | 'export';
 type LayoutPanelKey = 'frame' | 'logo' | 'title' | 'timer' | 'progress';
 type DeferredLayoutSliderKey =
   | 'headerHeight'
@@ -634,6 +645,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   onExportVideoPackage,
   onImportVideoPackage,
   onExport,
+  onRestartExport,
+  exportRecovery = null,
+  onCancelExport,
   isExporting,
   exportProgress,
   exportStatus,
@@ -641,7 +655,8 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   onBack,
   backgroundPacksSessionId = 0
 }) => {
-  const [activeTab, setActiveTab] = useState<PanelTab>('package');
+  const [activeSetupTab, setActiveSetupTab] = useState<PreviewSetupTab>('package');
+  const [activeOutputTab, setActiveOutputTab] = useState<PreviewOutputTab>('text');
   const [layoutPanels, setLayoutPanels] = useState<Record<LayoutPanelKey, boolean>>({
     frame: true,
     logo: true,
@@ -755,6 +770,23 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   const sfxControlsDisabled = !settings.soundEffectsEnabled;
   const musicControlsDisabled = !settings.backgroundMusicEnabled;
   const previewAudioAvailable = settings.soundEffectsEnabled || settings.backgroundMusicEnabled;
+  const exportPlan = useMemo(
+    () => getVideoExportPlan(puzzles.length, settings.exportPuzzlesPerVideo),
+    [puzzles.length, settings.exportPuzzlesPerVideo]
+  );
+  const splitVideoExportRequested = settings.exportPuzzlesPerVideo > 0;
+  const exportPuzzlesPerVideoInput = Math.max(
+    1,
+    Math.min(
+      Math.max(1, puzzles.length || 1),
+      Math.floor(settings.exportPuzzlesPerVideo || Math.min(5, Math.max(1, puzzles.length || 5)))
+    )
+  );
+  const exportParallelWorkerLimit = Math.min(4, Math.max(1, exportPlan.outputCount || 1));
+  const exportParallelWorkersInput = Math.max(
+    1,
+    Math.min(exportParallelWorkerLimit, Math.floor(settings.exportParallelWorkers || 1))
+  );
 
   useEffect(() => {
     setAvailableBackgroundPacks(loadGeneratedBackgroundPacks());
@@ -1358,25 +1390,8 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-          <VideoPreviewCompare
-            puzzles={puzzles}
-            settings={settings}
-            heightStyle={livePreviewHeightStyle}
-            activeTab={activeTab}
-            onSelectTab={setActiveTab}
-            activeVideoPackageId={activeVideoPackageId}
-            packageOptions={previewPackageOptions}
-            onSelectVideoPackage={onSelectVideoPackage}
-            themeOptions={previewThemeOptions}
-            onVisualStyleChange={(style) => updateSetting('visualStyle', style)}
-            onShowProgressChange={(show) => updateSetting('showProgress', show)}
-            onGeneratedProgressEnabledChange={(enabled) => updateSetting('generatedProgressEnabled', enabled)}
-            selectedStyleLabel={selectedStyleOption.label}
-            selectedProgressStyleLabel={selectedProgressStyleOption.label}
-            selectedProgressMotionLabel={selectedProgressMotionOption.label}
-          >
-
-          {activeTab === 'package' && (
+        {(() => {
+          const packagePanel = activeSetupTab === 'package' && (
             <div className="space-y-4">
               <div className="space-y-4">
                 <div className="space-y-3 border-b border-black/15 pb-4">
@@ -1467,7 +1482,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                       <div className="text-[10px] font-black uppercase text-slate-600">Ratio</div>
                       <button
                         type="button"
-                        onClick={() => setActiveTab('layout')}
+                        onClick={() => setActiveOutputTab('layout')}
                         className="rounded-full border border-black px-2.5 py-1 text-[9px] font-black uppercase hover:bg-slate-100"
                       >
                         Layout
@@ -1704,9 +1719,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   </div>
                 </div>
             </div>
-          )}
+          );
 
-          {activeTab === 'layout' && (
+          const layoutPanel = activeOutputTab === 'layout' && (
             <div className="space-y-6">
               <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-5">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1891,9 +1906,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                 </div>
               </div>
             </div>
-          )}
+          );
 
-          {activeTab === 'theme' && (
+          const themePanel = activeSetupTab === 'theme' && (
             <div className="space-y-6">
               <div className="space-y-4 border-b border-black/15 pb-4">
                 <div className="flex flex-wrap gap-2">
@@ -2031,15 +2046,14 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
 
                             <label className="min-w-0 space-y-2">
                               <span className="text-[10px] font-black uppercase text-slate-600">Shuffle Seed</span>
-                              <input
-                                type="number"
+                              <DeferredNumberInput
                                 min={1}
                                 max={9999}
                                 value={settings.generatedBackgroundShuffleSeed}
-                                onChange={(event) =>
+                                onValueChange={(value) =>
                                   updateSetting(
                                     'generatedBackgroundShuffleSeed',
-                                    Math.max(1, Math.min(9999, Number(event.target.value) || 1))
+                                    Math.max(1, Math.min(9999, Math.floor(value)))
                                   )
                                 }
                                 className="min-w-0 w-full rounded-xl border-2 border-black bg-white px-3 py-3 text-sm font-semibold text-slate-900"
@@ -2167,9 +2181,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
 
               </div>
             </div>
-          )}
+          );
 
-          {activeTab === 'text' && (
+          const textPanel = activeOutputTab === 'text' && (
             <div className="space-y-4">
               <div className="flex flex-wrap gap-2 border-b border-black/15 pb-4">
                 <button
@@ -2244,9 +2258,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                 ))}
               </div>
             </div>
-          )}
+          );
 
-          {activeTab === 'motion' && (
+          const motionPanel = activeOutputTab === 'motion' && (
             <div className="space-y-6">
               <div className="space-y-6">
                 <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-4">
@@ -2559,9 +2573,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                 </div>
               </div>
             </div>
-          )}
+          );
 
-          {activeTab === 'audio' && (
+          const audioPanel = activeSetupTab === 'audio' && (
             <div className="space-y-6">
               <div className="space-y-4 border-b border-black/15 pb-5">
                   <div className="flex items-center gap-2">
@@ -3026,9 +3040,9 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                 </div>
               </div>
             </div>
-          )}
+          );
 
-          {activeTab === 'export' && (
+          const exportPanel = activeOutputTab === 'export' && (
             <div className="space-y-6">
               <div className="bg-white border-4 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] p-4 md:p-5 space-y-5">
                 <div className="flex items-center gap-2">
@@ -3086,6 +3100,234 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   <input type="range" min="1" max="80" step="0.5" value={settings.exportBitrateMbps} onChange={(event) => updateSetting('exportBitrateMbps', Number(event.target.value))} className={sliderClass} />
                 </div>
 
+                <div className="rounded-xl border-2 border-black bg-[#FFF7D6] p-4 space-y-4">
+                  <div>
+                    <div className="text-xs font-black uppercase">Output Mode</div>
+                    <div className="mt-1 text-[11px] font-bold uppercase text-slate-600">
+                      Export one full batch video or split the selected puzzles into multiple videos.
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => updateSetting('exportPuzzlesPerVideo', 0)}
+                      className={`rounded-lg border-2 border-black p-3 text-left ${
+                        !splitVideoExportRequested
+                          ? 'bg-[#A7F3D0] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
+                          : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      <div className="text-xs font-black uppercase">One Video</div>
+                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
+                        Use all selected puzzles in a single export.
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateSetting(
+                          'exportPuzzlesPerVideo',
+                          Math.min(Math.max(1, puzzles.length || 1), Math.max(1, exportPuzzlesPerVideoInput || 5))
+                        )
+                      }
+                      className={`rounded-lg border-2 border-black p-3 text-left ${
+                        splitVideoExportRequested
+                          ? 'bg-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
+                          : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      <div className="text-xs font-black uppercase">Split Batch</div>
+                      <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
+                        Create several videos with a fixed puzzle count in each one.
+                      </div>
+                    </button>
+                  </div>
+
+                  {splitVideoExportRequested && (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-[160px_minmax(0,1fr)] gap-3 items-start">
+                        <label className="text-xs font-black uppercase">
+                          Puzzles Per Video
+                          <DeferredNumberInput
+                            min={1}
+                            max={Math.max(1, puzzles.length || 1)}
+                            value={exportPuzzlesPerVideoInput}
+                            onValueChange={(value) =>
+                              updateSetting(
+                                'exportPuzzlesPerVideo',
+                                Math.min(
+                                  Math.max(1, puzzles.length || 1),
+                                  Math.max(1, Math.floor(value))
+                                )
+                              )
+                            }
+                            className="mt-1 w-full rounded-lg border-2 border-black bg-white p-2 font-black"
+                          />
+                        </label>
+
+                        <div className="rounded-lg border-2 border-black bg-white p-3">
+                          <div className="text-[11px] font-black uppercase text-slate-900">
+                            {exportPlan.totalPuzzles > 0
+                              ? exportPlan.outputCount > 1
+                                ? `${exportPlan.totalPuzzles} puzzles will export as ${exportPlan.outputCount} videos`
+                                : `${exportPlan.totalPuzzles} puzzles currently fit in one video`
+                              : 'Add puzzles to preview the export split'}
+                          </div>
+                          <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
+                            {exportPlan.totalPuzzles > 0
+                              ? `Each video will hold up to ${exportPlan.puzzlesPerVideo} puzzle${
+                                  exportPlan.puzzlesPerVideo === 1 ? '' : 's'
+                                }.`
+                              : 'The export button will activate after puzzles are loaded.'}
+                          </div>
+                          {exportPlan.totalPuzzles > 0 && (
+                            <div className="mt-2 text-[10px] font-bold uppercase text-slate-500">
+                              Folder save is used when the browser supports it. Otherwise downloads will start one by one.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border-2 border-black bg-[#F8FDFF] p-3">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <div className="text-[11px] font-black uppercase text-slate-900">
+                              Parallel Export Workers
+                            </div>
+                            <div className="mt-1 text-[10px] font-bold uppercase text-slate-600">
+                              Render multiple split videos at the same time. Use more workers for faster batches.
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {Array.from({ length: exportParallelWorkerLimit }, (_, index) => index + 1).map((count) => (
+                              <button
+                                key={count}
+                                type="button"
+                                onClick={() => updateSetting('exportParallelWorkers', count)}
+                                className={`min-w-[48px] rounded-lg border-2 border-black px-3 py-2 text-xs font-black uppercase ${
+                                  exportParallelWorkersInput === count
+                                    ? 'bg-[#A7F3D0] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] translate-x-[1px] translate-y-[1px]'
+                                    : 'bg-white hover:bg-slate-100'
+                                }`}
+                              >
+                                {count}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="mt-2 text-[10px] font-bold uppercase text-slate-500">
+                          {exportPlan.outputCount > 1
+                            ? `This split can use up to ${exportParallelWorkerLimit} worker${
+                                exportParallelWorkerLimit === 1 ? '' : 's'
+                              } right now.`
+                            : 'Parallel export becomes available when the batch splits into more than one video.'}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border-2 border-black bg-[#F8FDFF] p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-black uppercase">Skip Final Reveal</div>
+                      <div className="mt-1 text-[11px] font-bold uppercase text-slate-600">
+                        End the last puzzle without showing the answer so viewers can comment it themselves.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => updateSetting('skipLastPuzzleReveal', !settings.skipLastPuzzleReveal)}
+                      className={`px-3 py-2 rounded-lg border-2 border-black text-xs font-black uppercase ${
+                        settings.skipLastPuzzleReveal ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                      }`}
+                    >
+                      {settings.skipLastPuzzleReveal ? 'On' : 'Off'}
+                    </button>
+                  </div>
+
+                  <div className="text-[10px] font-bold uppercase text-slate-500">
+                    {splitVideoExportRequested
+                      ? 'In split-batch mode, the last puzzle of each exported video stays unrevealed.'
+                      : 'In single-video mode, only the last puzzle in the export stays unrevealed.'}
+                  </div>
+
+                  {settings.skipLastPuzzleReveal && (
+                    <div className="grid gap-3 rounded-lg border-2 border-black bg-white p-3">
+                      <label className="block text-[11px] font-black uppercase text-slate-700">
+                        Final 5s Comment Prompt
+                        <textarea
+                          rows={3}
+                          value={settings.finalCommentPromptText}
+                          onChange={(event) => updateSetting('finalCommentPromptText', event.target.value)}
+                          placeholder="Comment your answers below before the video ends"
+                          className="mt-2 w-full rounded-lg border-2 border-black bg-white p-3 text-sm font-bold normal-case"
+                        />
+                      </label>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="block text-[11px] font-black uppercase text-slate-700">
+                          Prompt X
+                          <div className="mt-1 flex items-center justify-between text-[10px] font-bold uppercase text-slate-500">
+                            <span>Left</span>
+                            <span>{Math.round(settings.finalCommentPromptX)}%</span>
+                            <span>Right</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={settings.finalCommentPromptX}
+                            onChange={(event) => updateSetting('finalCommentPromptX', Number(event.target.value))}
+                            className={sliderClass}
+                          />
+                        </label>
+
+                        <label className="block text-[11px] font-black uppercase text-slate-700">
+                          Prompt Y
+                          <div className="mt-1 flex items-center justify-between text-[10px] font-bold uppercase text-slate-500">
+                            <span>Top</span>
+                            <span>{Math.round(settings.finalCommentPromptY)}%</span>
+                            <span>Bottom</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={settings.finalCommentPromptY}
+                            onChange={(event) => updateSetting('finalCommentPromptY', Number(event.target.value))}
+                            className={sliderClass}
+                          />
+                        </label>
+                      </div>
+
+                      <div className="text-[10px] font-bold uppercase text-slate-500">
+                        Long text is automatically broken into subtitle-style lines with about 4 to 5 words each and rendered above every other layer.
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {exportRecovery && !isExporting && (
+                  <div className="rounded-xl border-2 border-black bg-[#FFF7D6] p-4 space-y-3">
+                    <div>
+                      <div className="text-xs font-black uppercase text-slate-900">{exportRecovery.title}</div>
+                      <div className="mt-1 text-[11px] font-bold uppercase text-slate-600">
+                        {exportRecovery.detail}
+                      </div>
+                    </div>
+                    {exportRecovery.lastError && (
+                      <div className="rounded-lg border border-black bg-white px-3 py-2 text-[10px] font-bold uppercase text-slate-600">
+                        Last issue: {exportRecovery.lastError}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <button
                   type="button"
                   onClick={onExport}
@@ -3097,8 +3339,38 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   }`}
                 >
                   <Download size={18} strokeWidth={3} />
-                  {isExporting ? 'Exporting...' : 'Export Video'}
+                  {isExporting
+                    ? 'Exporting...'
+                    : exportRecovery
+                      ? `Resume ${exportRecovery.remainingOutputs} Video${
+                          exportRecovery.remainingOutputs === 1 ? '' : 's'
+                        }`
+                    : exportPlan.outputCount > 1
+                      ? `Export ${exportPlan.outputCount} Videos`
+                      : 'Export Video'}
                 </button>
+
+                {exportRecovery && !isExporting && onRestartExport && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void onRestartExport();
+                    }}
+                    className="w-full py-2.5 px-4 rounded-xl border-2 border-black text-xs font-black uppercase inline-flex items-center justify-center gap-2 bg-white hover:bg-slate-100"
+                  >
+                    Restart All Videos
+                  </button>
+                )}
+
+                {isExporting && (
+                  <button
+                    type="button"
+                    onClick={onCancelExport}
+                    className="w-full py-2.5 px-4 rounded-xl border-2 border-black text-xs font-black uppercase inline-flex items-center justify-center gap-2 bg-white hover:bg-red-50"
+                  >
+                    Cancel Export
+                  </button>
+                )}
 
                 {(isExporting || exportStatus) && (
                   <div className="space-y-2">
@@ -3110,8 +3382,45 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                 )}
               </div>
             </div>
-          )}
-          </VideoPreviewCompare>
+          );
+
+          return (
+            <VideoPreviewCompare
+              puzzles={puzzles}
+              settings={settings}
+              heightStyle={livePreviewHeightStyle}
+              activeSetupTab={activeSetupTab}
+              onSelectSetupTab={setActiveSetupTab}
+              activeOutputTab={activeOutputTab}
+              onSelectOutputTab={setActiveOutputTab}
+              activeVideoPackageId={activeVideoPackageId}
+              packageOptions={previewPackageOptions}
+              onSelectVideoPackage={onSelectVideoPackage}
+              themeOptions={previewThemeOptions}
+              onVisualStyleChange={(style) => updateSetting('visualStyle', style)}
+              onShowProgressChange={(show) => updateSetting('showProgress', show)}
+              onGeneratedProgressEnabledChange={(enabled) => updateSetting('generatedProgressEnabled', enabled)}
+              selectedStyleLabel={selectedStyleOption.label}
+              selectedProgressStyleLabel={selectedProgressStyleOption.label}
+              selectedProgressMotionLabel={selectedProgressMotionOption.label}
+              setupPanelChildren={
+                <>
+                  {packagePanel}
+                  {themePanel}
+                  {audioPanel}
+                </>
+              }
+              outputPanelChildren={
+                <>
+                  {textPanel}
+                  {layoutPanel}
+                  {motionPanel}
+                  {exportPanel}
+                </>
+              }
+            />
+          );
+        })()}
       </div>
 
       <TextPromptDialog

@@ -10,7 +10,8 @@ import {
 
 type ExportPreviewMoment = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro';
 type PreviewStatus = 'idle' | 'loading' | 'ready' | 'error';
-type PreviewWorkspaceTab = 'package' | 'theme' | 'text' | 'motion' | 'layout' | 'audio' | 'export';
+export type PreviewSetupTab = 'package' | 'theme' | 'audio';
+export type PreviewOutputTab = 'text' | 'motion' | 'layout' | 'export';
 
 type WorkspaceOption<T extends string> = {
   value: T;
@@ -33,8 +34,10 @@ interface VideoPreviewCompareProps {
   puzzles: Puzzle[];
   settings: VideoSettings;
   heightStyle: string;
-  activeTab: PreviewWorkspaceTab;
-  onSelectTab: (tab: PreviewWorkspaceTab) => void;
+  activeSetupTab: PreviewSetupTab;
+  onSelectSetupTab: (tab: PreviewSetupTab) => void;
+  activeOutputTab: PreviewOutputTab;
+  onSelectOutputTab: (tab: PreviewOutputTab) => void;
   activeVideoPackageId: string;
   packageOptions: Array<{ id: string; name: string }>;
   onSelectVideoPackage: (packageId: string) => void;
@@ -45,7 +48,8 @@ interface VideoPreviewCompareProps {
   selectedStyleLabel: string;
   selectedProgressStyleLabel: string;
   selectedProgressMotionLabel: string;
-  children?: React.ReactNode;
+  setupPanelChildren?: React.ReactNode;
+  outputPanelChildren?: React.ReactNode;
 }
 
 const PREVIEW_MOMENT_OPTIONS: Array<{ value: ExportPreviewMoment; label: string }> = [
@@ -56,18 +60,18 @@ const PREVIEW_MOMENT_OPTIONS: Array<{ value: ExportPreviewMoment; label: string 
   { value: 'outro', label: 'Outro' }
 ];
 
-const QUICK_TABS: Array<{ value: PreviewWorkspaceTab; label: string }> = [
+const SETUP_TABS: Array<{ value: PreviewSetupTab; label: string }> = [
   { value: 'package', label: 'Package' },
   { value: 'theme', label: 'Theme' },
-  { value: 'audio', label: 'Audio' },
+  { value: 'audio', label: 'Audio' }
+];
+
+const OUTPUT_TABS: Array<{ value: PreviewOutputTab; label: string }> = [
   { value: 'text', label: 'Text' },
   { value: 'layout', label: 'Layout' },
   { value: 'motion', label: 'Motion' },
   { value: 'export', label: 'Export' }
 ];
-
-const SETUP_TABS: PreviewWorkspaceTab[] = ['package', 'theme', 'audio'];
-const OUTPUT_TABS: PreviewWorkspaceTab[] = ['text', 'layout', 'motion', 'export'];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -237,8 +241,10 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
   puzzles,
   settings,
   heightStyle,
-  activeTab,
-  onSelectTab,
+  activeSetupTab,
+  onSelectSetupTab,
+  activeOutputTab,
+  onSelectOutputTab,
   activeVideoPackageId,
   packageOptions,
   onSelectVideoPackage,
@@ -249,7 +255,8 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
   selectedStyleLabel,
   selectedProgressStyleLabel,
   selectedProgressMotionLabel,
-  children
+  setupPanelChildren,
+  outputPanelChildren
 }) => {
   const [previewMoment, setPreviewMoment] = useState<ExportPreviewMoment>(() =>
     resolveIntroDuration(settings) > 0 ? 'intro' : 'showing'
@@ -391,10 +398,6 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
   );
   const selectClass =
     'h-10 w-full rounded-xl border-2 border-black bg-white px-4 text-sm font-black text-slate-900 outline-none';
-  const setupTabs = QUICK_TABS.filter((tab) => SETUP_TABS.includes(tab.value));
-  const outputTabs = QUICK_TABS.filter((tab) => OUTPUT_TABS.includes(tab.value));
-  const renderChildrenInSetupPanel = SETUP_TABS.includes(activeTab);
-  const renderChildrenInOutputPanel = OUTPUT_TABS.includes(activeTab);
   const issueLiveControl = (kind: VideoPlayerExternalControlAction['kind']) => {
     setLiveControlAction((current) => ({ kind, nonce: (current?.nonce ?? 0) + 1 }));
   };
@@ -406,13 +409,13 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
           <div className="sticky top-0 z-10 border-b border-black/15 bg-[#FFFDF8] px-3 py-3">
             <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Setup</div>
             <div className="mt-1.5 grid grid-cols-3 gap-1.5">
-              {setupTabs.map((tab) => (
+              {SETUP_TABS.map((tab) => (
                 <button
                   key={tab.value}
                   type="button"
-                  onClick={() => onSelectTab(tab.value)}
+                  onClick={() => onSelectSetupTab(tab.value)}
                   className={`rounded-md border-2 border-black px-2 py-1.5 text-[8px] font-black uppercase ${
-                    activeTab === tab.value ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                    activeSetupTab === tab.value ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
                   }`}
                 >
                   {tab.label}
@@ -442,7 +445,7 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
                 <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Theme</div>
                 <button
                   type="button"
-                  onClick={() => onSelectTab('theme')}
+                  onClick={() => onSelectSetupTab('theme')}
                   className="text-[8px] font-black uppercase tracking-[0.14em] text-slate-600 hover:text-black"
                 >
                   Edit
@@ -476,8 +479,8 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
               </div>
             </div>
 
-            {children && renderChildrenInSetupPanel ? (
-              <div className="video-setup-panel-content space-y-4 border-t border-black/15 pt-3">{children}</div>
+            {setupPanelChildren ? (
+              <div className="video-setup-panel-content space-y-4 border-t border-black/15 pt-3">{setupPanelChildren}</div>
             ) : null}
           </div>
         </aside>
@@ -602,13 +605,13 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
           <div className="sticky top-0 z-10 border-b border-black/15 bg-[#FFFDF8] px-3 py-3">
               <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500">Output</div>
               <div className="mt-1.5 grid grid-cols-4 gap-1.5">
-                {outputTabs.map((tab) => (
+                {OUTPUT_TABS.map((tab) => (
                   <button
                     key={tab.value}
                     type="button"
-                    onClick={() => onSelectTab(tab.value)}
+                    onClick={() => onSelectOutputTab(tab.value)}
                     className={`rounded-md border-2 border-black px-2 py-1.5 text-[8px] font-black uppercase ${
-                      activeTab === tab.value ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
+                      activeOutputTab === tab.value ? 'bg-[#FFD93D]' : 'bg-white hover:bg-slate-100'
                     }`}
                   >
                     {tab.label}
@@ -642,8 +645,8 @@ export const VideoPreviewCompare: React.FC<VideoPreviewCompareProps> = ({
               </div>
             </div>
 
-            {children && renderChildrenInOutputPanel ? (
-              <div className="video-output-panel-content space-y-4 border-t border-black/15 pt-3">{children}</div>
+            {outputPanelChildren ? (
+              <div className="video-output-panel-content space-y-4 border-t border-black/15 pt-3">{outputPanelChildren}</div>
             ) : null}
           </div>
         </aside>

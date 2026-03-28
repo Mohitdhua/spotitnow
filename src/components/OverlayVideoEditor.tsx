@@ -4275,14 +4275,11 @@ export const OverlayVideoEditor: React.FC<OverlayVideoEditorProps> = ({
               }
             }}
             emptyState={
-              <div className="max-w-2xl rounded-[24px] border border-dashed border-white/15 bg-white/4 px-6 py-8 text-center">
-                <div className="text-sm font-black uppercase tracking-[0.24em] text-white/50">Timeline Empty</div>
-                <div className="mt-2 text-2xl font-black uppercase tracking-tight text-white">
-                  Add clips or keep exploring the seeded studio layout
-                </div>
-                <p className="mt-3 text-sm font-semibold text-white/62">
-                  The standalone editor stays usable without imports, but real clips will replace the demo timeline as soon as
-                  you load batch media, overlays, linked pairs, or audio.
+              <div className="max-w-xl rounded-2xl border border-white/10 bg-[#2b3036] px-6 py-8 text-center">
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-white/50">Timeline Empty</div>
+                <div className="mt-2 text-xl font-semibold text-white/90">Import media to start editing</div>
+                <p className="mt-3 text-sm text-white/62">
+                  Batch media, overlays, linked pairs, and audio will appear here as soon as you load them.
                 </p>
               </div>
             }

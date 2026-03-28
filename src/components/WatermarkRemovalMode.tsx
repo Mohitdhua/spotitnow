@@ -6,6 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Download, ImagePlus, LoaderCircle, Save, Trash2 } from 'lucide-react';
 import { WatermarkRegionEditor } from './WatermarkRegionEditor';
+import { DeferredNumberInput } from './DeferredNumberInput';
 import {
   createWatermarkSelectionPreset,
   exportProcessedImage,
@@ -164,7 +165,7 @@ function RegionInspector({
   regions: WatermarkRegion[];
   selectedRegion: WatermarkRegion | null;
   dimensions: ImageDimensions | null;
-  onFieldChange: (field: RegionField, value: string) => void;
+  onFieldChange: (field: RegionField, value: number) => void;
   onDeleteSelected: () => void;
   onClearAll: () => void;
 }) {
@@ -183,11 +184,10 @@ function RegionInspector({
             {(['x', 'y', 'width', 'height'] as const).map((field) => (
               <label key={field} className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-black uppercase text-slate-600">
                 <span>{field}</span>
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min={field === 'width' || field === 'height' ? 1 : 0}
                   value={selectedRegion[field]}
-                  onChange={(event) => onFieldChange(field, event.target.value)}
+                  onValueChange={(value) => onFieldChange(field, value)}
                   className="mt-2 w-full rounded-xl border-2 border-black px-3 py-2 text-sm font-black text-slate-900 outline-none"
                 />
               </label>
@@ -317,10 +317,9 @@ export function WatermarkRemovalMode({ onBack }: WatermarkRemovalModeProps) {
     if (files.length > 0) await loadFiles(files);
   };
 
-  const handleRegionFieldChange = (side: 'A' | 'B', field: RegionField, rawValue: string) => {
+  const handleRegionFieldChange = (side: 'A' | 'B', field: RegionField, value: number) => {
     if (!imageDimensions) return;
-    const nextValue = Number.parseInt(rawValue, 10);
-    if (!Number.isFinite(nextValue)) return;
+    const nextValue = Math.floor(value);
     if (side === 'A') {
       setRegionsA((current) => updateRegionList(current, selectedRegionAId, { [field]: nextValue }, imageDimensions));
       return;

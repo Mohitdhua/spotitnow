@@ -20,16 +20,16 @@ export const pixelsToTime = (pixels: number, pixelsPerSecond: number) => pixels 
 export const getTrackBaseHeight = (kind: EditorTimelineTrackKind) => {
   switch (kind) {
     case 'video':
-      return 84;
+      return 72;
     case 'audio':
-      return 64;
+      return 56;
     case 'text':
-      return 54;
+      return 48;
     case 'effects':
-      return 44;
+      return 38;
     case 'overlay':
     default:
-      return 72;
+      return 64;
   }
 };
 
@@ -38,9 +38,9 @@ export const getTrackRenderHeight = (
   options?: { isSelected?: boolean; isCollapsed?: boolean }
 ) => {
   if (options?.isCollapsed) {
-    return 42;
+    return 36;
   }
-  return getTrackBaseHeight(track.kind) + (options?.isSelected ? 8 : 0);
+  return getTrackBaseHeight(track.kind) + (options?.isSelected ? 4 : 0);
 };
 
 export const getDetailLevel = (pixelsPerSecond: number) => {

@@ -326,6 +326,12 @@ export interface VideoSettings {
   transitionDuration: number; // Seconds
   useCustomLayout?: boolean;
   customLayout?: CustomVideoLayout;
+  skipLastPuzzleReveal: boolean; // When true, the last puzzle ends without showing the reveal
+  finalCommentPromptText: string; // Optional subtitle-style prompt shown during the last 5 seconds
+  finalCommentPromptX: number; // Percentage across the full stage width
+  finalCommentPromptY: number; // Percentage across the full stage height
+  exportPuzzlesPerVideo: number; // 0 means export the whole selected batch as one video
+  exportParallelWorkers: number; // Number of parallel worker renders to use for split exports
   exportResolution: '480p' | '720p' | '1080p' | '1440p' | '2160p';
   exportBitrateMbps: number;
   exportCodec: 'h264' | 'av1';
@@ -479,7 +485,7 @@ export interface VideoModeTransferFrame {
   scale: number;
 }
 
-export type ProcessingMode = 'manual' | 'auto' | 'ai';
+export type ProcessingMode = 'manual' | 'ultra' | 'auto' | 'ai';
 
 export type GameMode =
   | 'upload'
@@ -510,6 +516,7 @@ export type AppRoute =
   | '/tools/splitter'
   | '/tools/extractor'
   | '/tools/upscaler'
+  | '/tools/vector'
   | '/tools/backgrounds'
   | '/tools/timers'
   | '/tools/progress'

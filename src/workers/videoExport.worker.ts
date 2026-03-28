@@ -49,8 +49,14 @@ import {
   revealTypewriterText,
   VIDEO_TRANSITION_LABEL,
   resolveVideoPuzzleEntryState,
+  resolveVideoTransitionPhaseDuration,
   resolveVideoTransitionSequenceState
 } from '../utils/videoTransitionMotion';
+import {
+  clampFinalCommentPromptPosition,
+  splitFinalCommentPromptIntoLines,
+  shouldShowFinalCommentPrompt
+} from '../utils/finalCommentPrompt';
 import { isDesignerTimerStyle } from '../utils/timerPackShared';
 import {
   VIDEO_AUDIO_CUE_POOL_MAX_VOLUME,
@@ -124,6 +130,7 @@ type ExportVideoOptions =
       puzzles: Puzzle[];
       settings: VideoSettings;
       generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
+      puzzleIndexOffset?: number;
       audioAssets?: VideoExportAudioAssets;
       introVideoFile?: File;
       streamOutput?: boolean;
@@ -134,6 +141,7 @@ type ExportVideoOptions =
       puzzles: BinaryRenderablePuzzle[];
       settings: VideoSettings;
       generatedBackgroundPack?: VideoExportWorkerStartPayload['generatedBackgroundPack'];
+      puzzleIndexOffset?: number;
       audioAssets?: VideoExportAudioAssets;
       introVideoFile?: File;
       streamOutput?: boolean;
@@ -2315,10 +2323,19 @@ const resolveIntroDuration = (settings: VideoSettings) => {
     : 0;
 };
 
+const shouldSkipLastPuzzleReveal = (
+  settings: VideoSettings,
+  puzzleIndex: number,
+  puzzleCount: number
+) =>
+  settings.skipLastPuzzleReveal === true &&
+  puzzleCount > 0 &&
+  puzzleIndex === puzzleCount - 1;
+
 const buildTimeline = (puzzles: RenderablePuzzle[], settings: VideoSettings): TimelineSegment[] => {
   const showDuration = Math.max(0.1, settings.showDuration);
   const revealDuration = Math.max(0.5, settings.revealDuration);
-  const transitionDuration = Math.max(0, settings.transitionDuration);
+  const transitionDuration = Math.max(0, resolveVideoTransitionPhaseDuration(settings.transitionDuration));
   const introDuration = resolveIntroDuration(settings);
   const outroDuration = settings.sceneSettings.outroEnabled
     ? Math.max(0, settings.sceneSettings.outroDuration)
@@ -2348,14 +2365,16 @@ const buildTimeline = (puzzles: RenderablePuzzle[], settings: VideoSettings): Ti
     });
     cursor += showDuration;
 
-    timeline.push({
-      puzzleIndex,
-      phase: 'revealing',
-      start: cursor,
-      duration: revealDuration,
-      end: cursor + revealDuration
-    });
-    cursor += revealDuration;
+    if (!shouldSkipLastPuzzleReveal(settings, puzzleIndex, puzzles.length)) {
+      timeline.push({
+        puzzleIndex,
+        phase: 'revealing',
+        start: cursor,
+        duration: revealDuration,
+        end: cursor + revealDuration
+      });
+      cursor += revealDuration;
+    }
 
     if (puzzleIndex < puzzles.length - 1 && transitionDuration > 0) {
       timeline.push({
@@ -2460,6 +2479,102 @@ const fitTextSize = (
     ctx.font = `${fontWeight} ${size}px ${fontFamily}`;
   }
   return size;
+};
+
+const drawFinalCommentPromptOverlay = (
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  settings: VideoSettings,
+  styleModules: ReturnType<typeof resolveVideoStyleModules>,
+  totalDuration: number,
+  elapsedSeconds: number,
+  uiScale: number
+) => {
+  if (!shouldShowFinalCommentPrompt(settings, totalDuration, elapsedSeconds)) {
+    return;
+  }
+
+  const lines = splitFinalCommentPromptIntoLines(settings.finalCommentPromptText);
+  if (!lines.length) {
+    return;
+  }
+
+  const overlayX = (clampFinalCommentPromptPosition(settings.finalCommentPromptX, 50) / 100) * width;
+  const overlayY = (clampFinalCommentPromptPosition(settings.finalCommentPromptY, 12) / 100) * height;
+  const maxTextWidth = Math.max(240, width * 0.78);
+  const fontFamily = styleModules.text.subtitleCanvasFamily;
+  const fontWeight = styleModules.text.subtitleCanvasWeight;
+  const letterSpacing = Math.min(0.12, Math.max(0.02, styleModules.text.subtitleLetterSpacingEm * 0.4));
+  const initialFontSize = Math.max(18, Math.round(30 * uiScale));
+  const padX = Math.max(12, Math.round(18 * uiScale));
+  const padY = Math.max(6, Math.round(10 * uiScale));
+  const lineGap = Math.max(6, Math.round(10 * uiScale));
+  const maxTrackedTextWidth = Math.max(120, maxTextWidth - padX * 2);
+  const measureTrackedLineWidth = (line: string, fontSize: number) => {
+    ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    let trackedWidth = 0;
+    for (const character of line) {
+      trackedWidth += ctx.measureText(character).width;
+    }
+    trackedWidth += Math.max(0, line.length - 1) * letterSpacing * fontSize;
+    return trackedWidth;
+  };
+  let fontSize = initialFontSize;
+
+  lines.forEach((line) => {
+    let nextFontSize = fontSize;
+    while (nextFontSize > 14 && measureTrackedLineWidth(line, nextFontSize) > maxTrackedTextWidth) {
+      nextFontSize -= 1;
+    }
+    fontSize = Math.min(fontSize, nextFontSize);
+  });
+
+  ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  const lineHeight = Math.max(fontSize, Math.round(fontSize * 1.08));
+  const strokeWidth = Math.max(1.5, Math.round(2 * uiScale));
+  const boxHeight = lineHeight + padY * 2;
+  const blockHeight = lines.length * boxHeight + Math.max(0, lines.length - 1) * lineGap;
+  const originY = clamp(overlayY - blockHeight / 2, 10, Math.max(10, height - blockHeight - 10));
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+
+  lines.forEach((line, index) => {
+    const lineY = originY + index * (boxHeight + lineGap);
+    const trackedWidth = measureTrackedLineWidth(line, fontSize);
+    const boxWidth = Math.min(maxTextWidth, Math.ceil(trackedWidth + padX * 2));
+    const originX = clamp(overlayX - boxWidth / 2, 10, Math.max(10, width - boxWidth - 10));
+    const rect: Rect = {
+      x: originX,
+      y: lineY,
+      width: boxWidth,
+      height: boxHeight,
+      radius: Math.max(10, Math.round(18 * uiScale))
+    };
+
+    drawRoundedRect(ctx, rect, {
+      fill: 'rgba(0, 0, 0, 0.78)',
+      stroke: 'rgba(255,255,255,0.18)',
+      lineWidth: strokeWidth
+    });
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+    ctx.shadowBlur = Math.max(6, Math.round(10 * uiScale));
+
+    const trackedStartX = rect.x + (rect.width - trackedWidth) / 2;
+    let cursorX = trackedStartX;
+    const baselineY = rect.y + rect.height / 2 + 1;
+    for (const character of line) {
+      ctx.fillText(character, cursorX, baselineY);
+      cursorX += ctx.measureText(character).width + letterSpacing * fontSize;
+    }
+  });
+
+  ctx.restore();
 };
 
 const drawSceneCard = (
@@ -3133,12 +3248,15 @@ const drawFrame = (
   brandLogo: ImageBitmap | null,
   settings: VideoSettings,
   generatedBackgroundPack: VideoExportWorkerStartPayload['generatedBackgroundPack'],
+  puzzleIndexOffset: number,
+  totalDuration: number,
   scene: RenderScene,
   timestamp: number
 ) => {
   const packagePreset =
     VIDEO_PACKAGE_PRESETS[settings.videoPackagePreset] ?? VIDEO_PACKAGE_PRESETS.gameshow;
-  const effectiveVisualStyle = resolveVisualThemeStyle(settings.visualStyle, scene.segment.puzzleIndex);
+  const themedPuzzleIndex = Math.max(0, puzzleIndexOffset + scene.segment.puzzleIndex);
+  const effectiveVisualStyle = resolveVisualThemeStyle(settings.visualStyle, themedPuzzleIndex);
   const visualTheme = VISUAL_THEMES[effectiveVisualStyle];
   const styleModules = resolveVideoStyleModules(settings, packagePreset);
   const accent = visualTheme.timerDot;
@@ -3159,7 +3277,7 @@ const drawFrame = (
   const generatedBackgroundSpec = settings.generatedBackgroundsEnabled
     ? resolveGeneratedBackgroundForIndex(
         generatedBackgroundPack,
-        scene.segment.puzzleIndex,
+        themedPuzzleIndex,
         settings.generatedBackgroundShuffleSeed
       )
     : null;
@@ -3203,7 +3321,7 @@ const drawFrame = (
   const progressFillPercent = clamp(progressMotionState.fillPercent, 0, 100);
   const shouldShowProgressSweep = progressMotionState.sweepActive;
   const transitionSequenceState = resolveVideoTransitionSequenceState({
-    phaseDuration: settings.transitionDuration,
+    phaseDuration: scene.segment.duration,
     timeLeft: scene.timeLeft
   });
   const puzzleEntryState = resolveVideoPuzzleEntryState({
@@ -4535,6 +4653,17 @@ const drawFrame = (
   if (scene.segment.phase === 'transitioning') {
     drawTransitionOverlay(ctx, sceneOverlayRect, scene, settings, visualTheme, isVerticalLayout, uiScale);
   }
+
+  drawFinalCommentPromptOverlay(
+    ctx,
+    width,
+    height,
+    settings,
+    styleModules,
+    totalDuration,
+    timestamp,
+    uiScale
+  );
 };
 
 const drawTransitionOverlay = (
@@ -4681,6 +4810,8 @@ const renderPreviewFrameInWorker = async ({
           brandLogo,
           settings,
           generatedBackgroundPack,
+          0,
+          totalDuration,
           scene,
           safeTimestamp
         );
@@ -4695,6 +4826,8 @@ const renderPreviewFrameInWorker = async ({
         brandLogo,
         settings,
         generatedBackgroundPack,
+        0,
+        totalDuration,
         scene,
         safeTimestamp
       );
@@ -4720,6 +4853,7 @@ const exportVideoInWorker = async ({
   puzzles,
   settings,
   generatedBackgroundPack,
+  puzzleIndexOffset = 0,
   audioAssets,
   introVideoFile,
   streamOutput = false,
@@ -4907,6 +5041,8 @@ const exportVideoInWorker = async ({
           brandLogo,
           settings,
           generatedBackgroundPack,
+          puzzleIndexOffset,
+          totalDuration,
           scene,
           timestamp
         );
@@ -5019,6 +5155,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
               puzzles: message.payload.puzzles,
               settings: message.payload.settings,
               generatedBackgroundPack: message.payload.generatedBackgroundPack,
+              puzzleIndexOffset: message.payload.puzzleIndexOffset,
               audioAssets: message.payload.audioAssets,
               introVideoFile: message.payload.introVideoFile,
               streamOutput: message.payload.streamOutput,
@@ -5031,6 +5168,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
               puzzles: message.payload.puzzles,
               settings: message.payload.settings,
               generatedBackgroundPack: message.payload.generatedBackgroundPack,
+              puzzleIndexOffset: message.payload.puzzleIndexOffset,
               audioAssets: message.payload.audioAssets,
               introVideoFile: message.payload.introVideoFile,
               streamOutput: message.payload.streamOutput,

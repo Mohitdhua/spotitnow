@@ -11,12 +11,32 @@ import { decodeAudioAssetFromSource } from '../utils/audioDecode';
 import { loadVideoAssetBlob } from './videoAssetStore';
 import { isStoredVideoAssetSource } from './videoAssetStore';
 import { VIDEO_AUDIO_POOL_KEYS } from '../utils/videoAudioPools';
+import {
+  createVideoExportRecoveryManifest,
+  deleteVideoExportRecoveryManifest,
+  getVideoExportRecoveryManifest,
+  loadVideoExportRecoveryDirectoryHandle,
+  markVideoExportRecoveryCancelled,
+  markVideoExportRecoveryEntryCompleted,
+  markVideoExportRecoveryFailed,
+  markVideoExportRecoveryRunning,
+  saveVideoExportRecoveryDirectoryHandle,
+  summarizeVideoExportRecovery,
+  updateVideoExportRecoveryOutputMode
+} from './videoExportRecovery';
 
 interface ExportVideoBaseOptions {
   settings: VideoSettings;
   onProgress?: (progress: number, status?: string) => void;
   diagnosticsJob?: MediaJobController | null;
   manageDiagnosticsLifecycle?: boolean;
+  puzzleIndexOffset?: number;
+  recoveryMode?: 'fresh' | 'resume';
+  recoveryManifestId?: string | null;
+  recoveryProjectId?: string | null;
+  recoveryProjectName?: string;
+  recoveryBatchSignature?: string;
+  recoverySettingsSignature?: string;
 }
 
 type ExportVideoOptions =
@@ -33,6 +53,18 @@ interface RenderedVideoResult {
   blob: Blob;
   fileName: string;
   mimeType: string;
+}
+
+export interface VideoExportPlan {
+  totalPuzzles: number;
+  puzzlesPerVideo: number;
+  outputCount: number;
+  batchSizes: number[];
+  splitEnabled: boolean;
+}
+
+export interface VideoExportSummary extends VideoExportPlan {
+  usedDirectory: boolean;
 }
 
 interface RenderedVideoFramePreview {
@@ -104,6 +136,19 @@ interface DiagnosticsContext {
   manageLifecycle: boolean;
 }
 
+interface PreparedVideoExportAssets {
+  audioAssets: VideoExportAudioAssets | null;
+  introVideoFile: File | null;
+}
+
+interface VideoExportBatchEntry {
+  fileName: string;
+  options: ExportVideoOptions;
+  outputIndex: number;
+  totalOutputs: number;
+  puzzleCount: number;
+}
+
 interface ActiveVideoExportSession {
   worker: Worker;
   workerId: string;
@@ -136,6 +181,55 @@ const CODEC_EXTENSION: Record<VideoSettings['exportCodec'], string> = {
 const CODEC_MIME: Record<VideoSettings['exportCodec'], string> = {
   h264: 'video/mp4',
   av1: 'video/webm'
+};
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const normalizeExportPuzzlesPerVideo = (puzzleCount: number, requestedPerVideo: number) => {
+  if (puzzleCount <= 0) return 0;
+  const numericValue = Math.floor(Number(requestedPerVideo) || 0);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return puzzleCount;
+  }
+  return Math.min(puzzleCount, Math.max(1, numericValue));
+};
+
+const normalizeExportParallelWorkers = (requestedWorkers: number, maxWorkers: number) => {
+  const numericValue = Math.floor(Number(requestedWorkers) || 1);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return 1;
+  }
+  return Math.max(1, Math.min(4, Math.max(1, maxWorkers), numericValue));
+};
+
+export const getVideoExportPlan = (
+  puzzleCount: number,
+  requestedPerVideo: number
+): VideoExportPlan => {
+  if (puzzleCount <= 0) {
+    return {
+      totalPuzzles: 0,
+      puzzlesPerVideo: 0,
+      outputCount: 0,
+      batchSizes: [],
+      splitEnabled: false
+    };
+  }
+
+  const puzzlesPerVideo = normalizeExportPuzzlesPerVideo(puzzleCount, requestedPerVideo);
+  const batchSizes: number[] = [];
+
+  for (let index = 0; index < puzzleCount; index += puzzlesPerVideo) {
+    batchSizes.push(Math.min(puzzlesPerVideo, puzzleCount - index));
+  }
+
+  return {
+    totalPuzzles: puzzleCount,
+    puzzlesPerVideo,
+    outputCount: batchSizes.length,
+    batchSizes,
+    splitEnabled: batchSizes.length > 1
+  };
 };
 
 const resetPreviewWorker = () => {
@@ -428,6 +522,34 @@ const resolveDiagnosticsContext = (options: ExportVideoOptions): DiagnosticsCont
   };
 };
 
+const cloneVideoExportAudioAsset = (
+  asset: NonNullable<VideoExportAudioAssets['music']>
+): NonNullable<VideoExportAudioAssets['music']> => ({
+  ...asset,
+  data: asset.data.slice()
+});
+
+const cloneVideoExportAudioAssets = (
+  audioAssets?: VideoExportAudioAssets | null
+): VideoExportAudioAssets | null => {
+  if (!audioAssets) return null;
+
+  const clonedSfxPools = audioAssets.sfxPools
+    ? Object.fromEntries(
+        VIDEO_AUDIO_POOL_KEYS.map((key) => [
+          key,
+          audioAssets.sfxPools?.[key]?.map((asset) => cloneVideoExportAudioAsset(asset))
+        ])
+      )
+    : undefined;
+
+  return {
+    sfxPools: clonedSfxPools,
+    introClip: audioAssets.introClip ? cloneVideoExportAudioAsset(audioAssets.introClip) : undefined,
+    music: audioAssets.music ? cloneVideoExportAudioAsset(audioAssets.music) : undefined
+  };
+};
+
 const collectAudioTransferables = (audioAssets?: VideoExportAudioAssets | null): Transferable[] => {
   if (!audioAssets) return [];
   const transferables: Transferable[] = [];
@@ -503,6 +625,18 @@ const resolveAudioAssetsForExport = async (
   return assets;
 };
 
+const prepareVideoExportAssets = async (
+  settings: VideoSettings,
+  onProgress?: (progress: number, status?: string) => void
+): Promise<PreparedVideoExportAssets> => {
+  const audioAssets = await resolveAudioAssetsForExport(settings, onProgress);
+  const introVideoFile = await resolveIntroVideoFile(settings);
+  return {
+    audioAssets,
+    introVideoFile
+  };
+};
+
 const handleWorkerDiagnostics = (job: MediaJobController | null, message: WorkerResponse) => {
   if (!job) return false;
   if (message.type === 'task-event') {
@@ -523,7 +657,8 @@ const buildWorkerStartPayload = (
   audioAssets?: VideoExportAudioAssets | null,
   introVideoFile?: File | null
 ): { payload: VideoExportWorkerStartPayload; transferables: Transferable[] } => {
-  const audioTransferables = collectAudioTransferables(audioAssets);
+  const safeAudioAssets = cloneVideoExportAudioAssets(audioAssets);
+  const audioTransferables = collectAudioTransferables(safeAudioAssets);
   if (options.source === 'binary') {
     // Binary Super Export batches can be rendered more than once
     // across separate render passes. Clone the buffers
@@ -543,7 +678,8 @@ const buildWorkerStartPayload = (
         puzzles: clonedPuzzles,
         settings: options.settings,
         generatedBackgroundPack: resolveGeneratedBackgroundPack(options.settings),
-        audioAssets: audioAssets ?? undefined,
+        puzzleIndexOffset: options.puzzleIndexOffset ?? 0,
+        audioAssets: safeAudioAssets ?? undefined,
         introVideoFile: introVideoFile ?? undefined,
         jobId,
         workerSessionId: sessionId
@@ -558,7 +694,8 @@ const buildWorkerStartPayload = (
       puzzles: options.puzzles,
       settings: options.settings,
       generatedBackgroundPack: resolveGeneratedBackgroundPack(options.settings),
-      audioAssets: audioAssets ?? undefined,
+      puzzleIndexOffset: options.puzzleIndexOffset ?? 0,
+      audioAssets: safeAudioAssets ?? undefined,
       introVideoFile: introVideoFile ?? undefined,
       jobId,
       workerSessionId: sessionId
@@ -572,11 +709,124 @@ const supportsStreamingSave = () =>
   typeof (window as any).showSaveFilePicker === 'function' &&
   typeof WritableStream !== 'undefined';
 
+type DirectoryPicker = (options?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
+
+const supportsDirectorySave = () =>
+  typeof window !== 'undefined' &&
+  typeof (window as Window & { showDirectoryPicker?: DirectoryPicker }).showDirectoryPicker === 'function' &&
+  typeof WritableStream !== 'undefined';
+
 const isAbortError = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
 
 const getSuggestedFileName = (settings: VideoSettings) => {
   const extension = CODEC_EXTENSION[settings.exportCodec];
-  return `spotitnow-${settings.aspectRatio.replace(':', 'x')}-${settings.exportResolution}-${settings.exportCodec}.${extension}`;
+  return `video1.${extension}`;
+};
+
+const getSuggestedBatchFileName = (settings: VideoSettings, outputIndex: number) => {
+  const extension = CODEC_EXTENSION[settings.exportCodec];
+  return `video${outputIndex + 1}.${extension}`;
+};
+
+const createVideoExportSummary = (
+  plan: VideoExportPlan,
+  usedDirectory: boolean
+): VideoExportSummary => ({
+  ...plan,
+  usedDirectory
+});
+
+const buildVideoExportBatchEntries = (options: ExportVideoOptions): VideoExportBatchEntry[] => {
+  const plan = getVideoExportPlan(options.puzzles.length, options.settings.exportPuzzlesPerVideo);
+  if (plan.outputCount <= 1) {
+    return [
+      {
+        fileName: getSuggestedFileName(options.settings),
+        options,
+        outputIndex: 0,
+        totalOutputs: 1,
+        puzzleCount: options.puzzles.length
+      }
+    ];
+  }
+
+  return plan.batchSizes.map((batchSize, outputIndex) => {
+    const startIndex = outputIndex * plan.puzzlesPerVideo;
+    const endIndex = startIndex + batchSize;
+    const slicedOptions =
+      options.source === 'binary'
+        ? ({
+            ...options,
+            source: 'binary',
+            puzzles: options.puzzles.slice(startIndex, endIndex),
+            puzzleIndexOffset: startIndex
+          } satisfies ExportVideoOptions)
+        : ({
+            ...options,
+            puzzles: options.puzzles.slice(startIndex, endIndex),
+            puzzleIndexOffset: startIndex
+          } satisfies ExportVideoOptions);
+
+    return {
+      fileName: getSuggestedBatchFileName(options.settings, outputIndex),
+      options: slicedOptions,
+      outputIndex,
+      totalOutputs: plan.outputCount,
+      puzzleCount: batchSize
+    };
+  });
+};
+
+const getDirectoryPicker = (): DirectoryPicker | null => {
+  if (typeof window === 'undefined') return null;
+  return (window as Window & { showDirectoryPicker?: DirectoryPicker }).showDirectoryPicker ?? null;
+};
+
+const requestVideoExportDirectory = async () => {
+  const picker = getDirectoryPicker();
+  if (!picker) return null;
+
+  try {
+    return await picker({ mode: 'readwrite' });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error('Export canceled');
+    }
+    throw error;
+  }
+};
+
+const ensureVideoExportDirectoryPermission = async (handle: FileSystemDirectoryHandle) => {
+  const permissionHandle = handle as FileSystemDirectoryHandle & {
+    queryPermission?: (descriptor: { mode: 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>;
+    requestPermission?: (descriptor: { mode: 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>;
+  };
+  const descriptor = { mode: 'readwrite' } as const;
+
+  try {
+    if (typeof permissionHandle.queryPermission === 'function') {
+      const currentPermission = await permissionHandle.queryPermission(descriptor);
+      if (currentPermission === 'granted') {
+        return true;
+      }
+    }
+
+    if (typeof permissionHandle.requestPermission === 'function') {
+      return (await permissionHandle.requestPermission(descriptor)) === 'granted';
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+};
+
+const createDirectoryWritable = async (
+  directory: FileSystemDirectoryHandle,
+  filename: string
+): Promise<FileSystemWritableFileStream> => {
+  const fileHandle = await directory.getFileHandle(filename, { create: true });
+  return await fileHandle.createWritable();
 };
 
 export const cancelVideoExport = () => {
@@ -586,11 +836,17 @@ export const cancelVideoExport = () => {
 };
 
 const streamVideoWithWebCodecs = async (
-  options: ExportVideoOptions & { writable: FileSystemWritableFileStream }
+  options: ExportVideoOptions & {
+    writable: FileSystemWritableFileStream;
+    outputFileName?: string;
+  },
+  preparedAssets?: PreparedVideoExportAssets
 ): Promise<void> => {
   const { onProgress, writable } = options;
-  const audioAssets = await resolveAudioAssetsForExport(options.settings, onProgress);
-  const introVideoFile = await resolveIntroVideoFile(options.settings);
+  const assets =
+    preparedAssets ?? (await prepareVideoExportAssets(options.settings, onProgress));
+  const audioAssets = assets.audioAssets;
+  const introVideoFile = assets.introVideoFile;
 
   return await new Promise<void>((resolve, reject) => {
     const diagnostics = resolveDiagnosticsContext(options);
@@ -647,12 +903,13 @@ const streamVideoWithWebCodecs = async (
         reject(new Error(message));
         return;
       }
-      onProgress?.(1, `Rendered ${fileName}`);
+      const resolvedFileName = options.outputFileName ?? fileName;
+      onProgress?.(1, `Rendered ${resolvedFileName}`);
       if (diagnostics.mirrorProgress) {
-        job?.setProgress(1, `Rendered ${fileName}`);
+        job?.setProgress(1, `Rendered ${resolvedFileName}`);
       }
       if (diagnostics.manageLifecycle) {
-        job?.complete(`Rendered ${fileName}`);
+        job?.complete(`Rendered ${resolvedFileName}`);
       }
       resolve();
     };
@@ -733,8 +990,18 @@ export const streamVideoToWritableWithWebCodecs = async (
 
 export const renderVideoWithWebCodecs = async (options: ExportVideoOptions): Promise<RenderedVideoResult> => {
   const { onProgress } = options;
-  const audioAssets = await resolveAudioAssetsForExport(options.settings, onProgress);
-  const introVideoFile = await resolveIntroVideoFile(options.settings);
+  return await renderPreparedVideoWithWebCodecs(options);
+};
+
+const renderPreparedVideoWithWebCodecs = async (
+  options: ExportVideoOptions & { outputFileName?: string },
+  preparedAssets?: PreparedVideoExportAssets
+): Promise<RenderedVideoResult> => {
+  const { onProgress } = options;
+  const assets =
+    preparedAssets ?? (await prepareVideoExportAssets(options.settings, onProgress));
+  const audioAssets = assets.audioAssets;
+  const introVideoFile = assets.introVideoFile;
 
   return await new Promise<RenderedVideoResult>((resolve, reject) => {
     const diagnostics = resolveDiagnosticsContext(options);
@@ -771,17 +1038,18 @@ export const renderVideoWithWebCodecs = async (options: ExportVideoOptions): Pro
 
       if (message.type === 'done') {
         const blob = new Blob([message.buffer], { type: message.mimeType });
-        onProgress?.(1, `Rendered ${message.fileName}`);
+        const resolvedFileName = options.outputFileName ?? message.fileName;
+        onProgress?.(1, `Rendered ${resolvedFileName}`);
         if (diagnostics.mirrorProgress) {
-          job?.setProgress(1, `Rendered ${message.fileName}`);
+          job?.setProgress(1, `Rendered ${resolvedFileName}`);
         }
         if (diagnostics.manageLifecycle) {
-          job?.complete(`Rendered ${message.fileName}`);
+          job?.complete(`Rendered ${resolvedFileName}`);
         }
         cleanup();
         resolve({
           blob,
-          fileName: message.fileName,
+          fileName: resolvedFileName,
           mimeType: message.mimeType
         });
         return;
@@ -922,7 +1190,273 @@ export const renderVideoFramePreview = async ({
   });
 };
 
-export const exportVideoWithWebCodecs = async (options: ExportVideoOptions): Promise<void> => {
+const exportVideoBatchWithWebCodecs = async (
+  options: ExportVideoOptions,
+  plan: VideoExportPlan
+): Promise<VideoExportSummary> => {
+  const batchEntries = buildVideoExportBatchEntries(options);
+  const diagnosticsJob = createVideoExportJob();
+  let recoveryManifest =
+    options.recoveryMode === 'resume' && options.recoveryManifestId
+      ? getVideoExportRecoveryManifest(options.recoveryManifestId)
+      : null;
+
+  if (
+    !recoveryManifest &&
+    options.recoveryProjectName &&
+    options.recoveryBatchSignature &&
+    options.recoverySettingsSignature
+  ) {
+    recoveryManifest = createVideoExportRecoveryManifest({
+      projectId: options.recoveryProjectId ?? null,
+      projectName: options.recoveryProjectName,
+      totalPuzzles: plan.totalPuzzles,
+      puzzlesPerVideo: plan.puzzlesPerVideo,
+      totalOutputs: plan.outputCount,
+      exportCodec: options.settings.exportCodec,
+      outputMode: plan.outputCount > 1 && supportsDirectorySave() ? 'directory' : 'downloads',
+      batchSignature: options.recoveryBatchSignature,
+      settingsSignature: options.recoverySettingsSignature,
+      entries: batchEntries.map((entry) => ({
+        outputIndex: entry.outputIndex,
+        fileName: entry.fileName,
+        puzzleCount: entry.puzzleCount,
+        startIndex: entry.outputIndex * plan.puzzlesPerVideo,
+        endIndex: entry.outputIndex * plan.puzzlesPerVideo + entry.puzzleCount,
+        completedAt: null
+      }))
+    });
+  }
+
+  if (recoveryManifest) {
+    markVideoExportRecoveryRunning(recoveryManifest.id);
+  }
+
+  const completedOutputIndices = new Set(
+    recoveryManifest?.entries
+      .filter((entry) => entry.completedAt !== null)
+      .map((entry) => entry.outputIndex) ?? []
+  );
+  const pendingBatchEntries = batchEntries
+    .map((entry) => ({
+      ...entry,
+      fileName:
+        recoveryManifest?.entries.find((manifestEntry) => manifestEntry.outputIndex === entry.outputIndex)?.fileName ??
+        entry.fileName
+    }))
+    .filter((entry) => !completedOutputIndices.has(entry.outputIndex));
+  const preflightProgress = 0.08;
+  const parallelWorkers = normalizeExportParallelWorkers(
+    options.settings.exportParallelWorkers,
+    pendingBatchEntries.length
+  );
+  const preparingStatus = `Preparing ${plan.outputCount} video${plan.outputCount === 1 ? '' : 's'}...`;
+  options.onProgress?.(0.01, preparingStatus);
+  diagnosticsJob?.setProgress(0.01, preparingStatus);
+  try {
+    const shouldUseDirectoryExport =
+      plan.outputCount > 1 &&
+      supportsDirectorySave() &&
+      (recoveryManifest ? recoveryManifest.outputMode === 'directory' : true);
+    let directoryHandle: FileSystemDirectoryHandle | null = null;
+
+    if (shouldUseDirectoryExport && recoveryManifest?.id) {
+      const persistedHandle = await loadVideoExportRecoveryDirectoryHandle(recoveryManifest.id);
+      if (persistedHandle && (await ensureVideoExportDirectoryPermission(persistedHandle))) {
+        directoryHandle = persistedHandle;
+      }
+    }
+
+    if (shouldUseDirectoryExport && !directoryHandle) {
+      directoryHandle = await requestVideoExportDirectory();
+      if (directoryHandle && recoveryManifest?.id) {
+        await saveVideoExportRecoveryDirectoryHandle(recoveryManifest.id, directoryHandle);
+      }
+    }
+
+    if (recoveryManifest?.id) {
+      updateVideoExportRecoveryOutputMode(recoveryManifest.id, directoryHandle ? 'directory' : 'downloads');
+    }
+
+    const preparedAssets = await prepareVideoExportAssets(options.settings, (progress, label) => {
+      const status = label || 'Preparing export assets...';
+      const scaledProgress = Math.min(preflightProgress, progress * preflightProgress);
+      options.onProgress?.(scaledProgress, status);
+      diagnosticsJob?.setProgress(scaledProgress, status);
+    });
+    if (pendingBatchEntries.length === 0) {
+      if (recoveryManifest?.id) {
+        await deleteVideoExportRecoveryManifest(recoveryManifest.id);
+      }
+      const completionStatus = directoryHandle
+        ? `Saved ${plan.outputCount} video${plan.outputCount === 1 ? '' : 's'} to the selected folder`
+        : `Exported ${plan.outputCount} video${plan.outputCount === 1 ? '' : 's'}`;
+      options.onProgress?.(1, completionStatus);
+      diagnosticsJob?.complete(completionStatus);
+      return createVideoExportSummary(plan, Boolean(directoryHandle));
+    }
+
+    const entryProgress = pendingBatchEntries.map(() => 0);
+    const entryStatuses = pendingBatchEntries.map(() => '');
+    const pendingRenderedDownloads = new Map<number, RenderedVideoResult>();
+    let nextDownloadIndex = 0;
+    let downloadQueue: Promise<void> = Promise.resolve();
+    let nextEntryIndex = 0;
+    let firstError: Error | null = null;
+
+    const publishOverallProgress = (entryIndex: number, progress: number, label?: string) => {
+      entryProgress[entryIndex] = Math.max(0, Math.min(1, progress));
+      entryStatuses[entryIndex] = label ?? entryStatuses[entryIndex];
+      const aggregateProgress =
+        preflightProgress +
+        (entryProgress.reduce((sum, value) => sum + value, 0) / Math.max(1, pendingBatchEntries.length)) *
+          (1 - preflightProgress);
+      const activeLabel = label || entryStatuses.find((value) => value.trim().length > 0);
+      options.onProgress?.(
+        aggregateProgress,
+        activeLabel || `Rendering ${plan.outputCount} videos with ${parallelWorkers} workers...`
+      );
+      diagnosticsJob?.setProgress(
+        aggregateProgress,
+        activeLabel || `Rendering ${plan.outputCount} videos with ${parallelWorkers} workers...`
+      );
+    };
+
+    const queueDownloadInOrder = async (pendingIndex: number, rendered: RenderedVideoResult) => {
+      pendingRenderedDownloads.set(pendingIndex, rendered);
+      downloadQueue = downloadQueue.then(async () => {
+        while (pendingRenderedDownloads.has(nextDownloadIndex)) {
+          const nextRendered = pendingRenderedDownloads.get(nextDownloadIndex);
+          if (!nextRendered) break;
+          pendingRenderedDownloads.delete(nextDownloadIndex);
+          downloadBlob(nextRendered.blob, nextRendered.fileName);
+          nextDownloadIndex += 1;
+          if (nextDownloadIndex < pendingBatchEntries.length) {
+            await delay(120);
+          }
+        }
+      });
+      await downloadQueue;
+    };
+
+    const renderBatchEntry = async (pendingIndex: number) => {
+      const batchEntry = pendingBatchEntries[pendingIndex];
+      const prefix = `Video ${batchEntry.outputIndex + 1}/${batchEntry.totalOutputs}`;
+      const fallbackLabel = `${prefix} (${batchEntry.puzzleCount} puzzle${batchEntry.puzzleCount === 1 ? '' : 's'})`;
+      const handleProgress = (progress: number, label?: string) => {
+        publishOverallProgress(
+          pendingIndex,
+          progress,
+          label ? `${prefix}: ${label}` : `Exporting ${fallbackLabel}...`
+        );
+      };
+
+      if (directoryHandle) {
+        const writable = await createDirectoryWritable(directoryHandle, batchEntry.fileName);
+        await streamVideoWithWebCodecs(
+          {
+            ...batchEntry.options,
+            diagnosticsJob,
+            manageDiagnosticsLifecycle: false,
+            writable,
+            outputFileName: batchEntry.fileName,
+            onProgress: handleProgress
+          },
+          preparedAssets
+        );
+      } else {
+        const rendered = await renderPreparedVideoWithWebCodecs(
+          {
+            ...batchEntry.options,
+            diagnosticsJob,
+            manageDiagnosticsLifecycle: false,
+            outputFileName: batchEntry.fileName,
+            onProgress: handleProgress
+          },
+          preparedAssets
+        );
+        await queueDownloadInOrder(pendingIndex, rendered);
+      }
+
+      if (recoveryManifest?.id) {
+        markVideoExportRecoveryEntryCompleted(recoveryManifest.id, batchEntry.outputIndex);
+      }
+    };
+
+    const runBatchWorker = async () => {
+      while (true) {
+        if (firstError) {
+          return;
+        }
+        const entryIndex = nextEntryIndex;
+        nextEntryIndex += 1;
+        if (entryIndex >= pendingBatchEntries.length) {
+          return;
+        }
+
+        try {
+          await renderBatchEntry(entryIndex);
+        } catch (error) {
+          const resolvedError =
+            error instanceof Error ? error : new Error('Video export failed while rendering the split batch.');
+          if (!firstError) {
+            firstError = resolvedError;
+            cancelVideoExport();
+          }
+          return;
+        }
+      }
+    };
+
+    const alreadyCompleted = recoveryManifest ? summarizeVideoExportRecovery(recoveryManifest).completedOutputs : 0;
+    publishOverallProgress(
+      0,
+      0,
+      alreadyCompleted > 0
+        ? `Resuming ${pendingBatchEntries.length} remaining video${pendingBatchEntries.length === 1 ? '' : 's'} with ${parallelWorkers} worker${parallelWorkers === 1 ? '' : 's'}...`
+        : `Rendering ${plan.outputCount} videos with ${parallelWorkers} worker${parallelWorkers === 1 ? '' : 's'}...`
+    );
+    await Promise.all(Array.from({ length: parallelWorkers }, () => runBatchWorker()));
+    if (firstError) {
+      throw firstError;
+    }
+    await downloadQueue;
+
+    const completionStatus = directoryHandle
+      ? `Saved ${plan.outputCount} video${plan.outputCount === 1 ? '' : 's'} to the selected folder`
+      : `Exported ${plan.outputCount} video${plan.outputCount === 1 ? '' : 's'}`;
+    options.onProgress?.(1, completionStatus);
+    diagnosticsJob?.complete(completionStatus);
+    if (recoveryManifest?.id) {
+      await deleteVideoExportRecoveryManifest(recoveryManifest.id);
+    }
+
+    return createVideoExportSummary(plan, Boolean(directoryHandle));
+  } catch (error) {
+    const resolvedError =
+      error instanceof Error ? error : new Error('Video export failed while rendering the split batch.');
+    if (resolvedError.message === 'Export canceled') {
+      diagnosticsJob?.cancel('Export canceled');
+      if (recoveryManifest?.id) {
+        markVideoExportRecoveryCancelled(recoveryManifest.id);
+      }
+    } else {
+      diagnosticsJob?.fail(resolvedError.message, 'Video export failed');
+      if (recoveryManifest?.id) {
+        markVideoExportRecoveryFailed(recoveryManifest.id, resolvedError.message);
+      }
+    }
+    throw resolvedError;
+  }
+};
+
+export const exportVideoWithWebCodecs = async (options: ExportVideoOptions): Promise<VideoExportSummary> => {
+  const plan = getVideoExportPlan(options.puzzles.length, options.settings.exportPuzzlesPerVideo);
+
+  if (plan.outputCount > 1) {
+    return await exportVideoBatchWithWebCodecs(options, plan);
+  }
+
   if (supportsStreamingSave()) {
     const showSaveFilePicker = (window as any).showSaveFilePicker as
       | ((options?: any) => Promise<{ createWritable: () => Promise<FileSystemWritableFileStream> }>)
@@ -944,9 +1478,10 @@ export const exportVideoWithWebCodecs = async (options: ExportVideoOptions): Pro
         const writable = await handle.createWritable();
         await streamVideoWithWebCodecs({
           ...options,
-          writable
+          writable,
+          outputFileName: getSuggestedFileName(options.settings)
         });
-        return;
+        return createVideoExportSummary(plan, false);
       } catch (error) {
         if (isAbortError(error)) {
           throw new Error('Export canceled');
@@ -956,6 +1491,10 @@ export const exportVideoWithWebCodecs = async (options: ExportVideoOptions): Pro
     }
   }
 
-  const result = await renderVideoWithWebCodecs(options);
+  const result = await renderPreparedVideoWithWebCodecs({
+    ...options,
+    outputFileName: getSuggestedFileName(options.settings)
+  });
   downloadBlob(result.blob, result.fileName);
+  return createVideoExportSummary(plan, false);
 };

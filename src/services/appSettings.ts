@@ -137,6 +137,12 @@ const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
   transitionStyle: 'fade',
   transitionDuration: 1,
   useCustomLayout: false,
+  skipLastPuzzleReveal: false,
+  finalCommentPromptText: '',
+  finalCommentPromptX: 50,
+  finalCommentPromptY: 12,
+  exportPuzzlesPerVideo: 0,
+  exportParallelWorkers: 1,
   exportResolution: '1080p',
   exportBitrateMbps: 8,
   exportCodec: 'h264',
@@ -798,6 +804,30 @@ const mergeSettings = (input?: Partial<AppGlobalSettings>): AppGlobalSettings =>
         Boolean(DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.useCustomLayout)
       ),
       customLayout: safeCustomLayout,
+      skipLastPuzzleReveal: sanitizeBoolean(
+        mergedVideo.skipLastPuzzleReveal,
+        DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.skipLastPuzzleReveal
+      ),
+      finalCommentPromptText:
+        typeof mergedVideo.finalCommentPromptText === 'string'
+          ? mergedVideo.finalCommentPromptText
+          : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.finalCommentPromptText,
+      finalCommentPromptX: Number.isFinite(Number(mergedVideo.finalCommentPromptX))
+        ? clamp(Number(mergedVideo.finalCommentPromptX), 0, 100)
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.finalCommentPromptX,
+      finalCommentPromptY: Number.isFinite(Number(mergedVideo.finalCommentPromptY))
+        ? clamp(Number(mergedVideo.finalCommentPromptY), 0, 100)
+        : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.finalCommentPromptY,
+      exportPuzzlesPerVideo: clamp(
+        Math.floor(Number(mergedVideo.exportPuzzlesPerVideo) || 0),
+        0,
+        500
+      ),
+      exportParallelWorkers: clamp(
+        Math.floor(Number(mergedVideo.exportParallelWorkers) || 1),
+        1,
+        4
+      ),
       exportResolution: EXPORT_RESOLUTION_VALUES.includes(mergedVideo.exportResolution)
         ? mergedVideo.exportResolution
         : DEFAULT_APP_GLOBAL_SETTINGS.videoDefaults.exportResolution,

@@ -2,6 +2,7 @@ import React, { DragEvent, useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Crop, Download, Image as ImageIcon, Layers, Plus, RefreshCcw, Trash2, Upload } from 'lucide-react';
 import { TextPromptDialog } from '../app/components/TextPromptDialog';
+import { DeferredNumberInput } from './DeferredNumberInput';
 import {
   assistLinkedSplitPairPlacement,
   dataUrlToPngBlob,
@@ -2139,13 +2140,12 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
                       disabled={isProcessing}
                       className="w-full"
                     />
-                    <input
-                      type="number"
+                    <DeferredNumberInput
                       min="48"
                       max={Math.max(48, Math.min(manualPairEditor.sourceWidth, manualPairEditor.sourceHeight))}
                       step="1"
                       value={manualPairEditor.selection.size}
-                      onChange={(event) => handleManualPairValueChange('size', Number(event.target.value))}
+                      onValueChange={(value) => handleManualPairValueChange('size', value)}
                       disabled={isProcessing}
                       className="w-full rounded-lg border-2 border-black px-3 py-2 text-sm font-black"
                     />
@@ -2163,13 +2163,12 @@ export function ImageSplitterPanel({ onBatchProcess, defaultMode, namingDefaults
                       disabled={isProcessing}
                       className="w-full"
                     />
-                    <input
-                      type="number"
+                    <DeferredNumberInput
                       min="0"
                       max={Math.max(0, manualPairEditor.sourceWidth - manualPairEditor.selection.size * 2)}
                       step="1"
                       value={manualPairEditor.selection.gap}
-                      onChange={(event) => handleManualPairValueChange('gap', Number(event.target.value))}
+                      onValueChange={(value) => handleManualPairValueChange('gap', value)}
                       disabled={isProcessing}
                       className="w-full rounded-lg border-2 border-black px-3 py-2 text-sm font-black"
                     />

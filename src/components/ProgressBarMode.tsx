@@ -3,6 +3,7 @@ import { ArrowLeft, Check, Download, Pause, Play, Square } from 'lucide-react';
 import { cancelProgressBarExport, exportProgressBarWithWebCodecs } from '../services/progressBarExport';
 import { VideoSettings } from '../types';
 import type { ProgressBarRenderMode } from '../services/progressBarExport';
+import { DeferredNumberInput } from './DeferredNumberInput';
 import {
   PROGRESS_BAR_THEMES,
   resolveProgressBarFillColors,
@@ -554,13 +555,12 @@ export const ProgressBarMode: React.FC<ProgressBarModeProps> = ({
                   onChange={(event) => setDurationSeconds(Number(event.target.value))}
                   className="w-full h-4 bg-slate-200 rounded-full appearance-none cursor-pointer border-2 border-black accent-black"
                 />
-                <input
-                  type="number"
+                <DeferredNumberInput
                   min="0.5"
                   max="120"
                   step="0.5"
                   value={durationSeconds}
-                  onChange={(event) => setDurationSeconds(clamp(Number(event.target.value) || 0.5, 0.5, 120))}
+                  onValueChange={(value) => setDurationSeconds(clamp(value, 0.5, 120))}
                   className="mt-3 w-full px-3 py-2 bg-white border-2 border-black rounded-lg font-bold"
                 />
               </div>

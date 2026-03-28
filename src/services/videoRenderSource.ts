@@ -42,6 +42,7 @@ export interface VideoExportAudioAssets {
 export type VideoExportWorkerStartPayload = VideoRenderSource & {
   settings: VideoSettings;
   generatedBackgroundPack?: GeneratedBackgroundPack | null;
+  puzzleIndexOffset?: number;
   streamOutput?: boolean;
   audioAssets?: VideoExportAudioAssets;
   introVideoFile?: File;

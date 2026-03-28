@@ -35,6 +35,7 @@ import {
   revealTypewriterText,
   VIDEO_TRANSITION_LABEL,
   resolveVideoPuzzleEntryState,
+  resolveVideoTransitionPhaseDuration,
   resolveVideoTransitionSequenceState
 } from '../utils/videoTransitionMotion';
 import { decodeAudioBufferFromSource } from '../utils/audioDecode';
@@ -52,6 +53,11 @@ import {
   resolvePuzzlePlayCueWindow,
   type VideoAudioPlaybackAutomation
 } from '../utils/videoAudioCueScheduling';
+import {
+  clampFinalCommentPromptPosition,
+  splitFinalCommentPromptIntoLines,
+  shouldShowFinalCommentPrompt
+} from '../utils/finalCommentPrompt';
 
 type Phase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro' | 'finished';
 
@@ -694,6 +700,24 @@ const resolveIntroDuration = (settings: VideoSettings) => {
   return settings.sceneSettings.introEnabled ? Math.max(0, settings.sceneSettings.introDuration) : 0;
 };
 
+const shouldSkipLastPuzzleReveal = (
+  settings: VideoSettings,
+  puzzleIndex: number,
+  puzzleCount: number
+) =>
+  settings.skipLastPuzzleReveal === true &&
+  puzzleCount > 0 &&
+  puzzleIndex === puzzleCount - 1;
+
+const getRevealPhaseDurationForPuzzle = (
+  settings: VideoSettings,
+  puzzleIndex: number,
+  puzzleCount: number
+) =>
+  shouldSkipLastPuzzleReveal(settings, puzzleIndex, puzzleCount)
+    ? 0
+    : Math.max(0.5, settings.revealDuration);
+
 const getInitialPhase = (hasPuzzles: boolean, settings: VideoSettings): Phase => {
   if (!hasPuzzles) return 'finished';
   return resolveIntroDuration(settings) > 0 ? 'intro' : 'showing';
@@ -704,22 +728,20 @@ const resolveGeneratedBackgroundPlaybackTime = ({
   puzzleIndex,
   puzzleCount,
   timeLeft,
-  settings,
-  revealPhaseDuration
+  settings
 }: {
   phase: Phase;
   puzzleIndex: number;
   puzzleCount: number;
   timeLeft: number;
   settings: VideoSettings;
-  revealPhaseDuration: number;
 }) => {
   const safePuzzleCount = Math.max(0, puzzleCount);
   const safeIndex = Math.min(Math.max(puzzleIndex, 0), Math.max(0, safePuzzleCount - 1));
   const introDuration = resolveIntroDuration(settings);
   const outroDuration = settings.sceneSettings.outroEnabled ? settings.sceneSettings.outroDuration : 0;
   const showingDuration = settings.showDuration;
-  const transitionDuration = settings.transitionDuration;
+  const transitionDuration = resolveVideoTransitionPhaseDuration(settings.transitionDuration);
 
   let elapsed = 0;
 
@@ -731,26 +753,28 @@ const resolveGeneratedBackgroundPlaybackTime = ({
   }
 
   for (let index = 0; index < safeIndex; index += 1) {
-    elapsed += showingDuration + revealPhaseDuration;
+    elapsed += showingDuration + getRevealPhaseDurationForPuzzle(settings, index, safePuzzleCount);
     if (index < safePuzzleCount - 1) {
       elapsed += transitionDuration;
     }
   }
 
+  const currentRevealPhaseDuration = getRevealPhaseDurationForPuzzle(settings, safeIndex, safePuzzleCount);
+
   if (phase === 'showing') {
     return elapsed + Math.max(0, showingDuration - timeLeft);
   }
   if (phase === 'revealing') {
-    return elapsed + showingDuration + Math.max(0, revealPhaseDuration - timeLeft);
+    return elapsed + showingDuration + Math.max(0, currentRevealPhaseDuration - timeLeft);
   }
   if (phase === 'transitioning') {
-    return elapsed + showingDuration + revealPhaseDuration + Math.max(0, transitionDuration - timeLeft);
+    return elapsed + showingDuration + currentRevealPhaseDuration + Math.max(0, transitionDuration - timeLeft);
   }
   if (phase === 'outro') {
-    return elapsed + showingDuration + revealPhaseDuration + Math.max(0, outroDuration - timeLeft);
+    return elapsed + showingDuration + currentRevealPhaseDuration + Math.max(0, outroDuration - timeLeft);
   }
   if (phase === 'finished') {
-    return elapsed + showingDuration + revealPhaseDuration + outroDuration;
+    return elapsed + showingDuration + currentRevealPhaseDuration + outroDuration;
   }
   return elapsed;
 };
@@ -1526,11 +1550,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const isBlinkingEnabled = settings.enableBlinking !== false;
   const blinkCycleDuration = Math.max(0.2, settings.blinkSpeed);
   const introDuration = resolveIntroDuration(settings);
-  const revealPhaseDuration = Math.max(0.5, settings.revealDuration);
+  const revealPhaseDuration = getRevealPhaseDurationForPuzzle(settings, safeCurrentIndex, puzzles.length);
+  const effectiveTransitionDuration = resolveVideoTransitionPhaseDuration(settings.transitionDuration);
   const revealRegionCount = currentPuzzle.regions.length;
   const revealStepSeconds = Math.min(
     Math.max(0.5, settings.sequentialRevealStep),
-    revealPhaseDuration / Math.max(1, revealRegionCount + 1)
+    Math.max(0.5, revealPhaseDuration) / Math.max(1, revealRegionCount + 1)
   );
   const revealBlinkStartTime =
     revealRegionCount > 0
@@ -1583,12 +1608,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setPhase('showing');
       setTimeLeft(settings.showDuration);
     } else if (phase === 'showing') {
-      setPhase('revealing');
-      setTimeLeft(revealPhaseDuration);
+      if (revealPhaseDuration > 0) {
+        setPhase('revealing');
+        setTimeLeft(revealPhaseDuration);
+      } else if (settings.sceneSettings.outroEnabled) {
+        setPhase('outro');
+        setTimeLeft(settings.sceneSettings.outroDuration);
+      } else {
+        setPhase('finished');
+        setTimeLeft(0);
+      }
     } else if (phase === 'revealing') {
       if (safeCurrentIndex < puzzles.length - 1) {
         setPhase('transitioning');
-        setTimeLeft(settings.transitionDuration);
+        setTimeLeft(effectiveTransitionDuration);
       } else if (settings.sceneSettings.outroEnabled) {
         setPhase('outro');
         setTimeLeft(settings.sceneSettings.outroDuration);
@@ -1608,12 +1641,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     hasPuzzles,
     phase,
     puzzles.length,
+    revealPhaseDuration,
     safeCurrentIndex,
-    settings.revealDuration,
     settings.sceneSettings.outroDuration,
     settings.sceneSettings.outroEnabled,
     settings.showDuration,
-    settings.transitionDuration
+    effectiveTransitionDuration
   ]);
 
   // Timer Logic
@@ -1659,8 +1692,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setPhase('showing');
       setTimeLeft(settings.showDuration);
     } else if (phase === 'showing') {
-      setPhase('revealing');
-      setTimeLeft(revealPhaseDuration);
+      if (revealPhaseDuration > 0) {
+        setPhase('revealing');
+        setTimeLeft(revealPhaseDuration);
+      } else if (settings.sceneSettings.outroEnabled) {
+        setPhase('outro');
+        setTimeLeft(settings.sceneSettings.outroDuration);
+      } else {
+        setPhase('finished');
+        setTimeLeft(0);
+      }
     } else if (phase === 'revealing') {
       handlePhaseComplete();
     } else if (phase === 'outro') {
@@ -1820,7 +1861,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!isPlaying || phase !== 'transitioning') return;
     if (!settings.soundEffectsEnabled || !settings.previewSoundEnabled) return;
     if (!audioUnlockedRef.current) return;
-    if (settings.transitionDuration <= 0) return;
+    if (effectiveTransitionDuration <= 0) return;
 
     const key = `${safeCurrentIndex}:transition`;
     if (lastTransitionKeyRef.current === key) return;
@@ -1833,7 +1874,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     isPlaying,
     phase,
     safeCurrentIndex,
-    settings.transitionDuration,
+    effectiveTransitionDuration,
     settings.previewSoundEnabled,
     settings.soundEffectsEnabled,
     playAudioCue
@@ -2005,17 +2046,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         puzzleIndex: safeCurrentIndex,
         puzzleCount: puzzles.length,
         timeLeft: smoothedTimeLeft,
-        settings,
-        revealPhaseDuration
+        settings
       }),
-    [phase, puzzles.length, revealPhaseDuration, safeCurrentIndex, settings, smoothedTimeLeft]
+    [phase, puzzles.length, safeCurrentIndex, settings, smoothedTimeLeft]
   );
   const totalPlaybackDuration = useMemo(() => {
     const introDuration = resolveIntroDuration(settings);
     const outroDuration = settings.sceneSettings.outroEnabled ? settings.sceneSettings.outroDuration : 0;
     const puzzleCount = Math.max(0, puzzles.length);
     const showingDuration = settings.showDuration;
-    const transitionDuration = settings.transitionDuration;
+    const transitionDuration = effectiveTransitionDuration;
 
     if (puzzleCount <= 0) {
       return introDuration + outroDuration;
@@ -2023,19 +2063,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     return (
       introDuration +
-      puzzleCount * (showingDuration + revealPhaseDuration) +
+      puzzles.reduce(
+        (total, _puzzle, puzzleIndex) =>
+          total + showingDuration + getRevealPhaseDurationForPuzzle(settings, puzzleIndex, puzzleCount),
+        0
+      ) +
       Math.max(0, puzzleCount - 1) * transitionDuration +
       outroDuration
     );
   }, [
     puzzles.length,
     introDuration,
-    revealPhaseDuration,
     settings.sceneSettings.outroDuration,
     settings.sceneSettings.outroEnabled,
+    settings.skipLastPuzzleReveal,
+    settings.revealDuration,
     settings.showDuration,
-    settings.transitionDuration
+    effectiveTransitionDuration
   ]);
+  const finalCommentPromptLines = useMemo(
+    () => splitFinalCommentPromptIntoLines(settings.finalCommentPromptText),
+    [settings.finalCommentPromptText]
+  );
+  const finalCommentPromptVisible =
+    phase !== 'finished' &&
+    finalCommentPromptLines.length > 0 &&
+    shouldShowFinalCommentPrompt(settings, totalPlaybackDuration, generatedBackgroundPlaybackTime);
+  const finalCommentPromptPosition = useMemo(
+    () => ({
+      left: `${clampFinalCommentPromptPosition(settings.finalCommentPromptX, 50)}%`,
+      top: `${clampFinalCommentPromptPosition(settings.finalCommentPromptY, 12)}%`
+    }),
+    [settings.finalCommentPromptX, settings.finalCommentPromptY]
+  );
 
   useEffect(() => {
     if (!settings.previewSoundEnabled || !settings.backgroundMusicEnabled) {
@@ -2226,7 +2286,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : phase === 'revealing'
       ? revealPhaseDuration
       : phase === 'transitioning'
-      ? settings.transitionDuration
+      ? effectiveTransitionDuration
       : phase === 'outro'
       ? settings.sceneSettings.outroDuration
       : 0;
@@ -2351,7 +2411,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     phaseDuration <= 0
       ? 0
       : Math.max(0, Math.min(100, (visualTimeLeft / Math.max(0.1, phaseDuration)) * 100));
-  const transitionDuration = Math.max(0.001, settings.transitionDuration);
+  const transitionDuration = Math.max(0.001, effectiveTransitionDuration);
   const transitionProgress =
     phase === 'transitioning'
       ? Math.min(1, Math.max(0, (transitionDuration - visualTimeLeft) / transitionDuration))
@@ -2361,10 +2421,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const transitionSequenceState = useMemo(
     () =>
       resolveVideoTransitionSequenceState({
-        phaseDuration: settings.transitionDuration,
+        phaseDuration: effectiveTransitionDuration,
         timeLeft: visualTimeLeft
       }),
-    [settings.transitionDuration, visualTimeLeft]
+    [effectiveTransitionDuration, visualTimeLeft]
   );
   const puzzleEntryState = useMemo(
     () =>
@@ -2397,7 +2457,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const transitionCardGlowOpacity =
     0.18 + transitionSmooth * (0.34 + styleModules.transition.cardGlowBoost);
   const puzzleTransitionDuration =
-    settings.transitionStyle === 'none' ? 0 : Math.max(0, settings.transitionDuration);
+    settings.transitionStyle === 'none' ? 0 : Math.max(0, effectiveTransitionDuration);
   const puzzleMotionInitial = styleModules.transition.previewInitial;
   const puzzleMotionExit = styleModules.transition.previewExit;
   const generatedProgressTheme = settings.generatedProgressEnabled
@@ -3863,6 +3923,43 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           textColor: '#111827',
           shadow: '16px 16px 0px 0px rgba(15,23,42,0.18)'
         };
+  const renderFinalCommentPrompt = () => {
+    if (!finalCommentPromptVisible) {
+      return null;
+    }
+
+    const promptFontSize = Math.max(16, Math.round(24 * stageMetrics.scale));
+    const promptLineWidth = Math.max(260, Math.round(stageMetrics.baseWidth * 0.78));
+    const promptLetterSpacing = Math.min(
+      0.12,
+      Math.max(0.02, styleModules.text.subtitleLetterSpacingEm * 0.4)
+    );
+
+    return (
+      <div
+        className="absolute pointer-events-none z-[55] -translate-x-1/2 -translate-y-1/2"
+        style={finalCommentPromptPosition}
+      >
+        <div
+          className="flex flex-col items-center gap-2"
+          style={{ width: `${promptLineWidth}px`, maxWidth: '82%' }}
+        >
+          {finalCommentPromptLines.map((line, index) => (
+            <div
+              key={`${index}-${line}`}
+              className={`w-fit max-w-full rounded-2xl border-2 border-white/20 bg-black/78 px-4 py-2 text-center font-black leading-tight text-white shadow-[0_8px_24px_rgba(0,0,0,0.4)] ${styleModules.text.subtitleFontClass}`}
+              style={{
+                fontSize: `${promptFontSize}px`,
+                letterSpacing: `${promptLetterSpacing}em`
+              }}
+            >
+              {line}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   if (!hasPuzzles) {
     return (
@@ -4449,6 +4546,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           )}
           {phase === 'transitioning' && renderTransitionOverlay()}
           {phase === 'outro' && renderSceneCard('outro')}
+          {renderFinalCommentPrompt()}
 
         </div>
         </>

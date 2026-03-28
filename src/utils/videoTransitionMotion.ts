@@ -32,8 +32,16 @@ const easeOutBack = (value: number) => {
   return 1 + c3 * shifted * shifted * shifted + c1 * shifted * shifted;
 };
 
-const TYPEWRITER_START_RATIO = 0.18;
-const TYPEWRITER_END_RATIO = 0.62;
+const CONFIGURED_TRANSITION_ACTIVE_END_RATIO = 0.62;
+const TYPEWRITER_START_RATIO = 0.18 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
+const TYPEWRITER_END_RATIO = 1;
+const FADE_IN_RATIO = 0.3 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
+const TITLE_OPACITY_START_RATIO = 0.1 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
+const TITLE_OPACITY_RANGE_RATIO = 0.14 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
+const SUBTITLE_OPACITY_START_RATIO = 0.56 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
+const SUBTITLE_OPACITY_RANGE_RATIO = 0.18 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
+const TITLE_LIFT_START_RATIO = 0.12 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
+const TITLE_LIFT_RANGE_RATIO = 0.18 / CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
 
 export const resolveVideoTransitionTypewriterWindow = (phaseDuration: number) => {
   const safeDuration = Math.max(0, phaseDuration);
@@ -42,6 +50,9 @@ export const resolveVideoTransitionTypewriterWindow = (phaseDuration: number) =>
     end: safeDuration * TYPEWRITER_END_RATIO
   };
 };
+
+export const resolveVideoTransitionPhaseDuration = (phaseDuration: number) =>
+  Math.max(0, phaseDuration) * CONFIGURED_TRANSITION_ACTIVE_END_RATIO;
 
 export const countTypewriterGlyphs = (text: string) =>
   Array.from(text).reduce((count, character) => (character.trim().length > 0 ? count + 1 : count), 0);
@@ -75,11 +86,13 @@ export const resolveVideoTransitionSequenceState = ({
 }: ResolveTimedMotionInput): VideoTransitionSequenceState => {
   const safeDuration = Math.max(0.001, phaseDuration);
   const progress = clamp((safeDuration - timeLeft) / safeDuration, 0, 1);
-  const fadeProgress = smoothstep(clamp(progress / 0.3, 0, 1));
+  const fadeProgress = smoothstep(clamp(progress / FADE_IN_RATIO, 0, 1));
   const titleProgress = smoothstep(clamp((progress - TYPEWRITER_START_RATIO) / (TYPEWRITER_END_RATIO - TYPEWRITER_START_RATIO), 0, 1));
-  const titleOpacity = smoothstep(clamp((progress - 0.1) / 0.14, 0, 1));
-  const subtitleOpacity = smoothstep(clamp((progress - 0.56) / 0.18, 0, 1));
-  const titleLift = 1 - smoothstep(clamp((progress - 0.12) / 0.18, 0, 1));
+  const titleOpacity = smoothstep(clamp((progress - TITLE_OPACITY_START_RATIO) / TITLE_OPACITY_RANGE_RATIO, 0, 1));
+  const subtitleOpacity = smoothstep(
+    clamp((progress - SUBTITLE_OPACITY_START_RATIO) / SUBTITLE_OPACITY_RANGE_RATIO, 0, 1)
+  );
+  const titleLift = 1 - smoothstep(clamp((progress - TITLE_LIFT_START_RATIO) / TITLE_LIFT_RANGE_RATIO, 0, 1));
 
   return {
     progress,

@@ -1,6 +1,6 @@
 import { Download, Film, Image as ImageIcon, Layers, PencilLine, Play, Trash2, Upload, Wand2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type KeyboardEvent } from 'react';
 import { ConfirmDialog } from '../../app/components/ConfirmDialog';
 import { downloadJsonFile } from '../../services/jsonTransfer';
 import { notifySuccess } from '../../services/notifications';
@@ -15,9 +15,11 @@ const samePuzzle = (
 export default function CreateReviewPage() {
   const navigate = useNavigate();
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [removeIndex, setRemoveIndex] = useState<number | null>(null);
   const batch = useAppStore((state) => state.workspace.batch);
   const puzzle = useAppStore((state) => state.workspace.puzzle);
   const playIndex = useAppStore((state) => state.workspace.playIndex);
+  const replaceWorkspace = useAppStore((state) => state.replaceWorkspace);
   const setPuzzle = useAppStore((state) => state.setPuzzle);
   const setPlayIndex = useAppStore((state) => state.setPlayIndex);
   const resetWorkspace = useAppStore((state) => state.resetWorkspace);
@@ -32,11 +34,21 @@ export default function CreateReviewPage() {
     return batch.findIndex((entry) => samePuzzle(currentPuzzle, entry));
   }, [batch, currentPuzzle, playIndex]);
 
+  const activeIndex = selectedIndex >= 0 ? selectedIndex : 0;
   const totalRegions = batch.reduce((sum, item) => sum + item.regions.length, 0);
+  const removeTarget = removeIndex !== null ? batch[removeIndex] ?? null : null;
+  const removeTargetTitle =
+    removeTarget?.title?.trim() || (removeIndex !== null ? `Puzzle ${removeIndex + 1}` : 'this puzzle');
 
   const handleSelectPuzzle = (index: number) => {
     setPlayIndex(index);
     setPuzzle(batch[index] ?? null);
+  };
+
+  const handlePuzzleCardKeyDown = (event: KeyboardEvent<HTMLElement>, index: number) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    handleSelectPuzzle(index);
   };
 
   const handleDownloadBatch = () => {
@@ -47,6 +59,37 @@ export default function CreateReviewPage() {
     };
     downloadJsonFile(payload, 'puzzle-batch.json');
     notifySuccess('Batch JSON downloaded.');
+  };
+
+  const handleRemovePuzzle = (index: number) => {
+    const target = batch[index];
+    if (!target) {
+      setRemoveIndex(null);
+      return;
+    }
+
+    const nextBatch = batch.filter((_, itemIndex) => itemIndex !== index);
+    if (!nextBatch.length) {
+      replaceWorkspace({
+        batch: [],
+        puzzle: null,
+        playIndex: 0
+      });
+      setRemoveIndex(null);
+      notifySuccess(`Removed "${target.title?.trim() || `Puzzle ${index + 1}`}" from the batch.`);
+      return;
+    }
+
+    const nextSelectedIndex =
+      index < activeIndex ? activeIndex - 1 : index === activeIndex ? Math.min(activeIndex, nextBatch.length - 1) : activeIndex;
+
+    replaceWorkspace({
+      batch: nextBatch,
+      puzzle: nextBatch[nextSelectedIndex] ?? null,
+      playIndex: nextSelectedIndex
+    });
+    setRemoveIndex(null);
+    notifySuccess(`Removed "${target.title?.trim() || `Puzzle ${index + 1}`}" from the batch.`);
   };
 
   const handleClearBatch = () => {
@@ -177,24 +220,42 @@ export default function CreateReviewPage() {
 
       <section className="grid gap-4 lg:grid-cols-2">
         {batch.map((item, index) => {
-          const isSelected = index === selectedIndex || (selectedIndex === -1 && index === 0);
+          const isSelected = index === activeIndex;
           const title = item.title?.trim() || `Puzzle ${index + 1}`;
           return (
-            <button
+            <article
               key={`${title}-${index}`}
-              type="button"
+              role="button"
+              tabIndex={0}
+              aria-pressed={isSelected}
               onClick={() => handleSelectPuzzle(index)}
-              className={`rounded-[26px] border-4 p-4 text-left shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 ${
+              onKeyDown={(event) => handlePuzzleCardKeyDown(event, index)}
+              className={`rounded-[26px] border-4 p-4 text-left shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563EB]/35 ${
                 isSelected ? 'border-black bg-[#FEF3C7]' : 'border-black bg-white'
               }`}
             >
               <div className="flex items-start justify-between gap-3">
-                <div>
+                <div className="min-w-0">
                   <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Puzzle {index + 1}</div>
                   <h2 className="mt-2 text-xl font-black uppercase text-slate-900">{title}</h2>
                 </div>
-                <div className="rounded-full border border-black bg-white px-3 py-1 text-[10px] font-black uppercase text-slate-700">
-                  {item.regions.length} diff{item.regions.length === 1 ? '' : 's'}
+                <div className="flex items-center gap-2">
+                  <div className="rounded-full border border-black bg-white px-3 py-1 text-[10px] font-black uppercase text-slate-700">
+                    {item.regions.length} diff{item.regions.length === 1 ? '' : 's'}
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`Delete ${title}`}
+                    title="Delete puzzle pair"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setRemoveIndex(index);
+                    }}
+                    onKeyDown={(event) => event.stopPropagation()}
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-full border-2 border-black bg-white text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-red-200"
+                  >
+                    <Trash2 size={16} strokeWidth={2.5} />
+                  </button>
                 </div>
               </div>
 
@@ -206,10 +267,27 @@ export default function CreateReviewPage() {
                   <img src={item.imageB} alt={`${title} modified`} className="h-44 w-full rounded-xl object-contain bg-slate-100" />
                 </div>
               </div>
-            </button>
+            </article>
           );
         })}
       </section>
+
+      <ConfirmDialog
+        open={removeIndex !== null}
+        title="Delete puzzle pair?"
+        description={`Remove "${removeTargetTitle}" from the current batch? This only removes it from the active project workspace.`}
+        confirmLabel="Delete Puzzle"
+        tone="danger"
+        onOpenChange={(open) => {
+          if (!open) {
+            setRemoveIndex(null);
+          }
+        }}
+        onConfirm={() => {
+          if (removeIndex === null) return;
+          handleRemovePuzzle(removeIndex);
+        }}
+      />
 
       <ConfirmDialog
         open={confirmClearOpen}

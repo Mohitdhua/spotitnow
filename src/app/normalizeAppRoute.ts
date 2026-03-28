@@ -15,6 +15,7 @@ export const normalizeAppRoute = (value: string | null | undefined): AppRoute =>
     case '/tools/splitter':
     case '/tools/extractor':
     case '/tools/upscaler':
+    case '/tools/vector':
     case '/tools/backgrounds':
     case '/tools/timers':
     case '/tools/progress':

@@ -1,4 +1,4 @@
-import { BrainCircuit, MousePointer2, ShieldCheck, Upload } from 'lucide-react';
+import { BrainCircuit, ShieldCheck, Upload, Wand2, Zap } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ImageUploader } from '../../components/ImageUploader';
 import type { ProcessingMode, Puzzle, Region } from '../../types';
@@ -12,9 +12,14 @@ const optionCards = [
     copy: 'Safest choice when you want full control. Upload now, then fine-tune regions in the editor before you play or export.'
   },
   {
-    icon: MousePointer2,
+    icon: Zap,
+    title: 'Ultra Fast',
+    copy: 'Best for perfectly aligned image pairs with obvious changes. It skips alignment and ignores tiny differences so you get results much faster.'
+  },
+  {
+    icon: Wand2,
     title: 'Auto Review',
-    copy: 'Fastest route for clean pairs. Let the app detect regions, then review the batch before sending it forward.'
+    copy: 'Balanced route for clean pairs. Let the app align, detect, and clean up regions before you review the batch.'
   },
   {
     icon: BrainCircuit,
@@ -80,7 +85,46 @@ export default function CreateUploadPage() {
           </div>
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-3">
+        <div className="mt-6 rounded-[24px] border-4 border-black bg-white p-6">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Step 1</div>
+              <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-slate-900">Upload Pairs</h2>
+            </div>
+            <Link
+              to={batch.length > 0 ? '/create/review' : '/'}
+              className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-white px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-700 hover:bg-slate-100"
+            >
+              <Upload size={14} strokeWidth={2.5} />
+              {batch.length > 0 ? 'Resume Review' : 'Back To Dashboard'}
+            </Link>
+          </div>
+
+          <ImageUploader
+            onImagesSelected={handleImagesSelected}
+            onBatchSelected={handleBatchSelected}
+            onExportVideo={handleExportVideo}
+            injectedFiles={injectedFiles ?? undefined}
+            injectedProcessingMode={injectedProcessingMode as ProcessingMode | null}
+            injectedFilesSessionId={injectedFilesSessionId}
+            onInjectedFilesHandled={clearInjectedUpload}
+          />
+        </div>
+      </section>
+
+      <section className="rounded-[28px] border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+        <div className="max-w-3xl">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Workflow Details</div>
+            <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-slate-900">Choose The Detection Style After Upload</h2>
+            <p className="mt-3 text-sm font-semibold text-slate-600 sm:text-base">
+              The uploader comes first now, and these cards stay here as a quick reminder of when each processing mode
+              makes the most sense.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {optionCards.map((item) => {
             const Icon = item.icon;
             return (
@@ -88,38 +132,12 @@ export default function CreateUploadPage() {
                 <div className="inline-flex h-11 w-11 items-center justify-center rounded-xl border-2 border-black bg-white">
                   <Icon size={18} strokeWidth={2.6} />
                 </div>
-                <h2 className="mt-4 text-lg font-black uppercase text-slate-900">{item.title}</h2>
+                <h3 className="mt-4 text-lg font-black uppercase text-slate-900">{item.title}</h3>
                 <p className="mt-2 text-sm font-semibold text-slate-600">{item.copy}</p>
               </div>
             );
           })}
         </div>
-      </section>
-
-      <section className="rounded-[28px] border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
-        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Step 1</div>
-            <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-slate-900">Upload Pairs</h2>
-          </div>
-          <Link
-            to={batch.length > 0 ? '/create/review' : '/'}
-            className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-white px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-700 hover:bg-slate-100"
-          >
-            <Upload size={14} strokeWidth={2.5} />
-            {batch.length > 0 ? 'Resume Review' : 'Back To Dashboard'}
-          </Link>
-        </div>
-
-        <ImageUploader
-          onImagesSelected={handleImagesSelected}
-          onBatchSelected={handleBatchSelected}
-          onExportVideo={handleExportVideo}
-          injectedFiles={injectedFiles ?? undefined}
-          injectedProcessingMode={injectedProcessingMode as ProcessingMode | null}
-          injectedFilesSessionId={injectedFilesSessionId}
-          onInjectedFilesHandled={clearInjectedUpload}
-        />
       </section>
     </div>
   );

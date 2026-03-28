@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
-  GripVertical,
   Image,
   Layers,
   Lock,
@@ -86,50 +85,50 @@ const CLIP_KIND_ICONS = {
   overlay: Image
 } as const;
 
-const TRACK_TONES = {
-  video: 'from-[#16213d] via-[#1a2f5c] to-[#0f1730]',
-  audio: 'from-[#14203a] via-[#173457] to-[#10233d]',
-  text: 'from-[#2d1b11] via-[#402216] to-[#24140d]',
-  effects: 'from-[#251738] via-[#321a4d] to-[#180f28]',
-  overlay: 'from-[#102731] via-[#143847] to-[#0e1f28]'
+const TRACK_ACCENTS = {
+  video: '#5B8DEF',
+  audio: '#4CB782',
+  text: '#D7A44C',
+  effects: '#9B7AE0',
+  overlay: '#5FA6C7'
 } as const;
 
 const CLIP_TONES = {
-  video: 'rgba(59, 130, 246, 0.92)',
-  audio: 'rgba(20, 184, 166, 0.92)',
-  text: 'rgba(245, 158, 11, 0.94)',
-  effect: 'rgba(168, 85, 247, 0.94)',
-  overlay: 'rgba(236, 72, 153, 0.92)'
+  video: 'rgba(77, 120, 201, 0.92)',
+  audio: 'rgba(67, 152, 113, 0.92)',
+  text: 'rgba(184, 136, 69, 0.94)',
+  effect: 'rgba(128, 103, 184, 0.94)',
+  overlay: 'rgba(84, 138, 158, 0.92)'
 } as const;
 
 const SNAP_THRESHOLD_PX = 10;
 
 const getClipBodyMetrics = (clip: EditorTimelineClip, trackHeight: number) => {
   if (clip.type === 'effect') {
-    const height = Math.max(18, Math.min(28, trackHeight - 16));
+    const height = Math.max(14, Math.min(20, trackHeight - 14));
     const top = Math.round((trackHeight - height) / 2);
     return { top, height };
   }
 
   if (clip.type === 'audio') {
-    return { top: 10, height: Math.max(34, trackHeight - 20) };
+    return { top: 6, height: Math.max(24, trackHeight - 12) };
   }
 
   if (clip.type === 'text') {
-    return { top: 9, height: Math.max(30, trackHeight - 18) };
+    return { top: 6, height: Math.max(22, trackHeight - 12) };
   }
 
-  return { top: 7, height: Math.max(38, trackHeight - 14) };
+  return { top: 5, height: Math.max(28, trackHeight - 10) };
 };
 
 const compareTracks = (left: EditorTimelineTrack, right: EditorTimelineTrack) => left.order - right.order;
 
 const WaveformPreview = React.memo(function WaveformPreview({ waveform }: { waveform: number[] }) {
   return (
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full opacity-80">
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full opacity-65">
       {waveform.map((point, index) => {
         const x = waveform.length <= 1 ? 50 : (index / (waveform.length - 1)) * 100;
-        const height = clamp(point * 84, 12, 84);
+        const height = clamp(point * 80, 10, 80);
         const y = (100 - height) / 2;
         return (
           <line
@@ -138,47 +137,13 @@ const WaveformPreview = React.memo(function WaveformPreview({ waveform }: { wave
             y1={y}
             x2={x}
             y2={100 - y}
-            stroke="rgba(255,255,255,0.82)"
-            strokeWidth="1.8"
+            stroke="rgba(255,255,255,0.58)"
+            strokeWidth="1.25"
             strokeLinecap="round"
           />
         );
       })}
     </svg>
-  );
-});
-
-const FrameStrip = React.memo(function FrameStrip({
-  clip,
-  frameCount
-}: {
-  clip: EditorTimelineClip;
-  frameCount: number;
-}) {
-  return (
-    <div className="absolute inset-x-1 bottom-1 flex h-6 gap-1 overflow-hidden rounded-lg">
-      {Array.from({ length: frameCount }, (_, index) => (
-        <div
-          key={`${clip.id}-frame-${index}`}
-          className="relative min-w-0 flex-1 overflow-hidden rounded-md border border-white/10"
-          style={{
-            background:
-              clip.previewUrl
-                ? `linear-gradient(135deg, rgba(15,23,42,0.28), rgba(15,23,42,0.06)), url(${clip.previewUrl}) center/cover`
-                : 'linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0.04))'
-          }}
-        >
-          <div
-            className="absolute inset-0 opacity-70"
-            style={{
-              backgroundImage: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent)',
-              backgroundSize: '120% 100%',
-              transform: `translateX(${index * 6}%)`
-            }}
-          />
-        </div>
-      ))}
-    </div>
   );
 });
 
@@ -209,27 +174,27 @@ const TimelineClipBlock = React.memo(function TimelineClipBlock({
 }) {
   const Icon = CLIP_KIND_ICONS[clip.type];
   const { top, height } = getClipBodyMetrics(clip, trackHeight);
-  const detailAllowed = width > 54;
+  const detailAllowed = width > 64;
   const showCompact = detailLevel !== 'minimal' && detailAllowed;
-  const showDetailed = detailLevel === 'detailed' && width > 150;
-  const showTrimHandles = isEditable && selected && width > 56;
-  const frameStripCount = Math.min(7, Math.max(3, Math.floor(width / 66)));
+  const showDetailed = detailLevel === 'detailed' && width > 180;
+  const showTrimHandles = isEditable && selected && width > 64;
+  const clipTone = clip.color || CLIP_TONES[clip.type];
 
   return (
     <button
       type="button"
       title={`${clip.label} • ${formatTimelineTime(clip.start)} to ${formatTimelineTime(clip.start + clip.duration)}`}
-      className={`group absolute overflow-hidden rounded-xl border text-left transition-[transform,box-shadow,border-color] ${
+      className={`group absolute overflow-hidden rounded-md border text-left transition-[border-color,box-shadow,transform] ${
         selected
-          ? 'border-white shadow-[0_0_0_2px_rgba(251,191,36,0.9),0_16px_28px_rgba(15,23,42,0.55)]'
-          : 'border-white/12 shadow-[0_12px_22px_rgba(15,23,42,0.32)] hover:border-white/35 hover:shadow-[0_16px_28px_rgba(15,23,42,0.4)]'
+          ? 'border-white/80 shadow-[0_0_0_1px_rgba(255,255,255,0.38),0_8px_18px_rgba(0,0,0,0.26)]'
+          : 'border-black/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.14)] hover:border-black/55 hover:shadow-[0_6px_14px_rgba(0,0,0,0.18)]'
       }`}
       style={{
         left,
         width: Math.max(18, width),
         top,
         height,
-        background: `linear-gradient(180deg, rgba(255,255,255,0.15), rgba(255,255,255,0.04)), ${clip.color || CLIP_TONES[clip.type]}`
+        background: `linear-gradient(180deg, rgba(255,255,255,0.14), rgba(255,255,255,0.03)), ${clipTone}`
       }}
       onClick={(event) => {
         event.stopPropagation();
@@ -240,14 +205,13 @@ const TimelineClipBlock = React.memo(function TimelineClipBlock({
         onMovePointerDown(event);
       }}
     >
+      <div className="absolute inset-y-0 left-0 w-1 bg-black/18" />
+      <div className="absolute inset-x-0 top-0 h-px bg-white/18" />
       <div className="absolute inset-0 opacity-70">
-        {(clip.type === 'video' || clip.type === 'overlay') && showDetailed && (
-          <FrameStrip clip={clip} frameCount={frameStripCount} />
-        )}
         {clip.type === 'audio' && clip.waveform && <WaveformPreview waveform={clip.waveform} />}
         {clip.previewUrl && showDetailed && (
           <div
-            className="absolute inset-0 opacity-20"
+            className="absolute inset-0 opacity-[0.12]"
             style={{
               backgroundImage: `url(${clip.previewUrl})`,
               backgroundPosition: 'center',
@@ -257,46 +221,29 @@ const TimelineClipBlock = React.memo(function TimelineClipBlock({
         )}
       </div>
 
-      <div className="relative flex h-full min-w-0 flex-col justify-between px-3 py-2">
+      <div className="relative flex h-full min-w-0 flex-col justify-between px-2.5 py-1.5">
         {showCompact ? (
           <>
             <div className="flex min-w-0 items-center gap-2">
-              <span className="rounded-lg bg-black/20 p-1 text-white shadow-[0_1px_0_rgba(255,255,255,0.18)]">
-                <Icon size={12} strokeWidth={2.5} />
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm bg-black/18 text-white/90">
+                <Icon size={11} strokeWidth={2.3} />
               </span>
-              <span className="truncate text-[11px] font-black uppercase tracking-[0.16em] text-white/90">{clip.label}</span>
+              <span className="truncate text-[11px] font-semibold text-white">{clip.label}</span>
             </div>
             {showDetailed ? (
-              <div className="flex min-w-0 items-end justify-between gap-2 text-[10px] font-semibold text-white/90">
-                <div className="min-w-0">
-                  <div className="truncate text-white/85">{clip.subtitle ?? `${formatTimelineTime(clip.duration)} duration`}</div>
-                  <div className="truncate text-white/70">
-                    {formatTimelineTime(clip.start)} - {formatTimelineTime(clip.start + clip.duration)}
-                  </div>
+              <div className="flex min-w-0 items-end justify-between gap-2 text-[10px] font-medium text-white/78">
+                <div className="truncate">{clip.subtitle ?? formatTimelineTime(clip.duration)}</div>
+                <div className="shrink-0 tabular-nums text-white/68">
+                  {formatTimelineTime(clip.start)} - {formatTimelineTime(clip.start + clip.duration)}
                 </div>
-                {clip.effects?.length ? (
-                  <div className="hidden items-center gap-1 xl:flex">
-                    {clip.effects.slice(0, 2).map((effect) => (
-                      <span
-                        key={effect.id}
-                        className="rounded-full border border-white/25 bg-black/20 px-2 py-1 text-[9px] font-black uppercase tracking-[0.15em]"
-                        style={{
-                          backgroundColor: effect.tone ? `${effect.tone}44` : undefined
-                        }}
-                      >
-                        {effect.label}
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             ) : (
-              <div className="truncate text-[10px] font-bold text-white/80">{clip.subtitle ?? formatTimelineTime(clip.duration)}</div>
+              <div className="truncate text-[10px] font-medium text-white/76">{clip.subtitle ?? formatTimelineTime(clip.duration)}</div>
             )}
           </>
         ) : (
           <div className="flex h-full items-center justify-center">
-            <Icon size={14} strokeWidth={2.5} className="text-white/92" />
+            <Icon size={12} strokeWidth={2.4} className="text-white/92" />
           </div>
         )}
       </div>
@@ -304,14 +251,14 @@ const TimelineClipBlock = React.memo(function TimelineClipBlock({
       {showTrimHandles && (
         <>
           <div
-            className="absolute left-0 top-0 h-full w-2.5 cursor-col-resize rounded-l-xl border-r border-white/35 bg-black/18 opacity-0 transition group-hover:opacity-100"
+            className="absolute left-0 top-0 h-full w-2 cursor-col-resize border-r border-white/32 bg-black/12 opacity-0 transition group-hover:opacity-100"
             onPointerDown={(event) => {
               event.stopPropagation();
               onTrimStartPointerDown(event);
             }}
           />
           <div
-            className="absolute right-0 top-0 h-full w-2.5 cursor-col-resize rounded-r-xl border-l border-white/35 bg-black/18 opacity-0 transition group-hover:opacity-100"
+            className="absolute right-0 top-0 h-full w-2 cursor-col-resize border-l border-white/32 bg-black/12 opacity-0 transition group-hover:opacity-100"
             onPointerDown={(event) => {
               event.stopPropagation();
               onTrimEndPointerDown(event);
@@ -708,38 +655,38 @@ export function EditorTimeline({
 
   return (
     <section
-      className={`overflow-hidden rounded-[28px] border border-black/80 bg-[#0e1420] text-white shadow-[10px_10px_0px_0px_rgba(0,0,0,0.95)] ${className ?? ''}`}
+      className={`overflow-hidden rounded-2xl border border-black/20 bg-[#23262b] text-white shadow-[0_14px_32px_rgba(15,23,42,0.14)] ${className ?? ''}`}
     >
-      <div className="border-b border-white/10 bg-[linear-gradient(135deg,#121a2d,#0b101a)] px-4 py-4 sm:px-5">
+      <div className="border-b border-white/8 bg-[#2c3036] px-4 py-3 sm:px-5">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-1">
-            <div className="text-[11px] font-black uppercase tracking-[0.28em] text-[#7aa2ff]">Editor Timeline</div>
-            <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-white/72">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-white/58">Timeline</div>
+            <div className="flex flex-wrap items-center gap-2 text-sm text-white/72">
               <span>{orderedTracks.length} tracks</span>
-              <span className="h-1 w-1 rounded-full bg-white/25" />
+              <span className="text-white/30">/</span>
               <span>{totalClipCount} clips</span>
-              <span className="h-1 w-1 rounded-full bg-white/25" />
+              <span className="text-white/30">/</span>
               <span>{formatTimelineTime(timeline.duration)} total range</span>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full border border-white/12 bg-white/5 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-white/72">
-              {detailLevel === 'minimal' ? 'overview' : detailLevel === 'compact' ? 'editor' : 'precision'}
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="rounded-md border border-white/10 bg-black/10 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.12em] text-white/62">
+              {detailLevel === 'minimal' ? 'overview' : detailLevel === 'compact' ? 'standard' : 'detail'}
             </span>
-            <div className="flex items-center gap-1 rounded-full border border-white/12 bg-white/5 p-1">
+            <div className="flex items-center overflow-hidden rounded-md border border-white/10 bg-black/10">
               <button
                 type="button"
-                className="rounded-full border border-white/12 bg-white/8 p-2 text-white/85 transition hover:bg-white/15"
+                className="border-r border-white/10 px-3 py-2 text-white/78 transition hover:bg-white/6"
                 onClick={() => zoomAtClientX(TIMELINE_HEADER_WIDTH + visibleRange.viewportWidth / 2, zoom.pixelsPerSecond * 0.88)}
               >
                 <Minus size={14} strokeWidth={2.5} />
               </button>
-              <div className="min-w-[88px] text-center text-[11px] font-black uppercase tracking-[0.18em] text-white/78">
+              <div className="min-w-[96px] px-3 text-center text-[11px] font-medium uppercase tracking-[0.12em] text-white/68">
                 {zoom.pixelsPerSecond.toFixed(0)} px/s
               </div>
               <button
                 type="button"
-                className="rounded-full border border-white/12 bg-white/8 p-2 text-white/85 transition hover:bg-white/15"
+                className="border-l border-white/10 px-3 py-2 text-white/78 transition hover:bg-white/6"
                 onClick={() => zoomAtClientX(TIMELINE_HEADER_WIDTH + visibleRange.viewportWidth / 2, zoom.pixelsPerSecond * 1.12)}
               >
                 <Plus size={14} strokeWidth={2.5} />
@@ -751,23 +698,25 @@ export function EditorTimeline({
 
       <div
         ref={scrollRef}
-        className="max-h-[540px] overflow-auto bg-[radial-gradient(circle_at_top,rgba(37,99,235,0.08),transparent_35%),linear-gradient(180deg,#0b1019,#0e1420)]"
+        className="max-h-[520px] overflow-auto bg-[#1d2025]"
         onWheel={handleWheel}
       >
         <div style={{ width: TIMELINE_HEADER_WIDTH + timeAreaWidth, minWidth: '100%' }}>
-          <div className="sticky top-0 z-40 flex border-b border-white/10 bg-[rgba(7,10,17,0.96)] backdrop-blur">
+          <div className="sticky top-0 z-40 flex border-b border-white/8 bg-[rgba(44,48,54,0.95)] backdrop-blur">
             <div
-              className="sticky left-0 z-50 flex h-[46px] shrink-0 items-center justify-between border-r border-white/10 bg-[rgba(9,13,22,0.98)] px-4"
+              className="sticky left-0 z-50 flex shrink-0 items-center justify-between border-r border-white/8 bg-[#2f3339] px-4"
               style={{ width: TIMELINE_HEADER_WIDTH, height: TIMELINE_RULER_HEIGHT }}
             >
               <div>
-                <div className="text-[10px] font-black uppercase tracking-[0.24em] text-white/50">Tracks</div>
-                <div className="text-sm font-black uppercase tracking-[0.12em] text-white">Studio Stack</div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/45">Tracks</div>
+                <div className="text-sm font-semibold text-white/84">Editor</div>
               </div>
-              <GripVertical size={16} strokeWidth={2.4} className="text-white/28" />
+              <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-white/40">
+                {formatTimelineTime(playheadTime)}
+              </div>
             </div>
             <div
-              className="relative shrink-0 border-l border-white/5"
+              className="relative shrink-0 border-l border-white/5 bg-[#30343a]"
               style={{ width: timeAreaWidth, height: TIMELINE_RULER_HEIGHT }}
               onPointerDown={(event) => {
                 if (event.button !== 0) return;
@@ -780,8 +729,10 @@ export function EditorTimeline({
                 const isMajor = Math.round((tick / rulerStep) * 10) % 5 === 0;
                 return (
                   <div key={`tick-${tick}`} className="absolute inset-y-0" style={{ left }}>
-                    <div className={`h-full w-px ${isMajor ? 'bg-white/16' : 'bg-white/8'}`} />
-                    <div className="absolute left-2 top-1 text-[10px] font-bold text-white/56">{formatTimelineTime(tick)}</div>
+                    <div className={`h-full w-px ${isMajor ? 'bg-white/14' : 'bg-white/7'}`} />
+                    <div className="absolute left-2 top-1.5 text-[10px] font-medium text-white/52">
+                      {formatTimelineTime(tick)}
+                    </div>
                   </div>
                 );
               })}
@@ -791,7 +742,7 @@ export function EditorTimeline({
                   <div key={marker.id} className="absolute inset-y-0" style={{ left }}>
                     <div className="absolute top-0 h-full w-px bg-white/20" />
                     <div
-                      className="absolute left-2 top-5 rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-[0.18em] text-black"
+                      className="absolute left-2 top-5 rounded-sm border px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-black"
                       style={{
                         backgroundColor: marker.color ?? '#FDE68A',
                         borderColor: 'rgba(15, 23, 42, 0.95)'
@@ -804,13 +755,13 @@ export function EditorTimeline({
               })}
               {dragGuideLeft != null && (
                 <div
-                  className="pointer-events-none absolute inset-y-0 z-20 w-px bg-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.32)]"
+                  className="pointer-events-none absolute inset-y-0 z-20 w-px bg-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.28)]"
                   style={{ left: dragGuideLeft }}
                 />
               )}
               <div className="pointer-events-none absolute inset-y-0 z-30" style={{ left: playheadLeft }}>
-                <div className="absolute top-0 h-full w-px bg-[#facc15] shadow-[0_0_0_1px_rgba(250,204,21,0.5)]" />
-                <div className="absolute left-[-28px] top-1 rounded-full border border-black bg-[#facc15] px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-black">
+                <div className="absolute top-0 h-full w-px bg-[#ef4444] shadow-[0_0_0_1px_rgba(239,68,68,0.35)]" />
+                <div className="absolute left-[-22px] top-1 rounded-sm border border-[#7f1d1d] bg-[#ef4444] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-white">
                   {formatTimelineTime(playheadTime)}
                 </div>
               </div>
@@ -820,19 +771,20 @@ export function EditorTimeline({
           {trackRows.length === 0 ? (
             <div className="flex min-h-[280px] items-center justify-center p-6">
               {emptyState ?? (
-                <div className="max-w-xl rounded-[24px] border border-dashed border-white/15 bg-white/4 px-6 py-8 text-center">
-                  <div className="text-sm font-black uppercase tracking-[0.24em] text-white/50">No Tracks Yet</div>
-                  <div className="mt-2 text-2xl font-black uppercase tracking-tight text-white">Load clips to build your timeline</div>
-                  <p className="mt-3 text-sm font-semibold text-white/62">
-                    Video, audio, overlays, titles, and effects will stack here with trim and snap controls.
+                <div className="max-w-xl rounded-2xl border border-white/10 bg-[#2b3036] px-6 py-8 text-center">
+                  <div className="text-xs font-semibold uppercase tracking-[0.16em] text-white/50">No Tracks Yet</div>
+                  <div className="mt-2 text-xl font-semibold text-white/90">Load media to start editing</div>
+                  <p className="mt-3 text-sm text-white/62">
+                    Video, audio, overlays, titles, and effects will appear here with trim and snap controls.
                   </p>
                 </div>
               )}
             </div>
           ) : (
-            trackRows.map(({ track, collapsed, isSelected, height }) => {
+            trackRows.map(({ track, collapsed, isSelected, height }, rowIndex) => {
               const effectiveTrack = effectiveTimeline.tracks.find((entry) => entry.id === track.id) ?? track;
               const TrackIcon = TRACK_KIND_ICONS[track.kind];
+              const trackAccent = TRACK_ACCENTS[track.kind];
               const visibleClips = getVisibleClips(
                 effectiveTrack.clips.filter((clip) => !clip.hidden),
                 visibleRange.start,
@@ -844,19 +796,24 @@ export function EditorTimeline({
                   transition.at >= visibleRange.start - 1 &&
                   transition.at <= visibleRange.end + 1
               );
+              const laneBackground = collapsed ? '#191c21' : rowIndex % 2 === 0 ? '#20242a' : '#25292f';
 
               return (
-                <div key={track.id} className="flex border-b border-white/8">
+                <div key={track.id} className="flex border-b border-white/5">
                   <div
-                    className={`sticky left-0 z-20 flex shrink-0 flex-col justify-center border-r border-white/10 bg-gradient-to-br px-4 ${
-                      TRACK_TONES[track.kind]
+                    className={`sticky left-0 z-20 flex shrink-0 flex-col justify-center border-r border-white/8 px-4 ${
+                      isSelected ? 'bg-[#343940]' : 'bg-[#2a2e34]'
                     }`}
-                    style={{ width: TIMELINE_HEADER_WIDTH, height }}
+                    style={{
+                      width: TIMELINE_HEADER_WIDTH,
+                      height,
+                      boxShadow: `inset 3px 0 0 ${trackAccent}`
+                    }}
                   >
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center justify-between gap-3">
                       <button
                         type="button"
-                        className="flex min-w-0 items-start gap-3 text-left"
+                        className="flex min-w-0 items-center gap-3 text-left"
                         onClick={() => {
                           onSelectTrack?.(track);
                           onPlayheadChange(
@@ -864,13 +821,18 @@ export function EditorTimeline({
                           );
                         }}
                       >
-                        <span className="mt-0.5 rounded-xl border border-white/12 bg-black/18 p-2 text-white/90">
-                          <TrackIcon size={14} strokeWidth={2.4} />
+                        <span
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-black/10"
+                          style={{ color: trackAccent }}
+                        >
+                          <TrackIcon size={15} strokeWidth={2.3} />
                         </span>
                         <span className="min-w-0">
-                          <div className="truncate text-xs font-black uppercase tracking-[0.22em] text-white/62">{track.kind}</div>
-                          <div className="truncate text-base font-black uppercase tracking-tight text-white">{track.label}</div>
-                          <div className="truncate text-[11px] font-semibold text-white/58">
+                          <div className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-white/45">
+                            {track.kind}
+                          </div>
+                          <div className="truncate text-sm font-semibold text-white/88">{track.label}</div>
+                          <div className="truncate text-[11px] text-white/56">
                             {track.clips.length} clip{track.clips.length === 1 ? '' : 's'}
                             {track.emptyLabel ? ` • ${track.emptyLabel}` : ''}
                           </div>
@@ -878,7 +840,7 @@ export function EditorTimeline({
                       </button>
                       <button
                         type="button"
-                        className="rounded-xl border border-white/12 bg-black/18 p-2 text-white/78 transition hover:bg-white/10"
+                        className="rounded-md border border-white/10 bg-black/10 p-2 text-white/72 transition hover:bg-white/8"
                         onClick={() => toggleTrackCollapse(track.id)}
                       >
                         {collapsed ? <ChevronRight size={14} strokeWidth={2.5} /> : <ChevronDown size={14} strokeWidth={2.5} />}
@@ -886,16 +848,16 @@ export function EditorTimeline({
                     </div>
 
                     {!collapsed && (
-                      <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-black uppercase tracking-[0.16em] text-white/62">
-                        {isSelected && <span className="rounded-full border border-[#facc15]/45 bg-[#facc15]/15 px-2 py-1 text-[#fde68a]">selected</span>}
+                      <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] font-medium uppercase tracking-[0.12em] text-white/48">
+                        {isSelected && <span style={{ color: trackAccent }}>selected</span>}
                         {track.locked && (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-white/12 bg-black/18 px-2 py-1">
+                          <span className="inline-flex items-center gap-1">
                             <Lock size={10} strokeWidth={2.5} />
                             locked
                           </span>
                         )}
                         {track.muted && (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-white/12 bg-black/18 px-2 py-1">
+                          <span className="inline-flex items-center gap-1">
                             <VolumeX size={10} strokeWidth={2.5} />
                             muted
                           </span>
@@ -908,23 +870,28 @@ export function EditorTimeline({
                     ref={(node) => {
                       laneRefs.current[track.id] = node;
                     }}
-                    className={`relative shrink-0 overflow-hidden ${
-                      collapsed ? 'bg-[#0b1019]' : 'bg-[linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01))]'
-                    }`}
-                    style={{ width: timeAreaWidth, height }}
+                    className="relative shrink-0 overflow-hidden"
+                    style={{ width: timeAreaWidth, height, background: laneBackground }}
                     onPointerDown={(event) => {
                       if (event.button !== 0 || event.target !== event.currentTarget) return;
                       onSelectTrack?.(track);
                       onPlayheadChange(getTimeFromClientX(event.clientX));
                     }}
                   >
+                    {!collapsed && <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/6" />}
+                    {!collapsed && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-black/22" />}
+
                     {visibleTicks.map((tick) => {
                       const left = timeToPixels(tick, zoom.pixelsPerSecond);
+                      const isMajor = Math.round((tick / rulerStep) * 10) % 5 === 0;
                       return (
                         <div
                           key={`${track.id}-grid-${tick}`}
-                          className={`pointer-events-none absolute inset-y-0 w-px ${Math.round((tick / rulerStep) * 10) % 5 === 0 ? 'bg-white/10' : 'bg-white/6'}`}
-                          style={{ left }}
+                          className="pointer-events-none absolute inset-y-0 w-px"
+                          style={{
+                            left,
+                            backgroundColor: isMajor ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.04)'
+                          }}
                         />
                       );
                     })}
@@ -932,18 +899,21 @@ export function EditorTimeline({
                     {visibleMarkers.map((marker) => (
                       <div
                         key={`${track.id}-marker-${marker.id}`}
-                        className="pointer-events-none absolute inset-y-0 w-px bg-white/14"
-                        style={{ left: timeToPixels(marker.time, zoom.pixelsPerSecond) }}
+                        className="pointer-events-none absolute inset-y-0 w-px"
+                        style={{
+                          left: timeToPixels(marker.time, zoom.pixelsPerSecond),
+                          backgroundColor: marker.color ?? 'rgba(255,255,255,0.18)'
+                        }}
                       />
                     ))}
 
                     {transitions.map((transition) => {
                       const left = timeToPixels(transition.at, zoom.pixelsPerSecond);
                       return (
-                        <div key={transition.id} className="pointer-events-none absolute z-20" style={{ left, top: Math.max(10, height / 2 - 12) }}>
-                          <div className="h-4 w-4 rotate-45 rounded-[3px] border border-white/28 bg-white/14 shadow-[0_8px_14px_rgba(15,23,42,0.35)]" />
+                        <div key={transition.id} className="pointer-events-none absolute z-20" style={{ left, top: Math.max(8, height / 2 - 8) }}>
+                          <div className="h-3.5 w-3.5 rotate-45 rounded-[2px] border border-white/20 bg-white/14" />
                           {detailLevel !== 'minimal' && (
-                            <div className="absolute left-4 top-[-2px] whitespace-nowrap text-[9px] font-black uppercase tracking-[0.14em] text-white/58">
+                            <div className="absolute left-4 top-[-2px] whitespace-nowrap text-[9px] font-medium uppercase tracking-[0.12em] text-white/46">
                               {transition.label}
                             </div>
                           )}
@@ -974,20 +944,20 @@ export function EditorTimeline({
                     })}
 
                     {!effectiveTrack.clips.length && !collapsed && (
-                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-[11px] font-black uppercase tracking-[0.2em] text-white/28">
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-[11px] font-medium uppercase tracking-[0.16em] text-white/28">
                         {track.emptyLabel ?? 'Empty track'}
                       </div>
                     )}
 
                     {dragGuideLeft != null && (
                       <div
-                        className="pointer-events-none absolute inset-y-0 z-30 w-px bg-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.38)]"
+                        className="pointer-events-none absolute inset-y-0 z-30 w-px bg-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.3)]"
                         style={{ left: dragGuideLeft }}
                       />
                     )}
 
                     <div className="pointer-events-none absolute inset-y-0 z-40" style={{ left: playheadLeft }}>
-                      <div className="h-full w-px bg-[#facc15] shadow-[0_0_0_1px_rgba(250,204,21,0.42)]" />
+                      <div className="h-full w-px bg-[#ef4444] shadow-[0_0_0_1px_rgba(239,68,68,0.28)]" />
                     </div>
                   </div>
                 </div>

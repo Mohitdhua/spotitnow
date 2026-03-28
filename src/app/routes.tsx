@@ -15,6 +15,7 @@ const ThumbnailGeneratorPage = lazy(() => import('../features/tools/ThumbnailGen
 const SplitterPage = lazy(() => import('../features/tools/SplitterPage'));
 const ExtractorPage = lazy(() => import('../features/tools/ExtractorPage'));
 const UpscalerPage = lazy(() => import('../features/tools/UpscalerPage'));
+const VectorConverterPage = lazy(() => import('../features/tools/VectorConverterPage'));
 const BackgroundsPage = lazy(() => import('../features/tools/BackgroundsPage'));
 const TimersPage = lazy(() => import('../features/tools/TimersPage'));
 const ProgressPage = lazy(() => import('../features/tools/ProgressPage'));
@@ -54,6 +55,7 @@ export const appRouter = createBrowserRouter([
       { path: 'tools/splitter', element: withSuspense(<SplitterPage />) },
       { path: 'tools/extractor', element: withSuspense(<ExtractorPage />) },
       { path: 'tools/upscaler', element: withSuspense(<UpscalerPage />) },
+      { path: 'tools/vector', element: withSuspense(<VectorConverterPage />) },
       { path: 'tools/backgrounds', element: withSuspense(<BackgroundsPage />) },
       { path: 'tools/timers', element: withSuspense(<TimersPage />) },
       { path: 'tools/progress', element: withSuspense(<ProgressPage />) },
