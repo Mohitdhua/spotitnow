@@ -11,8 +11,7 @@ import {
   Input,
   Mp4OutputFormat,
   Output,
-  WebMOutputFormat,
-  canEncodeVideo
+  WebMOutputFormat
 } from 'mediabunny';
 import { VIDEO_PACKAGE_PRESETS } from '../constants/videoPackages';
 import { VISUAL_THEMES, resolveVisualThemeStyle, type VisualTheme } from '../constants/videoThemes';
@@ -52,6 +51,7 @@ import {
 } from '../utils/textProgressEffects';
 import { drawTextProgressCanvasEffects } from '../utils/textProgressCanvasEffects';
 import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
+import { resolveVideoEncodingPlan } from './videoEncoding';
 
 interface WorkerStartMessage {
   type: 'start';
@@ -1189,14 +1189,15 @@ const exportWithVideoBase = async (options: {
     outputAspectRatio,
     settings.exportResolution
   );
-  const bitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
+  const requestedBitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
 
-  const encodable = await canEncodeVideo(codecConfig.codec, {
+  const encodingPlan = await resolveVideoEncodingPlan({
+    exportCodec: settings.exportCodec,
     width: outputWidth,
     height: outputHeight,
-    bitrate
+    bitrate: requestedBitrate
   });
-  if (!encodable) {
+  if (!encodingPlan) {
     throw new Error(
       `Cannot encode ${settings.exportCodec.toUpperCase()} at ${outputWidth}x${outputHeight} with current browser support.`
     );
@@ -1226,11 +1227,16 @@ const exportWithVideoBase = async (options: {
   scratchCtx.imageSmoothingQuality = 'high';
 
   const videoSource = new CanvasSource(canvas, {
-    codec: codecConfig.codec,
-    bitrate,
-    bitrateMode: 'constant',
-    latencyMode: 'quality',
-    contentHint: 'detail'
+    codec: encodingPlan.codec,
+    bitrate: encodingPlan.bitrate,
+    bitrateMode: encodingPlan.bitrateMode,
+    latencyMode: encodingPlan.latencyMode,
+    contentHint: encodingPlan.contentHint,
+    alpha: encodingPlan.alpha,
+    ...(encodingPlan.fullCodecString ? { fullCodecString: encodingPlan.fullCodecString } : {}),
+    ...(encodingPlan.hardwareAcceleration
+      ? { hardwareAcceleration: encodingPlan.hardwareAcceleration }
+      : {})
   });
   output.addVideoTrack(videoSource, { frameRate: FPS });
   const audioPump = await createAudioPump({
@@ -1468,15 +1474,16 @@ const exportWithStaticBase = async (options: {
 
   const aspectRatio = clamp(base.aspectRatio, 0.3, 4);
   const { width: outputWidth, height: outputHeight } = computeOutputSizeFromAspect(aspectRatio, settings.exportResolution);
-  const bitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
+  const requestedBitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
   const totalFrames = Math.max(1, Math.ceil(duration * FPS));
 
-  const encodable = await canEncodeVideo(codecConfig.codec, {
+  const encodingPlan = await resolveVideoEncodingPlan({
+    exportCodec: settings.exportCodec,
     width: outputWidth,
     height: outputHeight,
-    bitrate
+    bitrate: requestedBitrate
   });
-  if (!encodable) {
+  if (!encodingPlan) {
     throw new Error(
       `Cannot encode ${settings.exportCodec.toUpperCase()} at ${outputWidth}x${outputHeight} with current browser support.`
     );
@@ -1502,11 +1509,16 @@ const exportWithStaticBase = async (options: {
   scratchCtx.imageSmoothingQuality = 'high';
 
   const videoSource = new CanvasSource(canvas, {
-    codec: codecConfig.codec,
-    bitrate,
-    bitrateMode: 'constant',
-    latencyMode: 'quality',
-    contentHint: 'detail'
+    codec: encodingPlan.codec,
+    bitrate: encodingPlan.bitrate,
+    bitrateMode: encodingPlan.bitrateMode,
+    latencyMode: encodingPlan.latencyMode,
+    contentHint: encodingPlan.contentHint,
+    alpha: encodingPlan.alpha,
+    ...(encodingPlan.fullCodecString ? { fullCodecString: encodingPlan.fullCodecString } : {}),
+    ...(encodingPlan.hardwareAcceleration
+      ? { hardwareAcceleration: encodingPlan.hardwareAcceleration }
+      : {})
   });
   output.addVideoTrack(videoSource, { frameRate: FPS });
   const audioPump =
@@ -1618,15 +1630,16 @@ const encodeLinkedPairTimeline = async (options: {
   const duration = Math.max(0.5, base.durationSeconds, maxOverlayEnd, lastSegmentEnd);
   const aspectRatio = clamp(base.aspectRatio, 0.3, 4);
   const { width: outputWidth, height: outputHeight } = computeOutputSizeFromAspect(aspectRatio, settings.exportResolution);
-  const bitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
+  const requestedBitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
   const totalFrames = Math.max(1, Math.ceil(duration * FPS));
 
-  const encodable = await canEncodeVideo(codecConfig.codec, {
+  const encodingPlan = await resolveVideoEncodingPlan({
+    exportCodec: settings.exportCodec,
     width: outputWidth,
     height: outputHeight,
-    bitrate
+    bitrate: requestedBitrate
   });
-  if (!encodable) {
+  if (!encodingPlan) {
     throw new Error(
       `Cannot encode ${settings.exportCodec.toUpperCase()} at ${outputWidth}x${outputHeight} with current browser support.`
     );
@@ -1652,11 +1665,16 @@ const encodeLinkedPairTimeline = async (options: {
   scratchCtx.imageSmoothingQuality = 'high';
 
   const videoSource = new CanvasSource(canvas, {
-    codec: codecConfig.codec,
-    bitrate,
-    bitrateMode: 'constant',
-    latencyMode: 'quality',
-    contentHint: 'detail'
+    codec: encodingPlan.codec,
+    bitrate: encodingPlan.bitrate,
+    bitrateMode: encodingPlan.bitrateMode,
+    latencyMode: encodingPlan.latencyMode,
+    contentHint: encodingPlan.contentHint,
+    alpha: encodingPlan.alpha,
+    ...(encodingPlan.fullCodecString ? { fullCodecString: encodingPlan.fullCodecString } : {}),
+    ...(encodingPlan.hardwareAcceleration
+      ? { hardwareAcceleration: encodingPlan.hardwareAcceleration }
+      : {})
   });
   output.addVideoTrack(videoSource, { frameRate: FPS });
   const audioPump =

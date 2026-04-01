@@ -1,16 +1,17 @@
 import { Suspense, lazy, type ReactNode } from 'react';
 import { Navigate, createBrowserRouter } from 'react-router-dom';
+import CreateEditorPage from '../features/create/CreateEditorPage';
+import CreateReviewPage from '../features/create/CreateReviewPage';
+import CreateUploadPage from '../features/create/CreateUploadPage';
+import DashboardPage from '../features/dashboard/DashboardPage';
+import PlayPage from '../features/play/PlayPage';
+import SettingsPage from '../features/settings/SettingsPage';
+import VideoOverlayPage from '../features/video/VideoOverlayPage';
+import VideoPreviewPage from '../features/video/VideoPreviewPage';
+import VideoSetupPage from '../features/video/VideoSetupPage';
 import { AppShell } from './AppShell';
 import { RouteErrorBoundary } from './components/RouteErrorBoundary';
 
-const DashboardPage = lazy(() => import('../features/dashboard/DashboardPage'));
-const CreateUploadPage = lazy(() => import('../features/create/CreateUploadPage'));
-const CreateReviewPage = lazy(() => import('../features/create/CreateReviewPage'));
-const CreateEditorPage = lazy(() => import('../features/create/CreateEditorPage'));
-const PlayPage = lazy(() => import('../features/play/PlayPage'));
-const VideoSetupPage = lazy(() => import('../features/video/VideoSetupPage'));
-const VideoPreviewPage = lazy(() => import('../features/video/VideoPreviewPage'));
-const VideoOverlayPage = lazy(() => import('../features/video/VideoOverlayPage'));
 const ThumbnailGeneratorPage = lazy(() => import('../features/tools/ThumbnailGeneratorPage'));
 const SplitterPage = lazy(() => import('../features/tools/SplitterPage'));
 const ExtractorPage = lazy(() => import('../features/tools/ExtractorPage'));
@@ -20,7 +21,6 @@ const BackgroundsPage = lazy(() => import('../features/tools/BackgroundsPage'));
 const TimersPage = lazy(() => import('../features/tools/TimersPage'));
 const ProgressPage = lazy(() => import('../features/tools/ProgressPage'));
 const WatermarkPage = lazy(() => import('../features/tools/WatermarkPage'));
-const SettingsPage = lazy(() => import('../features/settings/SettingsPage'));
 
 const RouteLoading = () => (
   <div className="flex min-h-[50vh] items-center justify-center">
@@ -42,14 +42,14 @@ export const appRouter = createBrowserRouter([
     element: <AppShell />,
     errorElement: <RouteErrorBoundary />,
     children: [
-      { index: true, element: withSuspense(<DashboardPage />) },
-      { path: 'create/upload', element: withSuspense(<CreateUploadPage />) },
-      { path: 'create/review', element: withSuspense(<CreateReviewPage />) },
-      { path: 'create/editor', element: withSuspense(<CreateEditorPage />) },
-      { path: 'editor', element: withSuspense(<VideoOverlayPage />) },
-      { path: 'play', element: withSuspense(<PlayPage />) },
-      { path: 'video/setup', element: withSuspense(<VideoSetupPage />) },
-      { path: 'video/preview', element: withSuspense(<VideoPreviewPage />) },
+      { index: true, element: <DashboardPage /> },
+      { path: 'create/upload', element: <CreateUploadPage /> },
+      { path: 'create/review', element: <CreateReviewPage /> },
+      { path: 'create/editor', element: <CreateEditorPage /> },
+      { path: 'editor', element: <VideoOverlayPage /> },
+      { path: 'play', element: <PlayPage /> },
+      { path: 'video/setup', element: <VideoSetupPage /> },
+      { path: 'video/preview', element: <VideoPreviewPage /> },
       { path: 'video/overlay', element: <Navigate to="/editor" replace /> },
       { path: 'tools/thumbnail', element: withSuspense(<ThumbnailGeneratorPage />) },
       { path: 'tools/splitter', element: withSuspense(<SplitterPage />) },
@@ -60,7 +60,7 @@ export const appRouter = createBrowserRouter([
       { path: 'tools/timers', element: withSuspense(<TimersPage />) },
       { path: 'tools/progress', element: withSuspense(<ProgressPage />) },
       { path: 'tools/watermark', element: withSuspense(<WatermarkPage />) },
-      { path: 'settings', element: withSuspense(<SettingsPage />) }
+      { path: 'settings', element: <SettingsPage /> }
     ]
   }
 ]);

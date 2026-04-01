@@ -10,8 +10,7 @@ import {
   Mp4OutputFormat,
   Output,
   StreamTarget,
-  WebMOutputFormat,
-  canEncodeVideo
+  WebMOutputFormat
 } from 'mediabunny';
 import { Puzzle, Region, type VideoAudioCuePoolKey, VideoSettings } from '../types';
 import { VISUAL_THEMES, resolveVisualThemeStyle, type VisualTheme } from '../constants/videoThemes';
@@ -78,6 +77,7 @@ import type {
   VideoRenderSource
 } from '../services/videoRenderSource';
 import { drawDesignerTimerPreset } from './videoTimerPackCanvas';
+import { resolveVideoEncodingPlan } from './videoEncoding';
 
 type FramePhase = 'intro' | 'showing' | 'revealing' | 'transitioning' | 'outro';
 type SceneCardKind = 'intro' | 'transition' | 'outro';
@@ -232,6 +232,7 @@ const getVideoWorkerId = () => `video-export-worker:${currentWorkerSessionId}`;
 const getScopedTaskId = (taskId: string) => `${getVideoWorkerId()}:${taskId}`;
 
 const FPS = 30;
+const PREVIEW_FRAME_RESOLUTION: VideoSettings['exportResolution'] = '480p';
 
 const RESOLUTION_HEIGHT: Record<VideoSettings['exportResolution'], number> = {
   '480p': 480,
@@ -2053,7 +2054,7 @@ const createPuzzleAssetCache = (
 
   const ensureWindow = async (centerIndex: number) => {
     const keepIndices = new Set<number>();
-    for (let offset = -1; offset <= 2; offset += 1) {
+    for (let offset = 0; offset <= 1; offset += 1) {
       const nextIndex = centerIndex + offset;
       if (nextIndex < 0 || nextIndex >= puzzles.length) continue;
       keepIndices.add(nextIndex);
@@ -4755,7 +4756,7 @@ const renderPreviewFrameInWorker = async ({
 }: PreviewFrameOptions): Promise<{ buffer: ArrayBuffer; mimeType: string }> => {
   if (!puzzles.length) throw new Error('No puzzles available for preview.');
 
-  const { width, height } = getExportDimensions(settings.aspectRatio, settings.exportResolution);
+  const { width, height } = getExportDimensions(settings.aspectRatio, PREVIEW_FRAME_RESOLUTION);
   const timeline = buildTimeline(puzzles, settings);
   const totalDuration = timeline.length > 0 ? timeline[timeline.length - 1].end : 0;
   const safeTimestamp =
@@ -4870,7 +4871,7 @@ const exportVideoInWorker = async ({
   if (totalDuration <= 0) throw new Error('Video duration is zero. Increase show/reveal timings and try again.');
 
   const totalFrames = Math.max(1, Math.ceil(totalDuration * FPS));
-  const bitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
+  const requestedBitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
   const audioMixSample = buildExportAudioMixSample(timeline, settings, audioAssets, totalDuration, puzzles);
   const telemetry = createTelemetryState();
@@ -4878,8 +4879,13 @@ const exportVideoInWorker = async ({
   const encodeTaskId = getScopedTaskId('video-export-encode');
   const renderTaskId = getScopedTaskId('video-export-render');
 
-  const canEncode = await canEncodeVideo(codecConfig.codec, { width, height, bitrate });
-  if (!canEncode) {
+  const encodingPlan = await resolveVideoEncodingPlan({
+    exportCodec: settings.exportCodec,
+    width,
+    height,
+    bitrate: requestedBitrate
+  });
+  if (!encodingPlan) {
     throw new Error(
       `Your browser could not encode ${settings.exportCodec.toUpperCase()} at ${settings.exportResolution}. Try a lower resolution/bitrate or switch codec.`
     );
@@ -4965,11 +4971,16 @@ const exportVideoInWorker = async ({
       target
     });
     const videoSource = new CanvasSource(canvas, {
-      codec: codecConfig.codec,
-      bitrate,
-      bitrateMode: 'constant',
-      latencyMode: 'quality',
-      contentHint: 'detail'
+      codec: encodingPlan.codec,
+      bitrate: encodingPlan.bitrate,
+      bitrateMode: encodingPlan.bitrateMode,
+      latencyMode: encodingPlan.latencyMode,
+      contentHint: encodingPlan.contentHint,
+      alpha: encodingPlan.alpha,
+      ...(encodingPlan.fullCodecString ? { fullCodecString: encodingPlan.fullCodecString } : {}),
+      ...(encodingPlan.hardwareAcceleration
+        ? { hardwareAcceleration: encodingPlan.hardwareAcceleration }
+        : {})
     });
     output.addVideoTrack(videoSource, { frameRate: FPS });
     const audioSource =

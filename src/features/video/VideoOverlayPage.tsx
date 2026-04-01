@@ -1,10 +1,15 @@
-import { useState } from 'react';
+import { Suspense, lazy, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { OverlayVideoEditor } from '../../components/OverlayVideoEditor';
+import { RouteWorkspaceLoading } from '../../app/components/RouteWorkspaceLoading';
 import { exportOverlayBatchWithWebCodecs } from '../../services/overlayVideoExport';
 import { notifyError, notifyInfo, notifySuccess } from '../../services/notifications';
 import { useAppStore } from '../../store/appStore';
 import { beginExportJob, cancelExportJobEntry, completeExportJob, failExportJob, patchExportJob } from '../shared/exportJobs';
+
+const OverlayVideoEditor = lazy(async () => {
+  const module = await import('../../components/OverlayVideoEditor');
+  return { default: module.OverlayVideoEditor };
+});
 
 interface OverlayExportPayload {
   editorMode?: 'standard' | 'linked_pairs';
@@ -158,49 +163,60 @@ export default function VideoOverlayPage() {
   };
 
   return (
-    <OverlayVideoEditor
-      settings={{
-        videoPackagePreset: videoSettings.videoPackagePreset,
-        visualStyle: videoSettings.visualStyle,
-        textStyle: videoSettings.textStyle,
-        headerStyle: videoSettings.headerStyle,
-        timerStyle: videoSettings.timerStyle,
-        progressStyle: videoSettings.progressStyle,
-        progressMotion: videoSettings.progressMotion,
-        generatedProgressEnabled: videoSettings.generatedProgressEnabled,
-        generatedProgressStyle: videoSettings.generatedProgressStyle,
-        generatedProgressRenderMode: videoSettings.generatedProgressRenderMode,
-        showProgress: videoSettings.showProgress,
-        introCardStyle: videoSettings.introCardStyle,
-        transitionCardStyle: videoSettings.transitionCardStyle,
-        outroCardStyle: videoSettings.outroCardStyle,
-        transitionStyle: videoSettings.transitionStyle,
-        textTemplates: videoSettings.textTemplates,
-        exportResolution: videoSettings.exportResolution,
-        exportBitrateMbps: videoSettings.exportBitrateMbps,
-        exportCodec: videoSettings.exportCodec
-      }}
-      puzzles={batch}
-      defaultPuzzleClipDurationSeconds={
-        Math.max(0.5, videoSettings.showDuration) +
-        Math.max(0.5, videoSettings.revealDuration) +
-        Math.max(0, videoSettings.transitionDuration)
+    <Suspense
+      fallback={
+        <RouteWorkspaceLoading
+          eyebrow="Editor Studio"
+          title="Loading overlay editor"
+          description="Preparing the timeline, batch clips, and export tools for the editor workspace."
+          fullHeight
+        />
       }
-      incomingVideoFrames={incomingVideoFrames}
-      incomingVideoFramesSessionId={incomingVideoFramesSessionId}
-      defaultLogo={videoSettings.logo}
-      defaultLogoChromaKeyEnabled={videoSettings.logoChromaKeyEnabled}
-      defaultLogoChromaKeyColor={videoSettings.logoChromaKeyColor}
-      defaultLogoChromaKeyTolerance={videoSettings.logoChromaKeyTolerance}
-      onSettingsChange={(patch) =>
-        setVideoSettings((current) => ({
-          ...current,
-          ...patch
-        }))
-      }
-      onExport={handleExport}
-      isExporting={isExporting}
-      onBack={handleBack}
-    />
+    >
+      <OverlayVideoEditor
+        settings={{
+          videoPackagePreset: videoSettings.videoPackagePreset,
+          visualStyle: videoSettings.visualStyle,
+          textStyle: videoSettings.textStyle,
+          headerStyle: videoSettings.headerStyle,
+          timerStyle: videoSettings.timerStyle,
+          progressStyle: videoSettings.progressStyle,
+          progressMotion: videoSettings.progressMotion,
+          generatedProgressEnabled: videoSettings.generatedProgressEnabled,
+          generatedProgressStyle: videoSettings.generatedProgressStyle,
+          generatedProgressRenderMode: videoSettings.generatedProgressRenderMode,
+          showProgress: videoSettings.showProgress,
+          introCardStyle: videoSettings.introCardStyle,
+          transitionCardStyle: videoSettings.transitionCardStyle,
+          outroCardStyle: videoSettings.outroCardStyle,
+          transitionStyle: videoSettings.transitionStyle,
+          textTemplates: videoSettings.textTemplates,
+          exportResolution: videoSettings.exportResolution,
+          exportBitrateMbps: videoSettings.exportBitrateMbps,
+          exportCodec: videoSettings.exportCodec
+        }}
+        puzzles={batch}
+        defaultPuzzleClipDurationSeconds={
+          Math.max(0.5, videoSettings.showDuration) +
+          Math.max(0.5, videoSettings.revealDuration) +
+          Math.max(0, videoSettings.transitionDuration)
+        }
+        incomingVideoFrames={incomingVideoFrames}
+        incomingVideoFramesSessionId={incomingVideoFramesSessionId}
+        defaultLogo={videoSettings.logo}
+        defaultLogoChromaKeyEnabled={videoSettings.logoChromaKeyEnabled}
+        defaultLogoChromaKeyColor={videoSettings.logoChromaKeyColor}
+        defaultLogoChromaKeyTolerance={videoSettings.logoChromaKeyTolerance}
+        onSettingsChange={(patch) =>
+          setVideoSettings((current) => ({
+            ...current,
+            ...patch
+          }))
+        }
+        onExport={handleExport}
+        isExporting={isExporting}
+        onBack={handleBack}
+      />
+    </Suspense>
   );
 }

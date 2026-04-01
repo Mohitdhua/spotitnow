@@ -3,8 +3,7 @@ import {
   CanvasSource,
   Mp4OutputFormat,
   Output,
-  WebMOutputFormat,
-  canEncodeVideo
+  WebMOutputFormat
 } from 'mediabunny';
 import { PROGRESS_BAR_THEMES, resolveProgressBarFillColors, type ProgressBarVisualStyle } from '../constants/progressBarThemes';
 import { VideoSettings } from '../types';
@@ -21,6 +20,7 @@ import {
 } from '../utils/textProgressEffects';
 import { drawTextProgressCanvasEffects } from '../utils/textProgressCanvasEffects';
 import { resolveVideoProgressMotionState } from '../utils/videoProgressMotion';
+import { resolveVideoEncodingPlan } from './videoEncoding';
 
 type ProgressBarExportSettings = Pick<
   VideoSettings,
@@ -473,11 +473,17 @@ const exportProgressBarInWorker = async ({
   const duration = Math.max(0.5, durationSeconds);
   const { width, height } = getExportDimensions(settings.exportResolution);
   const totalFrames = Math.max(1, Math.ceil(duration * FPS));
-  const bitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
+  const requestedBitrate = Math.max(500_000, Math.round(settings.exportBitrateMbps * 1_000_000));
   const codecConfig = FORMAT_BY_CODEC[settings.exportCodec];
 
-  const canEncode = await canEncodeVideo(codecConfig.codec, { width, height, bitrate });
-  if (!canEncode) {
+  const encodingPlan = await resolveVideoEncodingPlan({
+    exportCodec: settings.exportCodec,
+    width,
+    height,
+    bitrate: requestedBitrate,
+    preserveAlpha: settings.exportCodec === 'av1'
+  });
+  if (!encodingPlan) {
     throw new Error(
       `Your browser could not encode ${settings.exportCodec.toUpperCase()} at ${settings.exportResolution}. Try lower resolution/bitrate or switch codec.`
     );
@@ -496,12 +502,16 @@ const exportProgressBarInWorker = async ({
     target
   });
   const videoSource = new CanvasSource(canvas, {
-    codec: codecConfig.codec,
-    bitrate,
-    bitrateMode: 'constant',
-    latencyMode: 'quality',
-    contentHint: 'detail',
-    alpha: settings.exportCodec === 'av1' ? 'keep' : 'discard'
+    codec: encodingPlan.codec,
+    bitrate: encodingPlan.bitrate,
+    bitrateMode: encodingPlan.bitrateMode,
+    latencyMode: encodingPlan.latencyMode,
+    contentHint: encodingPlan.contentHint,
+    alpha: encodingPlan.alpha,
+    ...(encodingPlan.fullCodecString ? { fullCodecString: encodingPlan.fullCodecString } : {}),
+    ...(encodingPlan.hardwareAcceleration
+      ? { hardwareAcceleration: encodingPlan.hardwareAcceleration }
+      : {})
   });
   output.addVideoTrack(videoSource, { frameRate: FPS });
 

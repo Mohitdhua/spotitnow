@@ -13,6 +13,74 @@ body {
   font-family: var(--font-sans);
 }
 
+@media (max-width: 768px) {
+  body[data-mobile="true"] {
+    background-color: #ffffff;
+  }
+
+  body[data-mobile="true"] .max-w-7xl,
+  body[data-mobile="true"] .max-w-6xl,
+  body[data-mobile="true"] .max-w-5xl {
+    max-width: 100% !important;
+  }
+
+  body[data-mobile="true"] main {
+    padding-bottom: 78px !important;
+  }
+
+  body[data-mobile="true"] main :is(section, div)[class*="rounded-[28px]"][class*="border-4"][class*="shadow-["],
+  body[data-mobile="true"] main :is(section, div)[class*="rounded-[26px]"][class*="border-4"][class*="shadow-["],
+  body[data-mobile="true"] main .mobile-flat-shell {
+    background: transparent !important;
+    border-width: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+
+  body[data-mobile="true"] main .mobile-inline-info-card {
+    display: grid !important;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+    background: transparent !important;
+    border-width: 0 0 1px !important;
+    border-radius: 0 !important;
+    padding: 10px 0 !important;
+  }
+
+  body[data-mobile="true"] main .mobile-inline-info-card:last-child {
+    border-bottom-width: 0 !important;
+  }
+
+  body[data-mobile="true"] main .mobile-inline-info-copy {
+    min-width: 0 !important;
+  }
+
+  body[data-mobile="true"] main .mobile-inline-info-icon {
+    border-width: 1.5px !important;
+    border-radius: 10px !important;
+    width: 36px !important;
+    height: 36px !important;
+  }
+
+  body[data-mobile="true"] main .mobile-inline-info-card h3 {
+    margin-top: 0 !important;
+    font-size: 15px !important;
+    line-height: 1.1 !important;
+  }
+
+  body[data-mobile="true"] main .mobile-inline-info-card p {
+    margin-top: 4px !important;
+    font-size: 12px !important;
+    line-height: 1.35 !important;
+  }
+
+  body[data-mobile="true"] main .mobile-inline-info-copy h3,
+  body[data-mobile="true"] main .mobile-inline-info-copy p {
+    overflow-wrap: anywhere;
+  }
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 12px;

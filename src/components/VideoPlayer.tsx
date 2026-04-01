@@ -82,6 +82,7 @@ interface VideoPlayerProps {
   hidePlaybackControls?: boolean;
   externalControlAction?: VideoPlayerExternalControlAction | null;
   onPlaybackStateChange?: (state: VideoPlayerPlaybackState) => void;
+  onRenderReadyChange?: (ready: boolean) => void;
   backgroundPacksSessionId?: number;
 }
 
@@ -1054,6 +1055,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   hidePlaybackControls = false,
   externalControlAction = null,
   onPlaybackStateChange,
+  onRenderReadyChange,
   backgroundPacksSessionId = 0
 }) => {
   const initialHasPuzzles = puzzles.length > 0;
@@ -1105,6 +1107,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const currentPuzzle = hasPuzzles
     ? puzzles[safeCurrentIndex]
     : { imageA: '', imageB: '', regions: [] };
+  const renderWindowSources = useMemo(() => {
+    if (!hasPuzzles) {
+      return [];
+    }
+
+    const indices = [safeCurrentIndex];
+    if (safeCurrentIndex + 1 < puzzles.length) {
+      indices.push(safeCurrentIndex + 1);
+    }
+
+    return Array.from(
+      new Set(
+        indices.flatMap((index) => {
+          const puzzle = puzzles[index];
+          return puzzle ? [puzzle.imageA, puzzle.imageB].filter((source): source is string => Boolean(source)) : [];
+        })
+      )
+    );
+  }, [hasPuzzles, puzzles, safeCurrentIndex]);
+  const [isLayoutRenderReady, setIsLayoutRenderReady] = useState(true);
 
   const processedLogoSrc = useProcessedLogoSrc(settings.logo, {
     enabled: settings.logoChromaKeyEnabled,
@@ -1222,6 +1244,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const viewportRef = useRef<HTMLDivElement>(null);
   const interactiveViewportRef = useRef<HTMLDivElement>(null);
   const phaseTransitionLockRef = useRef<string | null>(null);
+  const previewImageCacheRef = useRef<Map<string, Promise<void>>>(new Map());
+  const latestRenderWindowSourcesRef = useRef<string[]>(renderWindowSources);
+  const lastEmbeddedAspectRatioRef = useRef<VideoSettings['aspectRatio']>(settings.aspectRatio);
+  const lastRenderReadyNotificationRef = useRef<boolean | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioUnlockedRef = useRef(false);
   const lastShowAudioKeyRef = useRef<string | null>(null);
@@ -1327,6 +1353,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     audioUnlockedRef.current = true;
     ensureAudioContext();
   }, [ensureAudioContext]);
+
+  const preloadPreviewImageSource = useCallback((source: string) => {
+    const cache = previewImageCacheRef.current;
+    const existing = cache.get(source);
+    if (existing) {
+      return existing;
+    }
+
+    const preloadPromise = new Promise<void>((resolve) => {
+      const image = new Image();
+      image.onload = () => resolve();
+      image.onerror = () => resolve();
+      image.src = source;
+    });
+
+    cache.set(source, preloadPromise);
+    return preloadPromise;
+  }, []);
 
   const stopPreviewMusic = useCallback(() => {
     const current = musicStateRef.current;
@@ -1756,6 +1800,83 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       puzzleIndex: safeCurrentIndex
     });
   }, [hasPuzzles, isPlaying, onPlaybackStateChange, phase, safeCurrentIndex]);
+
+  useEffect(() => {
+    latestRenderWindowSourcesRef.current = renderWindowSources;
+  }, [renderWindowSources]);
+
+  useEffect(() => {
+    const cache = previewImageCacheRef.current;
+    const activeSources = new Set(renderWindowSources);
+
+    for (const source of Array.from(cache.keys())) {
+      if (!activeSources.has(source)) {
+        cache.delete(source);
+      }
+    }
+
+    void Promise.all(renderWindowSources.map((source) => preloadPreviewImageSource(source)));
+  }, [renderWindowSources, preloadPreviewImageSource]);
+
+  useEffect(() => {
+    if (!embedded || !hasPuzzles) {
+      setIsLayoutRenderReady(true);
+      lastEmbeddedAspectRatioRef.current = settings.aspectRatio;
+      return;
+    }
+
+    if (lastEmbeddedAspectRatioRef.current === settings.aspectRatio) {
+      return;
+    }
+
+    lastEmbeddedAspectRatioRef.current = settings.aspectRatio;
+
+    let cancelled = false;
+    const renderStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    setIsLayoutRenderReady(false);
+
+    const settleEmbeddedRender = async () => {
+      await Promise.all(
+        latestRenderWindowSourcesRef.current.map((source) => preloadPreviewImageSource(source))
+      );
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => resolve());
+        });
+      });
+
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const remainingDelay = Math.max(0, 120 - (now - renderStartedAt));
+      if (remainingDelay > 0) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, remainingDelay));
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      setIsLayoutRenderReady(true);
+    };
+
+    void settleEmbeddedRender();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [embedded, hasPuzzles, preloadPreviewImageSource, settings.aspectRatio]);
+
+  useEffect(() => {
+    if (!onRenderReadyChange) {
+      return;
+    }
+
+    if (lastRenderReadyNotificationRef.current === isLayoutRenderReady) {
+      return;
+    }
+
+    lastRenderReadyNotificationRef.current = isLayoutRenderReady;
+    onRenderReadyChange(isLayoutRenderReady);
+  }, [isLayoutRenderReady, onRenderReadyChange]);
 
   useEffect(() => {
     if (phase !== 'showing') {
@@ -2694,12 +2815,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ? 24
       : 122;
 
-    const availableWidth = Math.max(320, viewportSize.width - horizontalPadding * 2);
-    const availableHeight = Math.max(240, viewportSize.height - topReserved - bottomReserved);
-    const scale = Math.max(
-      0.15,
-      Math.min(availableWidth / baseSize.width, availableHeight / baseSize.height)
-    );
+    const availableWidth = embedded
+      ? Math.max(1, viewportSize.width - horizontalPadding * 2)
+      : Math.max(320, viewportSize.width - horizontalPadding * 2);
+    const availableHeight = embedded
+      ? Math.max(1, viewportSize.height - topReserved - bottomReserved)
+      : Math.max(240, viewportSize.height - topReserved - bottomReserved);
+    const scale = embedded
+      ? Math.max(0.01, Math.min(availableWidth / baseSize.width, availableHeight / baseSize.height))
+      : Math.max(0.15, Math.min(availableWidth / baseSize.width, availableHeight / baseSize.height));
 
     return {
       baseWidth: baseSize.width,
@@ -4052,6 +4176,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {/* Fixed Stage Container - Scales Uniformly With Screen */}
       <div
         className="relative z-10"
+        data-video-stage-shell={embedded ? 'embedded' : undefined}
         style={{
           width: `${stageMetrics.scaledWidth}px`,
           height: `${stageMetrics.scaledHeight}px`
@@ -4389,50 +4514,119 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             />
           )}
 
-          <AnimatePresence mode="wait">
-            {phase !== 'finished' && phase !== 'intro' && phase !== 'outro' && (
-              <motion.div
-                key={currentPuzzle.imageA + safeCurrentIndex}
-                initial={false}
-                animate={{
-                  x: 0,
-                  y: 0,
-                  opacity:
-                    phase === 'transitioning'
-                      ? transitionSequenceState.outgoingOpacity
-                      : phase === 'showing'
-                      ? puzzleEntryState.opacity
-                      : 1,
-                  scale:
-                    phase === 'transitioning'
-                      ? transitionSequenceState.outgoingScale
-                      : phase === 'showing'
-                      ? puzzleEntryState.scale
-                      : 1,
-                  rotate: 0
-                }}
-                transition={{
-                  duration:
-                    phase === 'transitioning'
-                      ? 0.12
-                      : phase === 'showing' && puzzleEntryState.active
-                      ? 0.08
-                      : 0
-                }}
-                className="relative w-full h-full"
-              >
-                {isWidePuzzleDisplay ? (
-                  <div className="relative w-full h-full p-3">
-                    <div className="relative w-full h-full rounded-2xl border-4 border-[#4D3E26] bg-[#D2C091] shadow-[6px_6px_0px_0px_rgba(38,30,18,0.85)] p-3">
-                      <div className="absolute inset-y-3 left-1/2 -translate-x-1/2 w-[3px] bg-[#5A4A2B]/50 pointer-events-none" />
-                      <div className="relative grid h-full grid-cols-[minmax(0,1fr)_28px_minmax(0,1fr)] gap-2">
-                        <div
-                          className="relative rounded-xl overflow-hidden h-full"
-                          style={storybookPanelStyle}
-                        >
-                          <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#F3E6C4] text-[#3B2E1A] text-[10px] font-black uppercase tracking-wide">
-                            Original
+          {embedded && !isLayoutRenderReady ? (
+            <div className="absolute inset-0 z-40 flex items-center justify-center px-4">
+              <div className="rounded-2xl border-2 border-black bg-white px-5 py-3 text-center text-[11px] font-black uppercase tracking-[0.18em] text-slate-900 shadow-[0_6px_0px_0px_rgba(0,0,0,1)]">
+                Rendering...
+              </div>
+            </div>
+          ) : (
+            <>
+              <AnimatePresence mode="wait">
+                {phase !== 'finished' && phase !== 'intro' && phase !== 'outro' && (
+                  <motion.div
+                    key={currentPuzzle.imageA + safeCurrentIndex}
+                    initial={false}
+                    animate={{
+                      x: 0,
+                      y: 0,
+                      opacity:
+                        phase === 'transitioning'
+                          ? transitionSequenceState.outgoingOpacity
+                          : phase === 'showing'
+                          ? puzzleEntryState.opacity
+                          : 1,
+                      scale:
+                        phase === 'transitioning'
+                          ? transitionSequenceState.outgoingScale
+                          : phase === 'showing'
+                          ? puzzleEntryState.scale
+                          : 1,
+                      rotate: 0
+                    }}
+                    transition={{
+                      duration:
+                        phase === 'transitioning'
+                          ? 0.12
+                          : phase === 'showing' && puzzleEntryState.active
+                          ? 0.08
+                          : 0
+                    }}
+                    className="relative w-full h-full"
+                  >
+                    {isWidePuzzleDisplay ? (
+                      <div className="relative w-full h-full p-3">
+                        <div className="relative w-full h-full rounded-2xl border-4 border-[#4D3E26] bg-[#D2C091] shadow-[6px_6px_0px_0px_rgba(38,30,18,0.85)] p-3">
+                          <div className="absolute inset-y-3 left-1/2 -translate-x-1/2 w-[3px] bg-[#5A4A2B]/50 pointer-events-none" />
+                          <div className="relative grid h-full grid-cols-[minmax(0,1fr)_28px_minmax(0,1fr)] gap-2">
+                            <div
+                              className="relative rounded-xl overflow-hidden h-full"
+                              style={storybookPanelStyle}
+                            >
+                              <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#F3E6C4] text-[#3B2E1A] text-[10px] font-black uppercase tracking-wide">
+                                Original
+                              </div>
+                              <img
+                                src={currentPuzzle.imageA}
+                                alt="Original"
+                                className="w-full h-full object-cover pointer-events-none select-none"
+                              />
+                            </div>
+
+                            <div className="flex items-center justify-center">
+                              <div className="rotate-90 px-2 py-1 rounded-md border-2 border-[#4D3E26] bg-[#D8B149] text-[9px] font-black uppercase tracking-[0.18em] text-[#3B2E1A] whitespace-nowrap shadow-[1px_1px_0px_0px_rgba(77,62,38,0.8)]">
+                                Compare
+                              </div>
+                            </div>
+
+                            <div
+                              className="relative rounded-xl overflow-hidden h-full"
+                              style={storybookPanelStyle}
+                            >
+                              <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#D37872] text-[#23180D] text-[10px] font-black uppercase tracking-wide">
+                                Modified
+                              </div>
+                              <div ref={interactiveViewportRef} className="relative w-full h-full">
+                                <img
+                                  src={currentPuzzle.imageB}
+                                  alt="Find Differences"
+                                  className="w-full h-full object-cover select-none pointer-events-none"
+                                  onLoad={(event) => {
+                                    const image = event.currentTarget;
+                                    setImageBNaturalSize({
+                                      width: image.naturalWidth,
+                                      height: image.naturalHeight
+                                    });
+                                  }}
+                                />
+                                {renderBlinkOverlay()}
+                                <div
+                                  className="absolute pointer-events-none z-20"
+                                  style={{
+                                    left: `${imageBCoverFrame.x}px`,
+                                    top: `${imageBCoverFrame.y}px`,
+                                    width: `${imageBCoverFrame.width}px`,
+                                    height: `${imageBCoverFrame.height}px`
+                                  }}
+                                >
+                                  {renderRevealOverlays()}
+                                </div>
+                              </div>
+                            </div>
                           </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className={`relative w-full h-full flex gap-2 items-center justify-center ${
+                          isVerticalLayout ? 'flex-col' : 'flex-row'
+                        }`}
+                        style={{ padding: `${effectiveGamePadding}px`, gap: `${frameLayout.panelGap}px` }}
+                      >
+                        <div
+                          className="relative flex-1 overflow-hidden w-full h-full"
+                          style={standardPanelStyle}
+                        >
                           <img
                             src={currentPuzzle.imageA}
                             alt="Original"
@@ -4440,19 +4634,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                           />
                         </div>
 
-                        <div className="flex items-center justify-center">
-                          <div className="rotate-90 px-2 py-1 rounded-md border-2 border-[#4D3E26] bg-[#D8B149] text-[9px] font-black uppercase tracking-[0.18em] text-[#3B2E1A] whitespace-nowrap shadow-[1px_1px_0px_0px_rgba(77,62,38,0.8)]">
-                            Compare
-                          </div>
-                        </div>
-
                         <div
-                          className="relative rounded-xl overflow-hidden h-full"
-                          style={storybookPanelStyle}
+                          className="relative flex-1 overflow-hidden w-full h-full"
+                          style={standardPanelStyle}
                         >
-                          <div className="absolute top-2 left-2 z-10 px-2 py-1 border-2 border-[#4D3E26] rounded-md bg-[#D37872] text-[#23180D] text-[10px] font-black uppercase tracking-wide">
-                            Modified
-                          </div>
                           <div ref={interactiveViewportRef} className="relative w-full h-full">
                             <img
                               src={currentPuzzle.imageB}
@@ -4481,72 +4666,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                           </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div
-                    className={`relative w-full h-full flex gap-2 items-center justify-center ${
-                      isVerticalLayout ? 'flex-col' : 'flex-row'
-                    }`}
-                    style={{ padding: `${effectiveGamePadding}px`, gap: `${frameLayout.panelGap}px` }}
-                  >
-                    <div
-                      className="relative flex-1 overflow-hidden w-full h-full"
-                      style={standardPanelStyle}
-                    >
-                      <img
-                        src={currentPuzzle.imageA}
-                        alt="Original"
-                        className="w-full h-full object-cover pointer-events-none select-none"
-                      />
-                    </div>
-
-                    <div
-                      className="relative flex-1 overflow-hidden w-full h-full"
-                      style={standardPanelStyle}
-                    >
-                      <div ref={interactiveViewportRef} className="relative w-full h-full">
-                        <img
-                          src={currentPuzzle.imageB}
-                          alt="Find Differences"
-                          className="w-full h-full object-cover select-none pointer-events-none"
-                          onLoad={(event) => {
-                            const image = event.currentTarget;
-                            setImageBNaturalSize({
-                              width: image.naturalWidth,
-                              height: image.naturalHeight
-                            });
-                          }}
-                        />
-                        {renderBlinkOverlay()}
-                        <div
-                          className="absolute pointer-events-none z-20"
-                          style={{
-                            left: `${imageBCoverFrame.x}px`,
-                            top: `${imageBCoverFrame.y}px`,
-                            width: `${imageBCoverFrame.width}px`,
-                            height: `${imageBCoverFrame.height}px`
-                          }}
-                        >
-                          {renderRevealOverlays()}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                    )}
+                  </motion.div>
                 )}
-              </motion.div>
-            )}
-          </AnimatePresence>
+              </AnimatePresence>
 
-          {phase === 'intro' && !showIntroClip && renderSceneCard('intro')}
-          {phase === 'intro' && !showIntroClip && introClipActive && (
-            <div className="absolute top-4 right-4 z-40 rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase">
-              {introVideoError || introPreviewFrameError ? 'Intro Clip Failed' : 'Intro Clip Loading'}
-            </div>
+              {phase === 'intro' && !showIntroClip && renderSceneCard('intro')}
+              {phase === 'intro' && !showIntroClip && introClipActive && (
+                <div className="absolute top-4 right-4 z-40 rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase">
+                  {introVideoError || introPreviewFrameError ? 'Intro Clip Failed' : 'Intro Clip Loading'}
+                </div>
+              )}
+              {phase === 'transitioning' && renderTransitionOverlay()}
+              {phase === 'outro' && renderSceneCard('outro')}
+              {renderFinalCommentPrompt()}
+            </>
           )}
-          {phase === 'transitioning' && renderTransitionOverlay()}
-          {phase === 'outro' && renderSceneCard('outro')}
-          {renderFinalCommentPrompt()}
 
         </div>
         </>
