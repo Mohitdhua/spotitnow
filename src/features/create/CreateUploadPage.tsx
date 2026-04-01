@@ -67,7 +67,7 @@ export default function CreateUploadPage() {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-[28px] border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+      <section className="mobile-flat-shell rounded-[28px] border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-3xl">
             <div className="text-[10px] font-black uppercase tracking-[0.2em] text-[#2563EB]">Create Workflow</div>
@@ -85,7 +85,7 @@ export default function CreateUploadPage() {
           </div>
         </div>
 
-        <div className="mt-6 rounded-[24px] border-4 border-black bg-white p-6">
+        <div className="mobile-flat-shell mt-6 rounded-[24px] border-4 border-black bg-white p-6">
           <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Step 1</div>
@@ -112,7 +112,7 @@ export default function CreateUploadPage() {
         </div>
       </section>
 
-      <section className="rounded-[28px] border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+      <section className="mobile-flat-shell rounded-[28px] border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
         <div className="max-w-3xl">
           <div>
             <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Workflow Details</div>
@@ -128,12 +128,14 @@ export default function CreateUploadPage() {
           {optionCards.map((item) => {
             const Icon = item.icon;
             return (
-              <div key={item.title} className="rounded-2xl border-2 border-black bg-[#FFFDF5] p-4">
-                <div className="inline-flex h-11 w-11 items-center justify-center rounded-xl border-2 border-black bg-white">
+              <div key={item.title} className="mobile-inline-info-card rounded-2xl border-2 border-black bg-[#FFFDF5] p-4">
+                <div className="mobile-inline-info-icon inline-flex h-11 w-11 items-center justify-center rounded-xl border-2 border-black bg-white">
                   <Icon size={18} strokeWidth={2.6} />
                 </div>
-                <h3 className="mt-4 text-lg font-black uppercase text-slate-900">{item.title}</h3>
-                <p className="mt-2 text-sm font-semibold text-slate-600">{item.copy}</p>
+                <div className="mobile-inline-info-copy min-w-0">
+                  <h3 className="mt-4 text-lg font-black uppercase text-slate-900">{item.title}</h3>
+                  <p className="mt-2 text-sm font-semibold text-slate-600">{item.copy}</p>
+                </div>
               </div>
             );
           })}

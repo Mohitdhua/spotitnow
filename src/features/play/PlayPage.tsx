@@ -1,7 +1,12 @@
-import { useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { GameCanvas } from '../../components/GameCanvas';
+import { RouteWorkspaceLoading } from '../../app/components/RouteWorkspaceLoading';
 import { useAppStore } from '../../store/appStore';
+
+const GameCanvas = lazy(async () => {
+  const module = await import('../../components/GameCanvas');
+  return { default: module.GameCanvas };
+});
 
 export default function PlayPage() {
   const navigate = useNavigate();
@@ -57,12 +62,23 @@ export default function PlayPage() {
   }
 
   return (
-    <GameCanvas
-      key={`${activePuzzle.title ?? 'puzzle'}-${playIndex}`}
-      puzzle={activePuzzle}
-      onExit={() => navigate('/create/review')}
-      onNextLevel={handleNextLevel}
-      hasNextLevel={playIndex < batch.length - 1}
-    />
+    <Suspense
+      fallback={
+        <RouteWorkspaceLoading
+          eyebrow="Play"
+          title="Loading play mode"
+          description="Setting up the puzzle canvas and controls for the current batch."
+          fullHeight
+        />
+      }
+    >
+      <GameCanvas
+        key={`${activePuzzle.title ?? 'puzzle'}-${playIndex}`}
+        puzzle={activePuzzle}
+        onExit={() => navigate('/create/review')}
+        onNextLevel={handleNextLevel}
+        hasNextLevel={playIndex < batch.length - 1}
+      />
+    </Suspense>
   );
 }

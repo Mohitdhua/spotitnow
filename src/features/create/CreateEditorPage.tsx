@@ -1,10 +1,15 @@
-import { useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { EditorCanvas } from '../../components/EditorCanvas';
+import { RouteWorkspaceLoading } from '../../app/components/RouteWorkspaceLoading';
 import { downloadJsonFile } from '../../services/jsonTransfer';
 import { notifySuccess } from '../../services/notifications';
 import type { Puzzle, PuzzleSet } from '../../types';
 import { useAppStore } from '../../store/appStore';
+
+const EditorCanvas = lazy(async () => {
+  const module = await import('../../components/EditorCanvas');
+  return { default: module.EditorCanvas };
+});
 
 const samePuzzle = (left: Puzzle | null, right: Puzzle | null) =>
   Boolean(left && right && left.imageA === right.imageA && left.imageB === right.imageB);
@@ -132,15 +137,25 @@ export default function CreateEditorPage() {
         </p>
       </section>
 
-      <EditorCanvas
-        imageA={activePuzzle.imageA}
-        imageB={activePuzzle.imageB}
-        onSave={handleSave}
-        onPlay={handlePlay}
-        onAddToBatch={handleReturnToReview}
-        onExportVideo={handleSendToVideo}
-        batchCount={batch.length}
-      />
+      <Suspense
+        fallback={
+          <RouteWorkspaceLoading
+            eyebrow="Editor"
+            title="Loading editor workspace"
+            description="Preparing the puzzle canvas so you can jump straight into manual cleanup."
+          />
+        }
+      >
+        <EditorCanvas
+          imageA={activePuzzle.imageA}
+          imageB={activePuzzle.imageB}
+          onSave={handleSave}
+          onPlay={handlePlay}
+          onAddToBatch={handleReturnToReview}
+          onExportVideo={handleSendToVideo}
+          batchCount={batch.length}
+        />
+      </Suspense>
     </div>
   );
 }

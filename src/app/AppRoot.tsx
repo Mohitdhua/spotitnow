@@ -6,7 +6,7 @@ import { appRouter } from './routes';
 export function AppRoot() {
   return (
     <ProjectBootstrap>
-      <RouterProvider router={appRouter} />
+      <RouterProvider router={appRouter} unstable_useTransitions={false} />
       <Toaster
         richColors
         position="top-right"

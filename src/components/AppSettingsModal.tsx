@@ -254,6 +254,7 @@ export function AppSettingsModal({
           </div>
           <button
             onClick={onClose}
+            aria-label="Close settings"
             className="p-2 border-2 border-black rounded-lg bg-white hover:bg-slate-100"
             title="Close settings"
           >

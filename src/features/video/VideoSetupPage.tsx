@@ -103,6 +103,7 @@ export default function VideoSetupPage() {
   const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<VideoUserPackage | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VideoUserPackage | null>(null);
+  const [clearBatchDialogOpen, setClearBatchDialogOpen] = useState(false);
   const batch = useAppStore((state) => state.workspace.batch);
   const jobs = useAppStore((state) => state.exports.jobs);
   const videoSettings = useAppStore((state) => state.video.videoSettings);
@@ -111,6 +112,7 @@ export default function VideoSetupPage() {
   const activeProjectId = useAppStore((state) => state.projects.activeProjectId);
   const activeProjectName = useAppStore((state) => state.projects.activeProjectName);
   const setVideoSettings = useAppStore((state) => state.setVideoSettings);
+  const setBatchAndPuzzle = useAppStore((state) => state.setBatchAndPuzzle);
   const applyVideoPackageLibraryState = useAppStore((state) => state.applyVideoPackageLibraryState);
   const selectVideoPackage = useAppStore((state) => state.selectVideoPackage);
   const createVideoPackage = useAppStore((state) => state.createVideoPackage);
@@ -513,6 +515,8 @@ export default function VideoSetupPage() {
         exportStatus={exportStatus}
         onStart={handleStartPreview}
         onBack={() => navigate('/')}
+        onAddPuzzles={() => navigate('/create/upload')}
+        onClearBatch={() => setClearBatchDialogOpen(true)}
       />
 
       <TextPromptDialog
@@ -614,6 +618,24 @@ export default function VideoSetupPage() {
           } catch (error) {
             notifyError(resolveVideoPackageActionError(error, 'Could not delete that video package.'));
           }
+        }}
+      />
+
+      <ConfirmDialog
+        open={clearBatchDialogOpen}
+        title="Clear loaded puzzle batch?"
+        description={
+          batch.length > 0
+            ? `Remove all ${batch.length} puzzle${batch.length === 1 ? '' : 's'} from video setup. Your video settings will stay here.`
+            : 'There are no loaded puzzles to clear.'
+        }
+        confirmLabel="Clear"
+        tone="danger"
+        onOpenChange={setClearBatchDialogOpen}
+        onConfirm={() => {
+          setBatchAndPuzzle([], null);
+          setClearBatchDialogOpen(false);
+          notifySuccess('Puzzle batch cleared.');
         }}
       />
     </div>

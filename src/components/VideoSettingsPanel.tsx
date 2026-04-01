@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   Clock,
+  Copy,
   Download,
   Eye,
   Film,
@@ -10,11 +11,14 @@ import {
   Music,
   Monitor,
   Palette,
+  PencilLine,
   Play,
+  Plus,
   RefreshCcw,
   Save,
   Smartphone,
   Sparkles,
+  Trash2,
   Upload,
   Volume2
 } from 'lucide-react';
@@ -40,7 +44,12 @@ import {
   VIDEO_TRANSITION_STYLE_OPTIONS
 } from '../constants/videoStyleModules';
 import { PROGRESS_BAR_THEMES } from '../constants/progressBarThemes';
-import { VideoPreviewCompare, type PreviewOutputTab, type PreviewSetupTab } from './VideoPreviewCompare';
+import {
+  VideoPreviewCompare,
+  type PreviewMobileTab,
+  type PreviewOutputTab,
+  type PreviewSetupTab
+} from './VideoPreviewCompare';
 import { GeneratedBackgroundCanvas } from './GeneratedBackgroundCanvas';
 import { DeferredNumberInput } from './DeferredNumberInput';
 import { ConfirmDialog } from '../app/components/ConfirmDialog';
@@ -109,6 +118,8 @@ interface VideoSettingsPanelProps {
   exportStatus: string;
   onStart: () => void;
   onBack: () => void;
+  onAddPuzzles: () => void;
+  onClearBatch: () => void;
   backgroundPacksSessionId?: number;
 }
 
@@ -653,10 +664,13 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
   exportStatus,
   onStart,
   onBack,
+  onAddPuzzles,
+  onClearBatch,
   backgroundPacksSessionId = 0
 }) => {
   const [activeSetupTab, setActiveSetupTab] = useState<PreviewSetupTab>('package');
   const [activeOutputTab, setActiveOutputTab] = useState<PreviewOutputTab>('text');
+  const [activeMobileTab, setActiveMobileTab] = useState<PreviewMobileTab>('package');
   const [layoutPanels, setLayoutPanels] = useState<Record<LayoutPanelKey, boolean>>({
     frame: true,
     logo: true,
@@ -897,6 +911,14 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
     settings.aspectRatio === '9:16'
       ? 'clamp(420px, 66vh, 680px)'
       : 'clamp(280px, 35vh, 430px)';
+  const handleSelectSetupTab = (tab: PreviewSetupTab) => {
+    setActiveSetupTab(tab);
+    setActiveMobileTab(tab);
+  };
+  const handleSelectOutputTab = (tab: PreviewOutputTab) => {
+    setActiveOutputTab(tab);
+    setActiveMobileTab(tab);
+  };
   const processedLogoSrc = useProcessedLogoSrc(settings.logo, {
     enabled: settings.logoChromaKeyEnabled,
     color: settings.logoChromaKeyColor,
@@ -1354,7 +1376,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#F6F2E8]">
-      <div className="sticky top-0 z-20 shrink-0 border-b-2 border-black bg-[#FFD93D] px-2 py-2.5 sm:px-3">
+      <div className="sticky top-0 z-20 hidden shrink-0 border-b-2 border-black bg-[#FFD93D] px-2 py-2.5 sm:block sm:px-3">
           <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-start gap-2.5 sm:items-center">
             <button
@@ -1412,7 +1434,71 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                     </select>
                   </label>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-6 gap-2 sm:hidden">
+                    <button
+                      type="button"
+                      onClick={onCreateVideoPackage}
+                      aria-label="Create package"
+                      className="inline-flex h-11 items-center justify-center rounded-2xl border-2 border-black bg-[#A7F3D0] text-slate-900"
+                    >
+                      <Plus size={16} strokeWidth={2.6} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onDuplicateVideoPackage}
+                      aria-label="Duplicate package"
+                      className="inline-flex h-11 items-center justify-center rounded-2xl border-2 border-black bg-[#DBEAFE] text-slate-900"
+                    >
+                      <Copy size={15} strokeWidth={2.4} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectedVideoPackage && onRenameVideoPackage(selectedVideoPackage.id)}
+                      aria-label="Rename package"
+                      disabled={!selectedVideoPackage}
+                      className={`inline-flex h-11 items-center justify-center rounded-2xl border-2 border-black ${
+                        selectedVideoPackage ? 'bg-[#FDE68A] text-slate-900' : 'bg-slate-200 text-slate-500'
+                      }`}
+                    >
+                      <PencilLine size={15} strokeWidth={2.4} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectedVideoPackage && onDeleteVideoPackage(selectedVideoPackage.id)}
+                      aria-label="Delete package"
+                      disabled={!selectedVideoPackage || selectedVideoPackage.id === 'video-package-default'}
+                      className={`inline-flex h-11 items-center justify-center rounded-2xl border-2 border-black ${
+                        selectedVideoPackage && selectedVideoPackage.id !== 'video-package-default'
+                          ? 'bg-[#FECACA] text-slate-900'
+                          : 'bg-slate-200 text-slate-500'
+                      }`}
+                    >
+                      <Trash2 size={15} strokeWidth={2.4} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void onExportVideoPackage();
+                      }}
+                      aria-label="Export package"
+                      disabled={!selectedVideoPackage}
+                      className={`inline-flex h-11 items-center justify-center rounded-2xl border-2 border-black ${
+                        selectedVideoPackage ? 'bg-[#E9D5FF] text-slate-900' : 'bg-slate-200 text-slate-500'
+                      }`}
+                    >
+                      <Download size={15} strokeWidth={2.4} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onImportVideoPackage}
+                      aria-label="Import package"
+                      className="inline-flex h-11 items-center justify-center rounded-2xl border-2 border-black bg-[#BFDBFE] text-slate-900"
+                    >
+                      <Upload size={15} strokeWidth={2.4} />
+                    </button>
+                  </div>
+
+                  <div className="hidden grid-cols-2 gap-2 sm:grid">
                     <button
                       type="button"
                       onClick={onCreateVideoPackage}
@@ -1451,7 +1537,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="hidden grid-cols-2 gap-2 sm:grid">
                     <button
                       type="button"
                       onClick={() => {
@@ -1478,17 +1564,40 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   </div>
 
                   <div className="space-y-2 border-t border-black/15 pt-3">
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="hidden items-center justify-between gap-2 sm:flex">
                       <div className="text-[10px] font-black uppercase text-slate-600">Ratio</div>
                       <button
                         type="button"
-                        onClick={() => setActiveOutputTab('layout')}
+                        onClick={() => handleSelectOutputTab('layout')}
                         className="rounded-full border border-black px-2.5 py-1 text-[9px] font-black uppercase hover:bg-slate-100"
                       >
                         Layout
                       </button>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-[48px_minmax(0,1fr)_minmax(0,1fr)] gap-2 sm:hidden">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectOutputTab('layout')}
+                        aria-label="Open layout settings"
+                        className="inline-flex h-11 items-center justify-center rounded-2xl border-2 border-black bg-white text-slate-900"
+                      >
+                        <Layout size={16} strokeWidth={2.4} />
+                      </button>
+                      {ASPECT_RATIO_OPTIONS.map((ratio) => (
+                        <button
+                          key={ratio.value}
+                          type="button"
+                          onClick={() => onAspectRatioChange(ratio.value)}
+                          className={`inline-flex h-11 items-center justify-center gap-1.5 rounded-2xl border-2 border-black px-3 text-[10px] font-black uppercase ${
+                            settings.aspectRatio === ratio.value ? 'bg-[#4ECDC4]' : 'bg-white'
+                          }`}
+                        >
+                          {ratio.value === '16:9' ? <Monitor size={13} strokeWidth={2.2} /> : <Smartphone size={13} strokeWidth={2.2} />}
+                          {ratio.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="hidden grid-cols-2 gap-2 sm:grid">
                       {ASPECT_RATIO_OPTIONS.map((ratio) => (
                         <button
                           key={ratio.value}
@@ -1505,7 +1614,7 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
                   </div>
                 </div>
 
-                <div className="space-y-3">
+                <div className="hidden space-y-3 sm:block">
                   <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-600">Package Progress</div>
 
                   <div className="space-y-1.5">
@@ -3389,10 +3498,15 @@ export const VideoSettingsPanel: React.FC<VideoSettingsPanelProps> = ({
               puzzles={puzzles}
               settings={settings}
               heightStyle={livePreviewHeightStyle}
+              activeMobileTab={activeMobileTab}
               activeSetupTab={activeSetupTab}
-              onSelectSetupTab={setActiveSetupTab}
+              onSelectSetupTab={handleSelectSetupTab}
               activeOutputTab={activeOutputTab}
-              onSelectOutputTab={setActiveOutputTab}
+              onSelectOutputTab={handleSelectOutputTab}
+              onBack={onBack}
+              onAddPuzzles={onAddPuzzles}
+              onClearBatch={onClearBatch}
+              onStart={onStart}
               activeVideoPackageId={activeVideoPackageId}
               packageOptions={previewPackageOptions}
               onSelectVideoPackage={onSelectVideoPackage}
