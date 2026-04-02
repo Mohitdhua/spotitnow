@@ -84,6 +84,7 @@ export function ImageUploader({
   const missingFileInputRef = useRef<HTMLInputElement>(null);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [editingPuzzleIndex, setEditingPuzzleIndex] = useState<number | null>(null);
+  const [editorHeaderActionsContainer, setEditorHeaderActionsContainer] = useState<HTMLDivElement | null>(null);
   const [keepExactThreeOnly, setKeepExactThreeOnly] = useState(false);
 
   useEffect(() => {
@@ -1549,7 +1550,7 @@ export function ImageUploader({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 backdrop-blur-sm sm:p-4"
           >
             <motion.div 
               initial={{ scale: 0.9, y: 20 }}
@@ -1732,18 +1733,19 @@ export function ImageUploader({
             <motion.div 
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
-              className="bg-white rounded-2xl border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] max-w-5xl w-full overflow-hidden flex flex-col max-h-[85vh]"
+              className="flex max-h-[calc(100dvh-1rem)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border-4 border-black bg-white shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] sm:max-h-[85vh]"
             >
-              <div className="p-4 sm:p-6 border-b-4 border-black flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-[#FFD93D]">
-                <div>
-                  <h3 className="text-xl sm:text-2xl font-black text-black font-display uppercase">Review Puzzles</h3>
-                  <p className="text-black font-medium text-sm">Check detected differences and confirm.</p>
-                </div>
-                <div className="flex flex-col gap-2 sm:items-end">
+              <div className="border-b-4 border-black bg-[#FFD93D] px-4 py-3 sm:px-6 sm:py-5">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <h3 className="text-lg font-black text-black font-display uppercase sm:text-2xl">Review Puzzles</h3>
+                    <p className="text-xs font-medium text-black sm:text-sm">Check detected differences and confirm.</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                   <button
                     type="button"
                     onClick={() => setKeepExactThreeOnly((current) => !current)}
-                    className={`inline-flex items-center gap-2 rounded-full border-2 border-black px-3 py-1.5 text-[11px] font-black uppercase tracking-wide transition-colors ${
+                    className={`inline-flex items-center gap-2 rounded-full border-2 border-black px-3 py-1.5 text-[10px] font-black uppercase tracking-wide transition-colors sm:text-[11px] ${
                       keepExactThreeOnly ? 'bg-[#4ECDC4] text-black' : 'bg-white text-slate-700 hover:bg-slate-100'
                     }`}
                     title="Keep only puzzles with exactly 3 differences"
@@ -1753,13 +1755,15 @@ export function ImageUploader({
                     />
                     Only 3 Diffs
                   </button>
-                  <span className="px-4 py-1 bg-black text-[#FFD93D] border-2 border-black shadow-[2px_2px_0px_0px_rgba(255,255,255,0.5)] rounded-full text-sm font-bold">
+                  <span className="rounded-full border-2 border-black bg-black px-3 py-1 text-xs font-bold text-[#FFD93D] shadow-[2px_2px_0px_0px_rgba(255,255,255,0.5)] sm:px-4 sm:text-sm">
                     {keepExactThreeOnly ? `${activeReviewPuzzles.length} OF ${reviewPuzzles.length}` : reviewPuzzles.length} PUZZLES
                   </span>
+                  </div>
                 </div>
               </div>
               
-              <div className="p-6 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-6 bg-[#FFFDF5]">
+              <div className="flex-1 overflow-y-auto overflow-x-hidden bg-[#FFFDF5] px-3 py-3 sm:p-6">
+                <div className="grid grid-cols-1 gap-3 sm:gap-4 md:grid-cols-2 md:gap-6">
                 {keepExactThreeOnly && filteredOutCount > 0 ? (
                   <div className="md:col-span-2 rounded-2xl border-2 border-black bg-[#FFF7ED] px-4 py-3 text-sm font-bold text-slate-700">
                     Keeping only exact 3-difference puzzles. {filteredOutCount} puzzle{filteredOutCount === 1 ? '' : 's'} hidden.
@@ -1767,7 +1771,7 @@ export function ImageUploader({
                 ) : null}
 
                 {activeReviewEntries.length ? activeReviewEntries.map(({ puzzle, index }) => (
-                  <div key={`${puzzle.title ?? 'puzzle'}-${index}`} className="bg-white p-4 rounded-xl border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col space-y-3 group hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all">
+                  <div key={`${puzzle.title ?? 'puzzle'}-${index}`} className="group flex flex-col space-y-3 rounded-xl border-2 border-black bg-white p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] sm:p-4">
                     <div className="flex items-start justify-between gap-2">
                       <h4 className="min-w-0 font-bold text-black truncate pr-2 font-display text-base sm:text-lg" title={puzzle.title}>
                         {puzzle.title || `Puzzle ${index + 1}`}
@@ -1790,7 +1794,7 @@ export function ImageUploader({
                       </div>
                     </div>
                     
-                    <div className="flex h-28 sm:h-32 space-x-2">
+                    <div className="flex h-24 space-x-2 sm:h-32">
                       <div className="flex-1 relative rounded-lg overflow-hidden border-2 border-black bg-slate-100">
                         <img src={puzzle.imageA} alt="Original" className="w-full h-full object-contain" />
                         <div className="absolute bottom-1 left-1 bg-black text-white text-[10px] px-1.5 py-0.5 font-bold uppercase">Puzzle</div>
@@ -1817,66 +1821,71 @@ export function ImageUploader({
                   </div>
                 )}
               </div>
+              </div>
 
-              <div className="p-4 sm:p-6 border-t-4 border-black bg-white flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="border-t-4 border-black bg-white px-3 py-3 sm:px-6 sm:py-4">
+                <div className="grid grid-cols-5 gap-2 sm:flex sm:flex-wrap sm:items-center sm:justify-between">
                 <button 
                   onClick={() => setShowReviewModal(false)}
-                  className="text-slate-500 hover:text-black font-bold px-4 py-2 uppercase tracking-wide"
+                  className="inline-flex min-w-0 items-center justify-center rounded-xl border-2 border-black bg-white px-2 py-2 text-[10px] font-black uppercase tracking-wide text-slate-500 hover:bg-slate-100 hover:text-black sm:px-4 sm:text-xs"
                 >
-                  Cancel
+                  <span className="truncate">Cancel</span>
                 </button>
                 
-                <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:space-x-0">
                   <button 
                     onClick={handleExport}
                     disabled={activeReviewPuzzles.length === 0}
-                    className={`w-full justify-center px-6 py-3 border-2 border-black rounded-xl font-bold transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                    className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-xl border-2 border-black px-2 py-2 text-[10px] font-bold uppercase transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:px-4 sm:py-3 sm:text-xs ${
                       activeReviewPuzzles.length === 0
                         ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
-                        : 'bg-white text-black hover:bg-slate-50 hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                        : 'bg-white text-black hover:bg-slate-50 hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
                     }`}
                   >
-                    <Download size={20} strokeWidth={2.5} />
-                    <span>EXPORT JSON</span>
+                    <Download size={14} strokeWidth={2.5} />
+                    <span className="truncate sm:hidden">JSON</span>
+                    <span className="hidden truncate sm:inline">Export JSON</span>
                   </button>
                   <button
                     onClick={handleExportImagePairs}
                     disabled={activeReviewPuzzles.length === 0}
-                    className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                    className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-xl border-2 border-black px-2 py-2 text-[10px] font-black uppercase tracking-wide transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:px-4 sm:text-xs ${
                       activeReviewPuzzles.length === 0
                         ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
                         : 'bg-white text-black hover:bg-[#FDE68A] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
                     }`}
                   >
-                    <ImageIcon size={16} strokeWidth={2.5} />
-                    <span>EXPORT IMAGES</span>
+                    <ImageIcon size={14} strokeWidth={2.5} />
+                    <span className="truncate sm:hidden">Images</span>
+                    <span className="hidden truncate sm:inline">Export Images</span>
                   </button>
                   {onExportVideo && (
                     <button
                       onClick={handleExportVideoFromReview}
                       disabled={activeReviewPuzzles.length === 0}
-                      className={`w-full justify-center px-4 py-2 border-2 border-black rounded-xl font-black text-xs uppercase tracking-wide transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 sm:w-auto ${
+                      className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-xl border-2 border-black px-2 py-2 text-[10px] font-black uppercase tracking-wide transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:px-4 sm:text-xs ${
                         activeReviewPuzzles.length === 0
                           ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
                           : 'bg-white text-black hover:bg-[#E0E7FF] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
                       }`}
                     >
-                      <Video size={16} strokeWidth={2.5} />
-                      <span>EXPORT VIDEO</span>
+                      <Video size={14} strokeWidth={2.5} />
+                      <span className="truncate sm:hidden">Video</span>
+                      <span className="hidden truncate sm:inline">Export Video</span>
                     </button>
                   )}
                    
                   <button 
                     onClick={handleConfirmBatch}
                     disabled={activeReviewPuzzles.length === 0}
-                    className={`w-full justify-center px-8 py-3 border-2 border-black rounded-xl font-black transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex items-center space-x-2 text-base sm:text-lg sm:w-auto ${
+                    className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-xl border-2 border-black px-2 py-2 text-[10px] font-black uppercase transition-all shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:px-6 sm:py-3 sm:text-base ${
                       activeReviewPuzzles.length === 0
                         ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none border-slate-300'
-                        : 'bg-[#4ECDC4] text-black hover:bg-[#3DBDB4] hover:translate-y-[2px] hover:translate-x-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                        : 'bg-[#4ECDC4] text-black hover:bg-[#3DBDB4] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
                     }`}
                   >
-                    <Play size={24} strokeWidth={3} />
-                    <span>START GAME</span>
+                    <Play size={16} strokeWidth={3} />
+                    <span className="truncate sm:hidden">Start</span>
+                    <span className="hidden truncate sm:inline">Start Game</span>
                   </button>
                 </div>
               </div>
@@ -1892,24 +1901,30 @@ export function ImageUploader({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 backdrop-blur-sm sm:p-4"
           >
             <motion.div 
               initial={{ scale: 0.95, y: 20 }}
               animate={{ scale: 1, y: 0 }}
-              className="bg-white rounded-2xl border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] w-full h-full max-w-7xl overflow-hidden flex flex-col"
+              className="flex h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] w-full max-w-7xl min-h-0 flex-col overflow-hidden rounded-2xl border-4 border-black bg-white shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] sm:h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-2rem)]"
             >
-              <div className="p-4 border-b-4 border-black flex items-center justify-between gap-3 bg-[#FF6B6B]">
-                <h3 className="text-xl sm:text-2xl font-black text-black font-display uppercase">Edit Puzzle</h3>
-                <button 
-                  onClick={() => setEditingPuzzleIndex(null)}
-                  className="p-2 bg-white border-2 border-black hover:bg-slate-100 rounded-lg text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all"
-                >
-                  <X size={24} strokeWidth={3} />
-                </button>
+              <div className="border-b-4 border-black bg-[#FF6B6B] px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-xl font-black text-black font-display uppercase sm:text-2xl">Edit Puzzle</h3>
+                  <button 
+                    onClick={() => setEditingPuzzleIndex(null)}
+                    className="p-2 bg-white border-2 border-black hover:bg-slate-100 rounded-lg text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all"
+                  >
+                    <X size={24} strokeWidth={3} />
+                  </button>
+                </div>
+                <div
+                  ref={setEditorHeaderActionsContainer}
+                  className="mt-3 min-h-0"
+                />
               </div>
               
-              <div className="flex-1 overflow-hidden bg-[#FFFDF5]">
+              <div className="flex-1 min-h-0 overflow-hidden bg-[#FFFDF5]">
                 <EditorCanvas 
                   imageA={reviewPuzzles[editingPuzzleIndex].imageA}
                   imageB={reviewPuzzles[editingPuzzleIndex].imageB}
@@ -1922,6 +1937,7 @@ export function ImageUploader({
                   onAddToBatch={() => {}} // Not needed in this context
                   batchCount={0}
                   isModal={true}
+                  headerActionsContainer={editorHeaderActionsContainer}
                 />
               </div>
             </motion.div>

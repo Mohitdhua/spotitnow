@@ -597,97 +597,99 @@ export function FrameExtractorMode({
   };
 
   return (
-    <div className="mx-auto w-full max-w-7xl p-2.5 sm:p-4 md:p-6">
-      <div className="overflow-hidden rounded-[24px] border-4 border-black bg-[#FFFDF8] shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] sm:rounded-[28px] sm:shadow-[10px_10px_0px_0px_rgba(0,0,0,1)]">
-        <div className="border-b-4 border-black bg-[linear-gradient(135deg,#FED7AA_0%,#FDE68A_48%,#BFDBFE_100%)] p-3.5 sm:p-6 md:p-7">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex items-start gap-3 sm:gap-4">
+    <div className="mx-auto w-full max-w-7xl p-2 sm:p-4 md:p-6">
+      <div className="overflow-hidden rounded-[20px] border-4 border-black bg-[#FFFDF8] shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] sm:rounded-[28px] sm:shadow-[10px_10px_0px_0px_rgba(0,0,0,1)]">
+        <div className="border-b-4 border-black bg-[linear-gradient(135deg,#FED7AA_0%,#FDE68A_48%,#BFDBFE_100%)] p-3 sm:p-5 md:p-7">
+          <div className="flex flex-col gap-2 sm:gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-start gap-2.5 sm:gap-4">
               <button
                 onClick={onBack}
-                className="shrink-0 rounded-xl border-2 border-black bg-white p-2.5 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 hover:bg-black hover:text-white"
+                className="shrink-0 rounded-lg border-2 border-black bg-white p-2 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 hover:bg-black hover:text-white sm:rounded-xl sm:p-2.5 sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
               >
-                <ArrowLeft size={22} strokeWidth={3} />
+                <ArrowLeft size={18} strokeWidth={3} className="sm:w-[22px] sm:h-[22px]" />
               </button>
-              <div>
-                <h2 className="text-xl font-black font-display uppercase tracking-tight text-black sm:text-3xl lg:text-4xl">
+              <div className="min-w-0">
+                <h2 className="text-lg font-black font-display uppercase tracking-tight text-black sm:text-2xl lg:text-4xl">
                   Frame Extractor
                 </h2>
-                <p className="mt-1.5 max-w-2xl text-[13px] font-bold leading-5 text-slate-700 sm:mt-2 sm:text-[15px]">
-                  Build one extraction plan, jump to the section you need, and run the exact export path without the desktop sprawl.
+                <p className="mt-1 line-clamp-2 text-[12px] font-bold leading-4 text-slate-700 sm:mt-2 sm:text-[14px] sm:line-clamp-none">
+                  Build one extraction plan, jump to the section you need, and run the exact export path without desktop sprawl.
                 </p>
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <div className="rounded-full border-2 border-black bg-white px-3 py-1.5 text-[11px] font-black uppercase shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+            <div className="flex flex-wrap gap-1.5 sm:gap-2">
+              <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 text-[10px] font-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:px-3 sm:py-1.5 sm:text-[11px]">
                 {isBusy ? 'Processing' : canExtract ? 'Ready To Run' : 'Setup Needed'}
               </div>
-              <div className="rounded-full border-2 border-black bg-black px-3 py-1.5 text-[11px] font-black uppercase text-white shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
-                {videos.length} Video{videos.length === 1 ? '' : 's'} Loaded
+              <div className="rounded-full border-2 border-black bg-black px-2.5 py-1 text-[10px] font-black uppercase text-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:px-3 sm:py-1.5 sm:text-[11px]">
+                {videos.length} Video{videos.length === 1 ? '' : 's'}
               </div>
             </div>
           </div>
 
-          <div className="-mx-1 mt-4 flex gap-3 overflow-x-auto px-1 pb-1 sm:mx-0 sm:grid sm:grid-cols-2 sm:gap-3 sm:overflow-visible sm:px-0 xl:grid-cols-4">
-            <div className="min-w-[150px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
-              <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Videos</div>
-              <div className="mt-2 text-2xl font-black text-slate-900">{videos.length}</div>
-              <div className="mt-1 text-[11px] font-bold text-slate-700">
-                {videos.length ? formatDurationShort(totalVideoDurationSeconds) : 'No queue yet'}
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-2 sm:gap-3 lg:grid-cols-4 lg:mt-4">
+            <div className="rounded-xl border-2 border-black bg-white/90 p-2.5 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-2xl sm:p-3 sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+              <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Videos</div>
+              <div className="mt-1.5 text-xl font-black text-slate-900 sm:mt-2 sm:text-2xl">{videos.length}</div>
+              <div className="mt-1 text-[10px] font-bold text-slate-700 sm:text-[11px]">
+                {videos.length ? formatDurationShort(totalVideoDurationSeconds) : '--'}
               </div>
-              <div className="mt-1 text-[11px] font-bold text-slate-600">{formatFileSize(totalVideoBytes)}</div>
+              <div className="mt-0.5 text-[10px] font-bold text-slate-600 sm:text-[11px]">{formatFileSize(totalVideoBytes)}</div>
             </div>
 
-            <div className="min-w-[150px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
-              <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Timestamps</div>
-              <div className="mt-2 text-2xl font-black text-slate-900">{parsedTimestamps.timestamps.length}</div>
-              <div className="mt-1 text-[11px] font-bold text-slate-700">
+            <div className="rounded-xl border-2 border-black bg-white/90 p-2.5 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-2xl sm:p-3 sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+              <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Timestamps</div>
+              <div className="mt-1.5 text-xl font-black text-slate-900 sm:mt-2 sm:text-2xl">{parsedTimestamps.timestamps.length}</div>
+              <div className="mt-1 text-[10px] font-bold text-slate-700 sm:text-[11px]">
                 {parsedTimestamps.invalidTokens.length > 0
                   ? `${parsedTimestamps.invalidTokens.length} invalid`
                   : 'All valid'}
               </div>
             </div>
 
-            <div className="min-w-[150px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
-              <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Requests</div>
-              <div className="mt-2 text-2xl font-black text-slate-900">{requestedFrames}</div>
-              <div className="mt-1 text-[11px] font-bold text-slate-700">
-                {videos.length} video(s) x {parsedTimestamps.timestamps.length} timestamp(s)
+            <div className="rounded-xl border-2 border-black bg-white/90 p-2.5 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-2xl sm:p-3 sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+              <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Requests</div>
+              <div className="mt-1.5 text-xl font-black text-slate-900 sm:mt-2 sm:text-2xl">{requestedFrames}</div>
+              <div className="mt-1 text-[10px] font-bold text-slate-700 sm:text-[11px]">
+                {videos.length}x{parsedTimestamps.timestamps.length}
               </div>
-              <div className="mt-1 text-[11px] font-bold text-slate-600">{imageFormat === 'png' ? 'PNG' : 'JPEG'}</div>
+              <div className="mt-0.5 text-[10px] font-bold text-slate-600 sm:text-[11px]">{imageFormat === 'png' ? 'PNG' : 'JPEG'}</div>
             </div>
 
-            <div className="min-w-[170px] rounded-2xl border-2 border-black bg-white/90 p-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] sm:min-w-0">
-              <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Package</div>
-              <div className="mt-2 text-sm font-black uppercase text-slate-900">{effectiveSuperExportPackageLabel}</div>
-              <div className="mt-2 text-[11px] font-bold text-slate-700">
-                Split area {hasSelectedSplitterRegion ? 'ready' : 'missing'}
+            <div className="rounded-xl border-2 border-black bg-white/90 p-2.5 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-2xl sm:p-3 sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+              <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Package</div>
+              <div className="mt-1.5 text-xs font-black uppercase text-slate-900 sm:mt-2 sm:text-sm">
+                {effectiveSuperExportPackageLabel.length > 12 ? effectiveSuperExportPackageLabel.split(' ')[0] : effectiveSuperExportPackageLabel}
+              </div>
+              <div className="mt-1 text-[10px] font-bold text-slate-700 sm:text-[11px]">
+                {hasSelectedSplitterRegion ? '✓ Ready' : '○ Missing'}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="space-y-6 bg-[radial-gradient(circle_at_top_right,#DBEAFE_0%,#FFFDF8_34%,#FFF7ED_100%)] p-4 sm:p-6 md:p-8">
-          <div className="rounded-[22px] border-4 border-black bg-[#111827] p-3.5 text-white shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] sm:rounded-[24px] sm:p-5 sm:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="space-y-4 bg-[radial-gradient(circle_at_top_right,#DBEAFE_0%,#FFFDF8_34%,#FFF7ED_100%)] p-3 sm:p-5 md:p-8">
+          <div className="rounded-2xl border-4 border-black bg-[#111827] p-3 text-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:rounded-[24px] sm:p-4 sm:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 text-base font-black sm:text-xl">
-                  {isBusy && <LoaderCircle size={18} className="animate-spin" />}
-                  <Clock3 size={18} />
+                <div className="flex items-center gap-2 text-sm font-black sm:text-base lg:text-xl">
+                  {isBusy && <LoaderCircle size={16} className="animate-spin sm:w-[18px] sm:h-[18px]" />}
+                  <Clock3 size={16} className="sm:w-[18px] sm:h-[18px]" />
                   <span className="truncate">{activeStatusLabel}</span>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <div className="rounded-full border-2 border-white/80 bg-white/10 px-3 py-1.5 text-[11px] font-black uppercase">
-                  Progress {progressPercent}%
+              <div className="flex flex-wrap gap-1.5 sm:gap-2">
+                <div className="rounded-full border-2 border-white/80 bg-white/10 px-2.5 py-1 text-[10px] font-black uppercase sm:px-3 sm:py-1.5 sm:text-[11px]">
+                  {progressPercent}%
                 </div>
-                <div className="rounded-full border-2 border-white/80 bg-white/10 px-3 py-1.5 text-[11px] font-black uppercase">
-                  Reports {recentRunCount}
+                <div className="rounded-full border-2 border-white/80 bg-white/10 px-2.5 py-1 text-[10px] font-black uppercase sm:px-3 sm:py-1.5 sm:text-[11px]">
+                  {recentRunCount} Run{recentRunCount === 1 ? '' : 's'}
                 </div>
               </div>
             </div>
 
-            <div className="mt-4 h-4 overflow-hidden rounded-full border-2 border-white/80 bg-white/15">
+            <div className="mt-3 h-3 overflow-hidden rounded-full border-2 border-white/80 bg-white/15 sm:mt-4 sm:h-4">
               <div
                 className="h-full bg-[linear-gradient(90deg,#FDE68A_0%,#86EFAC_38%,#60A5FA_72%,#C084FC_100%)] transition-all"
                 style={{ width: `${progressPercent}%` }}
@@ -695,60 +697,60 @@ export function FrameExtractorMode({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 lg:hidden">
+          <div className="flex gap-2 overflow-x-auto pb-2 lg:hidden">
             <button
               type="button"
               onClick={() => scrollToSection(sourceSectionRef)}
-              className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+              className="shrink-0 rounded-xl border-2 border-black bg-white px-4 py-2.5 text-[11px] font-black uppercase text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:bg-slate-100"
             >
-              Source Clips
+              Clips
             </button>
             <button
               type="button"
               onClick={() => scrollToSection(timestampsSectionRef)}
-              className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+              className="shrink-0 rounded-xl border-2 border-black bg-white px-4 py-2.5 text-[11px] font-black uppercase text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:bg-slate-100"
             >
-              Timestamps
+              Times
             </button>
             <button
               type="button"
               onClick={() => scrollToSection(outputSectionRef)}
-              className="rounded-2xl border-2 border-black bg-[#DBEAFE] px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+              className="shrink-0 rounded-xl border-2 border-black bg-[#DBEAFE] px-4 py-2.5 text-[11px] font-black uppercase text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:bg-[#BFDBFE]"
             >
-              Output + Run
+              Output
             </button>
             <button
               type="button"
               onClick={() => scrollToSection(recentRunsSectionRef)}
-              className="rounded-2xl border-2 border-black bg-[#FFF7ED] px-3 py-3 text-[11px] font-black uppercase tracking-wide text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+              className="shrink-0 rounded-xl border-2 border-black bg-[#FFF7ED] px-4 py-2.5 text-[11px] font-black uppercase text-slate-900 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:bg-orange-100"
             >
-              Recent Runs
+              Runs
             </button>
           </div>
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
-            <div ref={sourceSectionRef} className="min-w-0 scroll-mt-32 space-y-5 xl:col-span-7">
-              <div className="rounded-[24px] border-4 border-black bg-[#FFF7ED] p-4 sm:p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <h3 className="text-xl sm:text-2xl font-black uppercase text-slate-900">Source Clips</h3>
+            <div ref={sourceSectionRef} className="min-w-0 scroll-mt-32 space-y-4 xl:col-span-7">
+              <div className="rounded-2xl border-4 border-black bg-[#FFF7ED] p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:rounded-[24px] sm:p-5 sm:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
+                <div className="flex flex-col gap-3 sm:gap-4 lg:flex-row lg:items-center lg:justify-between">
+                  <h3 className="text-lg sm:text-2xl font-black uppercase text-slate-900">Source Clips</h3>
                   <div className="flex flex-wrap gap-2">
                     <button
                       onClick={() => fileInputRef.current?.click()}
-                      className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-white px-4 py-2 text-xs font-black uppercase shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 hover:bg-black hover:text-white"
+                      className="inline-flex items-center gap-1.5 rounded-lg border-2 border-black bg-white px-3 py-2 text-[11px] font-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 hover:bg-black hover:text-white sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-xs sm:gap-2 sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
                     >
-                      <Upload size={14} strokeWidth={3} />
-                      <span>Add Videos</span>
+                      <Upload size={14} strokeWidth={3} className="sm:w-[16px] sm:h-[16px]" />
+                      <span>Add</span>
                     </button>
                     <button
                       onClick={handleClearVideos}
                       disabled={!videos.length}
-                      className={`rounded-xl border-2 border-black px-4 py-2 text-xs font-black uppercase transition-all ${
+                      className={`rounded-lg border-2 border-black px-3 py-2 text-[11px] font-black uppercase transition-all sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-xs ${
                         videos.length
-                          ? 'bg-white shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5 hover:bg-red-50'
+                          ? 'bg-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5 hover:bg-red-50 sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
                           : 'bg-slate-200 text-slate-500 cursor-not-allowed'
                       }`}
                     >
-                      Clear Queue
+                      Clear
                     </button>
                   </div>
                 </div>
@@ -765,22 +767,22 @@ export function FrameExtractorMode({
                   }}
                 />
 
-                <div className="mt-4 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wide text-slate-700">
-                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
-                    Runtime {videos.length ? formatDurationShort(totalVideoDurationSeconds) : '--'}
+                <div className="mt-3 flex flex-wrap gap-1.5 text-[9px] font-black uppercase tracking-wide text-slate-700 sm:text-[10px] sm:gap-2">
+                  <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 sm:px-3 sm:py-1.5">
+                    {videos.length ? formatDurationShort(totalVideoDurationSeconds) : '--'}
                   </div>
-                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
-                    Size {formatFileSize(totalVideoBytes)}
+                  <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 sm:px-3 sm:py-1.5">
+                    {formatFileSize(totalVideoBytes)}
                   </div>
-                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
-                    Plan {parsedTimestamps.timestamps.length} timestamp{parsedTimestamps.timestamps.length === 1 ? '' : 's'}
+                  <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 sm:px-3 sm:py-1.5">
+                    {parsedTimestamps.timestamps.length} time
                   </div>
-                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5">
-                    Requests {requestedFrames}
+                  <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 sm:px-3 sm:py-1.5">
+                    {requestedFrames} req
                   </div>
                 </div>
 
-                <div className="mt-4 max-h-[430px] space-y-3 overflow-auto pr-1">
+                <div className="mt-3 max-h-[300px] space-y-2 overflow-auto pr-1 sm:max-h-[430px] sm:space-y-3">
                   {videos.length === 0 ? (
                     <div className="rounded-[24px] border-2 border-dashed border-black bg-white px-6 py-8 text-center">
                       <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border-2 border-black bg-[#FEF3C7]">
@@ -802,36 +804,32 @@ export function FrameExtractorMode({
                     videos.map((item, index) => (
                       <div
                         key={item.id}
-                        className="rounded-[20px] border-2 border-black bg-white p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5"
+                        className="rounded-lg border-2 border-black bg-white p-2.5 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all hover:-translate-y-0.5 sm:rounded-[20px] sm:p-3 sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
                       >
-                        <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start justify-between gap-2.5 sm:gap-3">
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-black text-slate-900">{item.file.name}</div>
-                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wide">
-                              <div className="rounded-full border-2 border-black bg-[#FED7AA] px-2.5 py-1">
-                                Clip {index + 1}
+                            <div className="truncate text-xs font-black text-slate-900 sm:text-sm">{item.file.name.length > 20 ? item.file.name.substring(0, 17) + '...' : item.file.name}</div>
+                            <div className="mt-1.5 flex flex-wrap gap-1 text-[9px] font-black uppercase tracking-wide sm:mt-2 sm:gap-2 sm:text-[10px]">
+                              <div className="rounded-full border-2 border-black bg-[#FED7AA] px-2 py-0.5 sm:px-2.5 sm:py-1">
+                                #{index + 1}
                               </div>
-                              <div className="rounded-full border border-black bg-[#FFF7ED] px-2.5 py-1">
+                              <div className="rounded-full border border-black bg-[#FFF7ED] px-2 py-0.5 sm:px-2.5 sm:py-1">
                                 {formatDurationShort(item.metadata.durationSeconds)}
                               </div>
-                              <div className="rounded-full border border-black bg-[#EEF9FF] px-2.5 py-1">
+                              <div className="rounded-full border border-black bg-[#EEF9FF] px-2 py-0.5 sm:px-2.5 sm:py-1">
                                 {formatFileSize(item.file.size)}
                               </div>
-                              <div className="rounded-full border border-black bg-[#F3E8FF] px-2.5 py-1">
+                              <div className="rounded-full border border-black bg-[#F3E8FF] px-2 py-0.5 sm:px-2.5 sm:py-1">
                                 {item.metadata.width}x{item.metadata.height}
-                              </div>
-                              <div className="rounded-full border border-black bg-[#ECFCCB] px-2.5 py-1">
-                                {parsedTimestamps.timestamps.length} timestamp
-                                {parsedTimestamps.timestamps.length === 1 ? '' : 's'}
                               </div>
                             </div>
                           </div>
                           <button
                             onClick={() => handleRemoveVideo(item.id)}
-                            className="rounded-xl border-2 border-black bg-white p-2 transition-all hover:bg-red-50"
+                            className="shrink-0 rounded-lg border-2 border-black bg-white p-1.5 transition-all hover:bg-red-50 sm:rounded-xl sm:p-2"
                             title="Remove video"
                           >
-                            <Trash2 size={15} strokeWidth={2.5} />
+                            <Trash2 size={14} strokeWidth={2.5} className="sm:w-[15px] sm:h-[15px]" />
                           </button>
                         </div>
                       </div>
@@ -843,46 +841,46 @@ export function FrameExtractorMode({
 
             <div
               ref={timestampsSectionRef}
-              className="min-w-0 self-start scroll-mt-32 space-y-5 xl:sticky xl:top-6 xl:col-span-5"
+              className="min-w-0 self-start scroll-mt-32 space-y-4 xl:sticky xl:top-6 xl:col-span-5"
             >
-              <div className="rounded-[24px] border-4 border-black bg-[#EEF9FF] p-4 sm:p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] space-y-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <h3 className="text-xl sm:text-2xl font-black uppercase text-slate-900">Shared Timestamps</h3>
-                  <div className="flex flex-wrap gap-2">
-                    <div className="rounded-full border-2 border-black bg-white px-3 py-1.5 text-[11px] font-black uppercase">
+              <div className="rounded-2xl border-4 border-black bg-[#EEF9FF] p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] space-y-3 sm:rounded-[24px] sm:p-5 sm:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] sm:space-y-4">
+                <div className="flex flex-col gap-2 sm:gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <h3 className="text-lg sm:text-2xl font-black uppercase text-slate-900">Shared Timestamps</h3>
+                  <div className="flex flex-wrap gap-1.5 sm:gap-2">
+                    <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 text-[10px] font-black uppercase sm:px-3 sm:py-1.5 sm:text-[11px]">
                       {parsedTimestamps.timestamps.length} Valid
                     </div>
                     {parsedTimestamps.invalidTokens.length > 0 && (
-                      <div className="rounded-full border-2 border-black bg-[#FECACA] px-3 py-1.5 text-[11px] font-black uppercase">
-                        {parsedTimestamps.invalidTokens.length} Invalid
+                      <div className="rounded-full border-2 border-black bg-[#FECACA] px-2.5 py-1 text-[10px] font-black uppercase sm:px-3 sm:py-1.5 sm:text-[11px]">
+                        {parsedTimestamps.invalidTokens.length} Bad
                       </div>
                     )}
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-bold text-slate-700">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Requests</div>
-                    <div className="mt-2 text-lg font-black text-slate-900">{requestedFrames}</div>
+                <div className="grid grid-cols-2 gap-2 sm:gap-3">
+                  <div className="rounded-xl border-2 border-black bg-white px-2.5 py-2.5 text-[10px] font-bold text-slate-700 sm:rounded-2xl sm:px-3 sm:py-3 sm:text-[11px]">
+                    <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Requests</div>
+                    <div className="mt-1.5 text-base font-black text-slate-900 sm:mt-2 sm:text-lg">{requestedFrames}</div>
                   </div>
-                  <div className="rounded-2xl border-2 border-black bg-white px-3 py-3 text-[11px] font-bold text-slate-700">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Format</div>
-                    <div className="mt-2 text-lg font-black text-slate-900">{imageFormat.toUpperCase()}</div>
+                  <div className="rounded-xl border-2 border-black bg-white px-2.5 py-2.5 text-[10px] font-bold text-slate-700 sm:rounded-2xl sm:px-3 sm:py-3 sm:text-[11px]">
+                    <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Format</div>
+                    <div className="mt-1.5 text-base font-black text-slate-900 sm:mt-2 sm:text-lg">{imageFormat.toUpperCase()}</div>
                   </div>
                 </div>
                 <textarea
                   value={timestampsText}
                   onChange={(event) => setTimestampsText(event.target.value)}
-                  rows={6}
-                  className="min-h-[170px] w-full resize-y rounded-[22px] border-2 border-black bg-white p-4 font-mono text-sm shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
-                  placeholder="00:05.000, 00:10.500, 90"
+                  rows={5}
+                  className="min-h-[120px] w-full resize-y rounded-lg border-2 border-black bg-white p-3 font-mono text-xs shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:min-h-[170px] sm:rounded-[22px] sm:p-4 sm:text-sm sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]"
+                  placeholder="00:05, 00:10.5, 90"
                 />
-                <div className="rounded-2xl border-2 border-black bg-white px-4 py-3 text-[11px] font-bold text-slate-700">
-                  Seconds or `MM:SS` / `HH:MM:SS.mmm`. Commas and line breaks both work.
+                <div className="rounded-lg border-2 border-black bg-white px-3 py-2.5 text-[10px] font-bold text-slate-700 sm:rounded-2xl sm:px-4 sm:py-3 sm:text-[11px]">
+                  MM:SS, HH:MM:SS.mmm, or seconds. Commas or breaks.
                 </div>
                 {parsedTimestamps.invalidTokens.length > 0 && (
-                  <div className="rounded-2xl border-2 border-black bg-[#FECACA] px-4 py-3 text-[11px] font-bold text-slate-800">
-                    Invalid: {parsedTimestamps.invalidTokens.slice(0, 12).join(', ')}
-                    {parsedTimestamps.invalidTokens.length > 12 ? ' ...' : ''}
+                  <div className="rounded-lg border-2 border-black bg-[#FECACA] px-3 py-2 text-[10px] font-bold text-slate-800 sm:rounded-2xl sm:px-4 sm:py-3 sm:text-[11px]">
+                    Bad: {parsedTimestamps.invalidTokens.slice(0, 6).join(', ')}
+                    {parsedTimestamps.invalidTokens.length > 6 ? ' ...' : ''}
                   </div>
                 )}
                 <TimestampPresetPicker
@@ -895,43 +893,43 @@ export function FrameExtractorMode({
             </div>
 
             <div ref={outputSectionRef} className="min-w-0 scroll-mt-32 xl:col-span-12">
-              <div className="rounded-[24px] border-4 border-black bg-[#F8FDFF] p-4 sm:p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] space-y-5">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                  <h3 className="text-xl sm:text-2xl font-black uppercase text-slate-900">Output + Routing</h3>
-                  <div className="flex flex-wrap gap-2">
-                    <div className="rounded-full border-2 border-black bg-white px-3 py-1.5 text-[11px] font-black uppercase">
-                      Package {effectiveSuperExportPackageLabel}
+              <div className="rounded-2xl border-4 border-black bg-[#F8FDFF] p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] space-y-4 sm:rounded-[24px] sm:p-5 sm:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
+                <div className="flex flex-col gap-2 sm:gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <h3 className="text-lg sm:text-2xl font-black uppercase text-slate-900">Output + Routing</h3>
+                  <div className="flex flex-wrap gap-1.5 sm:gap-2">
+                    <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 text-[10px] font-black uppercase sm:px-3 sm:py-1.5 sm:text-[11px]">
+                      {effectiveSuperExportPackageLabel.split(' ')[0]}
                     </div>
-                    <div className="rounded-full border-2 border-black bg-[#DBEAFE] px-3 py-1.5 text-[11px] font-black uppercase">
-                      {effectiveOutputModeLabel}
+                    <div className="rounded-full border-2 border-black bg-[#DBEAFE] px-2.5 py-1 text-[10px] font-black uppercase sm:px-3 sm:py-1.5 sm:text-[11px]">
+                      {effectiveOutputModeLabel.split(' ')[0]}
                     </div>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4">
-                  <div className="text-sm font-black uppercase text-slate-900">Image Format</div>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 sm:gap-4 xl:grid-cols-2">
+                <div className="rounded-xl border-2 border-black bg-white p-3 space-y-3 sm:rounded-2xl sm:p-4 sm:space-y-4">
+                  <div className="text-xs sm:text-sm font-black uppercase text-slate-900">Image Format</div>
+                  <div className="grid grid-cols-2 gap-2 sm:gap-3">
                     {(['png', 'jpeg'] as const).map((value) => (
                       <button
                         key={value}
                         onClick={() => setImageFormat(value)}
-                        className={`rounded-xl border-2 border-black px-3 py-3 text-xs font-black uppercase transition-all ${
+                        className={`rounded-lg border-2 border-black px-2.5 py-2.5 text-[10px] font-black uppercase transition-all sm:rounded-xl sm:px-3 sm:py-3 sm:text-xs ${
                           imageFormat === value
-                            ? 'bg-[#FDE68A] text-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
+                            ? 'bg-[#FDE68A] text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
                             : 'bg-white hover:bg-slate-100'
                         }`}
                       >
-                        {value === 'png' ? 'PNG Lossless' : 'JPEG Compressed'}
+                        {value === 'png' ? 'PNG' : 'JPEG'}
                       </button>
                     ))}
                   </div>
                 </div>
 
               {imageFormat === 'jpeg' && (
-                <div className="rounded-2xl border-2 border-black bg-white p-4">
-                  <div className="flex items-center justify-between text-xs font-black uppercase mb-2">
-                    <span>JPEG Quality</span>
+                <div className="rounded-xl border-2 border-black bg-white p-3 sm:rounded-2xl sm:p-4">
+                  <div className="flex items-center justify-between text-[10px] font-black uppercase mb-2 sm:text-xs sm:mb-3">
+                    <span>Quality</span>
                     <span>{Math.round(jpegQuality * 100)}%</span>
                   </div>
                   <input
@@ -941,85 +939,84 @@ export function FrameExtractorMode({
                     step={0.01}
                     value={jpegQuality}
                     onChange={(event) => setJpegQuality(Number(event.target.value))}
-                    className="w-full h-3 border-2 border-black rounded-full accent-black"
+                    className="w-full h-2 border-2 border-black rounded-full accent-black sm:h-3"
                   />
                 </div>
               )}
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 xl:col-span-2">
-                <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700 break-words">
-                  <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Workload</div>
-                  <div className="mt-2 text-lg font-black text-slate-900">{requestedFrames}</div>
-                  <div className="mt-1 text-[11px] font-bold text-slate-600">
-                    {videos.length} x {parsedTimestamps.timestamps.length}
+                <div className="grid grid-cols-1 gap-2 sm:gap-3 sm:grid-cols-3 xl:col-span-2">
+                <div className="rounded-xl border-2 border-black bg-white p-2.5 text-[10px] font-bold text-slate-700 sm:rounded-2xl sm:p-4 sm:text-xs">
+                  <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Workload</div>
+                  <div className="mt-1.5 text-base font-black text-slate-900 sm:mt-2 sm:text-lg">{requestedFrames}</div>
+                  <div className="mt-0.5 text-[9px] font-bold text-slate-600 sm:mt-1 sm:text-[11px]">
+                    {videos.length}x{parsedTimestamps.timestamps.length}
                   </div>
                 </div>
-                <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700">
-                  <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Split Area</div>
-                  <div className="mt-2 text-lg font-black text-slate-900">{hasSelectedSplitterRegion ? 'Ready' : 'Missing'}</div>
-                  <div className="mt-1 text-[11px] font-bold text-slate-600">{selectedSplitterRegionLabel}</div>
+                <div className="rounded-xl border-2 border-black bg-white p-2.5 text-[10px] font-bold text-slate-700 sm:rounded-2xl sm:p-4 sm:text-xs">
+                  <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Split Area</div>
+                  <div className="mt-1.5 text-base font-black text-slate-900 sm:mt-2 sm:text-lg">{hasSelectedSplitterRegion ? '✓' : '○'}</div>
+                  <div className="mt-0.5 text-[9px] font-bold text-slate-600 line-clamp-1 sm:mt-1 sm:text-[11px]">{selectedSplitterRegionLabel.split(' ')[0]}</div>
                 </div>
-                  <div className="rounded-2xl border-2 border-black bg-white p-4 text-xs font-bold text-slate-700">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Watermark</div>
-                    <div className="mt-2 text-lg font-black text-slate-900">
+                  <div className="rounded-xl border-2 border-black bg-white p-2.5 text-[10px] font-bold text-slate-700 sm:rounded-2xl sm:p-4 sm:text-xs">
+                    <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Watermark</div>
+                    <div className="mt-1.5 text-base font-black text-slate-900 sm:mt-2 sm:text-lg">
                       {useSuperExportWatermarkRemoval ? 'On' : 'Off'}
                     </div>
                   </div>
                 </div>
 
-              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-sm font-black uppercase text-slate-900">Super Image Target</div>
+              <div className="rounded-xl border-2 border-black bg-white p-3 space-y-3 sm:rounded-2xl sm:p-4 sm:space-y-4 xl:col-span-2">
+                <div className="flex flex-col gap-2 sm:gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-xs sm:text-sm font-black uppercase text-slate-900">Super Image Target</div>
                   {!supportsDirectoryExport && (
-                    <div className="text-[11px] font-bold text-slate-600">Zip only in this browser</div>
+                    <div className="text-[9px] font-bold text-slate-600 sm:text-[11px]">Zip only</div>
                   )}
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 sm:gap-3">
                   <button
                     onClick={() => setSuperImageExportMode('zip')}
-                    className={`rounded-xl border-2 border-black px-3 py-3 text-xs font-black uppercase transition-all ${
+                    className={`rounded-lg border-2 border-black px-2.5 py-2.5 text-[10px] font-black uppercase transition-all sm:rounded-xl sm:px-3 sm:py-3 sm:text-xs ${
                       superImageExportMode === 'zip'
-                        ? 'bg-[#DBEAFE] shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
+                        ? 'bg-[#DBEAFE] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
                         : 'bg-white hover:bg-slate-100'
                     }`}
                   >
-                    Zip Download
+                    Zip
                   </button>
                   <button
                     onClick={() => setSuperImageExportMode('folder')}
                     disabled={!supportsDirectoryExport}
-                    className={`rounded-xl border-2 border-black px-3 py-3 text-xs font-black uppercase transition-all ${
+                    className={`rounded-lg border-2 border-black px-2.5 py-2.5 text-[10px] font-black uppercase transition-all sm:rounded-xl sm:px-3 sm:py-3 sm:text-xs ${
                       superImageExportMode === 'folder' && supportsDirectoryExport
-                        ? 'bg-[#C7F9CC] shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
+                        ? 'bg-[#C7F9CC] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
                         : 'bg-white hover:bg-slate-100'
                     } ${!supportsDirectoryExport ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : ''}`}
                   >
-                    Folder Picker
+                    Folder
                   </button>
                 </div>
               </div>
 
-              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4 xl:col-span-2">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-sm font-black uppercase text-slate-900">Super Export Video Package</div>
+              <div className="rounded-xl border-2 border-black bg-white p-3 space-y-3 sm:rounded-2xl sm:p-4 sm:space-y-4 xl:col-span-2">
+                <div className="flex flex-col gap-2 sm:gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-xs sm:text-sm font-black uppercase text-slate-900">Super Export Package</div>
                   <button
                     onClick={onOpenVideoMode}
-                    className="rounded-xl border-2 border-black bg-white px-3 py-2 text-[11px] font-black uppercase transition-all hover:bg-slate-100"
+                    className="rounded-lg border-2 border-black bg-white px-2.5 py-1.5 text-[10px] font-black uppercase transition-all hover:bg-slate-100 sm:rounded-xl sm:px-3 sm:py-2 sm:text-[11px]"
                   >
-                    Open Video Mode
+                    Video Mode
                   </button>
                 </div>
-                <div className="rounded-xl border border-black bg-[#EFF6FF] px-3 py-2 text-[11px] font-bold text-slate-700">
-                  Super Export now uses the active Video Mode package directly. Choose the package here, then open
-                  Video Mode when you want to tune the full package settings, text, layout, timing, or export options.
+                <div className="rounded-lg border border-black bg-[#EFF6FF] px-2.5 py-2 text-[9px] font-bold text-slate-700 sm:rounded-xl sm:px-3 sm:py-2.5 sm:text-[11px]">
+                  Uses active Video Mode package. Tune full settings there.
                 </div>
                 <label className="block">
-                  <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Active Video Package</div>
+                  <div className="mb-1.5 text-[10px] font-black uppercase text-slate-600 sm:text-[11px]">Active Package</div>
                   <select
                     value={activeVideoPackageId}
                     onChange={(event) => onSelectVideoPackage(event.target.value)}
                     disabled={isBusy || videoPackages.length === 0}
-                    className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
+                    className="w-full rounded-lg border-2 border-black bg-white px-2.5 py-2 text-xs font-bold disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed sm:rounded-xl sm:px-3 sm:text-sm"
                   >
                     {videoPackages.map((videoPackage) => (
                       <option key={videoPackage.id} value={videoPackage.id}>
@@ -1028,35 +1025,35 @@ export function FrameExtractorMode({
                     ))}
                   </select>
                 </label>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                  <div className="rounded-xl border border-black bg-[#FFF7ED] px-3 py-2 text-[11px] font-bold text-slate-700">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Package</div>
-                    <div className="mt-2 text-sm font-black text-slate-900">{effectiveSuperExportPackageLabel}</div>
+                <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
+                  <div className="rounded-lg border border-black bg-[#FFF7ED] px-2.5 py-2 text-[9px] font-bold text-slate-700 sm:rounded-xl sm:px-3 sm:py-2.5 sm:text-[11px]">
+                    <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Package</div>
+                    <div className="mt-1 text-xs font-black text-slate-900 sm:mt-2 sm:text-sm">{effectiveSuperExportPackageLabel.split(' ')[0]}</div>
                   </div>
-                  <div className="rounded-xl border border-black bg-white px-3 py-2 text-[11px] font-bold text-slate-700">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Preset</div>
-                    <div className="mt-2 text-sm font-black text-slate-900">{currentVideoPresetLabel}</div>
+                  <div className="rounded-lg border border-black bg-white px-2.5 py-2 text-[9px] font-bold text-slate-700 sm:rounded-xl sm:px-3 sm:py-2.5 sm:text-[11px]">
+                    <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Preset</div>
+                    <div className="mt-1 text-xs font-black text-slate-900 line-clamp-1 sm:mt-2 sm:text-sm">{currentVideoPresetLabel.split(' ')[0]}</div>
                   </div>
-                  <div className="rounded-xl border border-black bg-white px-3 py-2 text-[11px] font-bold text-slate-700">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Aspect Ratio</div>
-                    <div className="mt-2 text-sm font-black text-slate-900">{videoSettings.aspectRatio}</div>
+                  <div className="rounded-lg border border-black bg-white px-2.5 py-2 text-[9px] font-bold text-slate-700 sm:rounded-xl sm:px-3 sm:py-2.5 sm:text-[11px]">
+                    <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Ratio</div>
+                    <div className="mt-1 text-xs font-black text-slate-900 sm:mt-2 sm:text-sm">{videoSettings.aspectRatio}</div>
                   </div>
-                  <div className="rounded-xl border border-black bg-white px-3 py-2 text-[11px] font-bold text-slate-700">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Export</div>
-                    <div className="mt-2 text-sm font-black text-slate-900">
-                      {videoSettings.exportResolution} / {videoSettings.exportCodec.toUpperCase()}
+                  <div className="rounded-lg border border-black bg-white px-2.5 py-2 text-[9px] font-bold text-slate-700 sm:rounded-xl sm:px-3 sm:py-2.5 sm:text-[11px]">
+                    <div className="text-[8px] font-black uppercase tracking-[0.18em] text-slate-500 sm:text-[10px]">Export</div>
+                    <div className="mt-1 text-xs font-black text-slate-900 sm:mt-2 sm:text-sm">
+                      {videoSettings.exportResolution.split('p')[0]}p
                     </div>
                   </div>
                 </div>
               </div>
 
-              <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm font-black uppercase text-slate-900">Watermark Removal</div>
+              <div className="rounded-xl border-2 border-black bg-white p-3 space-y-2.5 sm:rounded-2xl sm:p-4 sm:space-y-3">
+                <div className="flex items-center justify-between gap-2.5 sm:gap-3">
+                  <div className="text-xs sm:text-sm font-black uppercase text-slate-900">Watermark Removal</div>
                   <button
                     onClick={() => setUseSuperExportWatermarkRemoval((current) => !current)}
                     disabled={isBusy}
-                    className={`px-3 py-2 rounded-lg border-2 border-black text-[11px] font-black uppercase ${
+                    className={`px-2.5 py-1.5 rounded-lg border-2 border-black text-[10px] font-black uppercase sm:px-3 sm:py-2 sm:text-[11px] ${
                       useSuperExportWatermarkRemoval ? 'bg-[#A7F3D0]' : 'bg-white hover:bg-slate-100'
                     } ${isBusy ? 'cursor-not-allowed bg-slate-200 text-slate-500' : ''}`}
                   >
@@ -1065,16 +1062,16 @@ export function FrameExtractorMode({
                 </div>
 
                 {useSuperExportWatermarkRemoval && (
-                  <div className="space-y-2">
+                  <div className="space-y-2 pt-1">
                     <label className="block">
-                      <div className="mb-1 text-[11px] font-black uppercase text-slate-600">Preset</div>
+                      <div className="mb-1 text-[10px] font-black uppercase text-slate-600 sm:text-[11px]">Preset</div>
                       <select
                         value={selectedWatermarkPresetId}
                         onChange={(event) => setSelectedWatermarkPresetId(event.target.value)}
                         disabled={isBusy}
-                        className="w-full border-2 border-black rounded-lg bg-white px-3 py-2 text-sm font-bold"
+                        className="w-full border-2 border-black rounded-lg bg-white px-2.5 py-1.5 text-xs font-bold sm:rounded-lg sm:px-3 sm:py-2 sm:text-sm"
                       >
-                        <option value="">Auto Detect</option>
+                        <option value="">Auto</option>
                         {watermarkPresets.map((preset) => (
                           <option key={preset.id} value={preset.id}>
                             {preset.name}
@@ -1082,16 +1079,16 @@ export function FrameExtractorMode({
                         ))}
                       </select>
                     </label>
-                    <div className="text-[11px] font-bold text-slate-600">
-                      {selectedWatermarkPreset ? selectedWatermarkPreset.name : 'Auto detect'}
+                    <div className="text-[10px] font-bold text-slate-600 sm:text-[11px]">
+                      {selectedWatermarkPreset ? selectedWatermarkPreset.name : 'Auto'}
                     </div>
                   </div>
                 )}
               </div>
 
-              <div className="rounded-2xl border-2 border-black bg-white p-4">
-                <div className="flex items-center justify-between text-xs font-black uppercase mb-2">
-                  <span>Images Per Super Export Video</span>
+              <div className="rounded-xl border-2 border-black bg-white p-3 sm:rounded-2xl sm:p-4">
+                <div className="flex items-center justify-between text-[10px] font-black uppercase mb-1.5 sm:text-xs sm:mb-2">
+                  <span>Images / Video</span>
                   <span>{superExportImagesPerVideo}</span>
                 </div>
                 <input
@@ -1101,111 +1098,109 @@ export function FrameExtractorMode({
                   step={1}
                   value={superExportImagesPerVideo}
                   onChange={(event) => setSuperExportImagesPerVideo(Number(event.target.value))}
-                  className="w-full h-3 border-2 border-black rounded-full accent-black"
+                  className="w-full h-2 border-2 border-black rounded-full accent-black sm:h-3"
                 />
               </div>
 
               <div className="rounded-2xl border-2 border-black bg-white p-4 space-y-4 xl:col-span-2">
-                <div className="text-sm font-black uppercase text-slate-900">Run</div>
-                <div className="rounded-2xl border-2 border-black bg-[#F8FDFF] p-4 space-y-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="text-xs sm:text-sm font-black uppercase text-slate-900">Run</div>
+                <div className="rounded-lg border-2 border-black bg-[#F8FDFF] p-2.5 space-y-2 sm:rounded-2xl sm:p-4 sm:space-y-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2 sm:gap-3">
                     <div>
-                      <div className="text-[11px] font-black uppercase text-slate-500">Splitter Area Source</div>
-                      <div className="text-sm font-black text-slate-900">{selectedSplitterRegionLabel}</div>
+                      <div className="text-[10px] font-black uppercase text-slate-500 sm:text-[11px]">Splitter Source</div>
+                      <div className="text-xs font-black text-slate-900 line-clamp-1 sm:text-sm">{selectedSplitterRegionLabel.split(' ')[0]}</div>
                     </div>
-                    <div className="rounded-full border-2 border-black bg-white px-3 py-1 text-[10px] font-black uppercase">
-                      {splitterPresets.length} saved area preset{splitterPresets.length === 1 ? '' : 's'}
+                    <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 text-[9px] font-black uppercase sm:px-3 sm:text-[10px]">
+                      {splitterPresets.length} saved
                     </div>
                   </div>
                   <select
                     value={selectedSplitterRegionSourceId}
                     onChange={(event) => setSelectedSplitterRegionSourceId(event.target.value as SplitterRegionSourceId)}
-                    className="w-full rounded-xl border-2 border-black bg-white px-3 py-2 text-sm font-bold"
+                    className="w-full rounded-lg border-2 border-black bg-white px-2.5 py-1.5 text-xs font-bold sm:rounded-xl sm:px-3 sm:py-2 sm:text-sm"
                   >
-                    <option value="current">Current shared splitter area</option>
+                    <option value="current">Current</option>
                     {splitterPresets.map((preset) => (
                       <option key={preset.id} value={`preset:${preset.id}`}>
                         {preset.name}
                       </option>
                     ))}
                   </select>
-                  <div className="text-[11px] font-bold text-slate-600">
-                    Super Image Aligner always uses the selected splitter area. Super Image Export and Super Export
-                    Videos reuse it when one is chosen.
+                  <div className="text-[9px] font-bold text-slate-600 sm:text-[11px]">
+                    Aligner reuses selected splitter area. Export uses it when chosen.
                   </div>
                 </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2 sm:gap-3 sm:grid-cols-2">
                   <button
                     onClick={handleExtractFrames}
                     disabled={!canExtract}
-                    className={`rounded-[20px] border-4 border-black p-4 text-left transition-all ${
+                    className={`rounded-lg border-3 border-black p-2.5 text-left transition-all sm:rounded-[20px] sm:border-4 sm:p-3.5 lg:p-4 ${
                       canExtract
-                        ? 'bg-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-1 hover:bg-[#ECFCCB]'
+                        ? 'bg-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5 hover:bg-[#ECFCCB] sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:hover:-translate-y-1'
                         : 'cursor-not-allowed bg-slate-200 text-slate-500'
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      <Download size={18} strokeWidth={3} />
-                      <div className="text-sm font-black uppercase">Extract Frames</div>
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <Download size={15} strokeWidth={2.5} className="sm:w-[18px] sm:h-[18px]" />
+                      <div className="text-[11px] font-black uppercase sm:text-sm">Extract</div>
                     </div>
-                    <div className="mt-2 text-[11px] font-bold text-slate-600">Download every requested image.</div>
+                    <div className="mt-1 text-[9px] font-bold text-slate-600 sm:mt-2 sm:text-[11px]">Download all images.</div>
                   </button>
 
                   <button
                     onClick={handleSuperAligner}
                     disabled={!canSuperAlign}
-                    className={`rounded-[20px] border-4 border-black p-4 text-left transition-all ${
+                    className={`rounded-lg border-3 border-black p-2.5 text-left transition-all sm:rounded-[20px] sm:border-4 sm:p-3.5 lg:p-4 ${
                       canSuperAlign
-                        ? 'bg-[#DCFCE7] shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-1 hover:bg-[#BBF7D0]'
+                        ? 'bg-[#DCFCE7] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5 hover:bg-[#BBF7D0] sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:hover:-translate-y-1'
                         : 'cursor-not-allowed bg-slate-200 text-slate-500'
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      <Layers size={18} strokeWidth={3} />
-                      <div className="text-sm font-black uppercase">Super Image Aligner</div>
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <Layers size={15} strokeWidth={2.5} className="sm:w-[18px] sm:h-[18px]" />
+                      <div className="text-[11px] font-black uppercase sm:text-sm">Aligner</div>
                     </div>
-                    <div className="mt-2 text-[11px] font-bold text-slate-600">Build split pairs for batch auto.</div>
+                    <div className="mt-1 text-[9px] font-bold text-slate-600 sm:mt-2 sm:text-[11px]">Build pairs for batch.</div>
                   </button>
 
                   <button
                     onClick={handleSuperImageExport}
                     disabled={!canSuperImage}
-                    className={`rounded-[20px] border-4 border-black p-4 text-left transition-all ${
+                    className={`rounded-lg border-3 border-black p-2.5 text-left transition-all sm:rounded-[20px] sm:border-4 sm:p-3.5 lg:p-4 ${
                       canSuperImage
-                        ? 'bg-[#DBEAFE] shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-1 hover:bg-[#BFDBFE]'
+                        ? 'bg-[#DBEAFE] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5 hover:bg-[#BFDBFE] sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:hover:-translate-y-1'
                         : 'cursor-not-allowed bg-slate-200 text-slate-500'
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      <Layers size={18} strokeWidth={3} />
-                      <div className="text-sm font-black uppercase">Super Image Export</div>
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <Layers size={15} strokeWidth={2.5} className="sm:w-[18px] sm:h-[18px]" />
+                      <div className="text-[11px] font-black uppercase sm:text-sm">Image</div>
                     </div>
-                    <div className="mt-2 text-[11px] font-bold text-slate-600">
-                      Export exact 3-difference pairs as {effectiveOutputModeLabel.toLowerCase()}.
+                    <div className="mt-1 text-[9px] font-bold text-slate-600 sm:mt-2 sm:text-[11px]">
+                      Pairs as {effectiveOutputModeLabel.split(' ')[0]}.
                     </div>
                   </button>
 
                   <button
                     onClick={handleSuperExport}
                     disabled={!canSuperExport}
-                    className={`rounded-[20px] border-4 border-black p-4 text-left transition-all ${
+                    className={`rounded-lg border-3 border-black p-2.5 text-left transition-all sm:rounded-[20px] sm:border-4 sm:p-3.5 lg:p-4 ${
                       canSuperExport
-                        ? 'bg-[#FEF3C7] shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-1 hover:bg-[#FDE68A]'
+                        ? 'bg-[#FEF3C7] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5 hover:bg-[#FDE68A] sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] sm:hover:-translate-y-1'
                         : 'cursor-not-allowed bg-slate-200 text-slate-500'
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      <Sparkles size={18} strokeWidth={3} />
-                      <div className="text-sm font-black uppercase">Super Export Videos</div>
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <Sparkles size={15} strokeWidth={2.5} className="sm:w-[18px] sm:h-[18px]" />
+                      <div className="text-[11px] font-black uppercase sm:text-sm">Video</div>
                     </div>
-                    <div className="mt-2 text-[11px] font-bold text-slate-600">Render packaged puzzle videos.</div>
+                    <div className="mt-1 text-[9px] font-bold text-slate-600 sm:mt-2 sm:text-[11px]">Render puzzles.</div>
                   </button>
                 </div>
 
                 {!hasSelectedSplitterRegion && (
-                  <div className="rounded-2xl border-2 border-black bg-[#FDE68A] px-4 py-3 text-[11px] font-bold text-slate-800">
-                    Save a shared split area in Splitter mode, or choose one of the saved area presets, to unlock
-                    Super Image Aligner.
+                  <div className="rounded-lg border-2 border-black bg-[#FDE68A] px-3 py-2 text-[10px] font-bold text-slate-800 sm:rounded-2xl sm:px-4 sm:py-3 sm:text-[11px]">
+                    Save area in Splitter or choose preset to unlock Aligner.
                   </div>
                 )}
               </div>
@@ -1213,93 +1208,69 @@ export function FrameExtractorMode({
             </div>
 
             {recentRunCount > 0 && (
-              <div ref={recentRunsSectionRef} className="space-y-3 scroll-mt-32 xl:col-span-12">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-lg font-black uppercase text-slate-900">Recent Runs</div>
-                  <div className="rounded-full border-2 border-black bg-white px-3 py-1.5 text-[11px] font-black uppercase">
-                    {recentRunCount} Report{recentRunCount === 1 ? '' : 's'}
+              <div ref={recentRunsSectionRef} className="space-y-2 scroll-mt-32 xl:col-span-12 sm:space-y-3">
+                <div className="flex flex-col gap-2 sm:gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-base sm:text-lg font-black uppercase text-slate-900">Recent Runs</div>
+                  <div className="rounded-full border-2 border-black bg-white px-2.5 py-1 text-[10px] font-black uppercase sm:px-3 sm:py-1.5 sm:text-[11px]">
+                    {recentRunCount} Report
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="grid grid-cols-1 gap-2 sm:gap-3 md:grid-cols-2 lg:gap-4 xl:grid-cols-4">
                   {summary && (
-                    <div className="space-y-2 rounded-xl border-4 border-black bg-[#ECFCCB] p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                      <div className="text-sm font-black uppercase">Extraction</div>
-                      <div className="text-xs font-bold text-slate-700">
-                        {summary.extractedCount} extracted | {summary.skippedCount} skipped | {summary.failedCount} failed
+                    <div className="space-y-1.5 rounded-lg border-3 border-black bg-[#ECFCCB] p-3 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-xl sm:border-4 sm:p-4 sm:space-y-2 sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                      <div className="text-xs sm:text-sm font-black uppercase">Extraction</div>
+                      <div className="text-[11px] sm:text-xs font-bold text-slate-700">
+                        {summary.extractedCount} ✓ | {summary.skippedCount} ⊘ | {summary.failedCount} ✕
                       </div>
                       {summary.warnings.length > 0 && (
-                        <div className="text-[11px] font-bold text-slate-700">
-                          {summary.warnings.slice(0, 4).join(' ')}
-                          {summary.warnings.length > 4 ? ' ...' : ''}
+                        <div className="text-[10px] sm:text-[11px] font-bold text-slate-700">
+                          {summary.warnings.slice(0, 2).join(' ')}
                         </div>
                       )}
                     </div>
                   )}
 
                   {alignerSummary && (
-                    <div className="space-y-2 rounded-xl border-4 border-black bg-[#DCFCE7] p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                      <div className="text-sm font-black uppercase">Super Image Aligner</div>
-                      <div className="text-xs font-bold text-slate-700">
+                    <div className="space-y-1.5 rounded-lg border-3 border-black bg-[#DCFCE7] p-3 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-xl sm:border-4 sm:p-4 sm:space-y-2 sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                      <div className="text-xs sm:text-sm font-black uppercase">Aligner</div>
+                      <div className="text-[11px] sm:text-xs font-bold text-slate-700">
                         {alignerSummary.extractedFrameCount} frames | {alignerSummary.preparedPairCount} pairs
                       </div>
-                      <div className="text-xs font-bold text-slate-700">
-                        {alignerSummary.skippedFrameCount} skipped | {alignerSummary.preparedPairCount * 2} uploads
+                      <div className="text-[11px] sm:text-xs font-bold text-slate-700">
+                        {alignerSummary.preparedPairCount * 2} uploads
                       </div>
-                      {alignerSummary.warnings.length > 0 && (
-                        <div className="text-[11px] font-bold text-slate-700">
-                          {alignerSummary.warnings.slice(0, 4).join(' ')}
-                          {alignerSummary.warnings.length > 4 ? ' ...' : ''}
-                        </div>
-                      )}
                     </div>
                   )}
 
                   {superImageSummary && (
-                    <div className="space-y-2 rounded-xl border-4 border-black bg-[#DBEAFE] p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                      <div className="text-sm font-black uppercase">Super Image Export</div>
-                      <div className="text-xs font-bold text-slate-700">
+                    <div className="space-y-1.5 rounded-lg border-3 border-black bg-[#DBEAFE] p-3 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-xl sm:border-4 sm:p-4 sm:space-y-2 sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                      <div className="text-xs sm:text-sm font-black uppercase">Image Export</div>
+                      <div className="text-[11px] sm:text-xs font-bold text-slate-700">
                         {superImageSummary.validPuzzleCount} valid | {superImageSummary.exportedImagePairCount} pairs
                       </div>
-                      <div className="text-xs font-bold text-slate-700">
-                        Watermark {superImageSummary.watermarkRemovalEnabled ? 'on' : 'off'} | Cleaned{' '}
-                        {superImageSummary.watermarkPairsCleaned}
+                      <div className="text-[11px] sm:text-xs font-bold text-slate-700">
+                        WM: {superImageSummary.watermarkRemovalEnabled ? 'on' : 'off'}
                       </div>
                       {superImageSummary.outputName && (
-                        <div className="break-all font-mono text-[11px] font-bold text-slate-700">
+                        <div className="break-all font-mono text-[10px] sm:text-[11px] font-bold text-slate-700">
                           {superImageSummary.outputMode === 'folder'
-                            ? `Folder: ${superImageSummary.outputName}`
-                            : `Zip: ${superImageSummary.outputName}`}
-                        </div>
-                      )}
-                      {superImageSummary.warnings.length > 0 && (
-                        <div className="text-[11px] font-bold text-slate-700">
-                          {superImageSummary.warnings.slice(0, 4).join(' ')}
-                          {superImageSummary.warnings.length > 4 ? ' ...' : ''}
+                            ? `📁 ${superImageSummary.outputName.substring(0, 20)}`
+                            : `📦 ${superImageSummary.outputName.substring(0, 20)}`}
                         </div>
                       )}
                     </div>
                   )}
 
                   {superSummary && (
-                    <div className="space-y-2 rounded-xl border-4 border-black bg-[#FEF3C7] p-4 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                      <div className="text-sm font-black uppercase">Super Video Export</div>
-                      <div className="text-xs font-bold text-slate-700">
+                    <div className="space-y-1.5 rounded-lg border-3 border-black bg-[#FEF3C7] p-3 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] sm:rounded-xl sm:border-4 sm:p-4 sm:space-y-2 sm:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                      <div className="text-xs sm:text-sm font-black uppercase">Video Export</div>
+                      <div className="text-[11px] sm:text-xs font-bold text-slate-700">
                         {superSummary.validPuzzleCount} valid | {superSummary.exportedVideoCount} videos
                       </div>
-                      <div className="text-xs font-bold text-slate-700">
-                        Batch sizes: {superSummary.batchSizes.length > 0 ? superSummary.batchSizes.join(', ') : 'none'}
+                      <div className="text-[11px] sm:text-xs font-bold text-slate-700">
+                        WM: {superSummary.watermarkRemovalEnabled ? 'on' : 'off'}
                       </div>
-                      <div className="text-xs font-bold text-slate-700">
-                        Watermark {superSummary.watermarkRemovalEnabled ? 'on' : 'off'} | Cleaned{' '}
-                        {superSummary.watermarkPairsCleaned}
-                      </div>
-                      {superSummary.warnings.length > 0 && (
-                        <div className="text-[11px] font-bold text-slate-700">
-                          {superSummary.warnings.slice(0, 4).join(' ')}
-                          {superSummary.warnings.length > 4 ? ' ...' : ''}
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>

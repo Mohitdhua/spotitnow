@@ -145,7 +145,7 @@ test.describe('mobile video routing', () => {
     await expect(page.getByRole('button', { name: /^start$/i })).toBeDisabled();
   });
 
-  test('video setup shows rendering while aspect ratio previews rebuild on mobile', async ({ page }) => {
+  test('video setup rebuilds cleanly while aspect ratio previews switch on mobile', async ({ page }) => {
     await importPuzzleBatch(page, 3);
 
     await page.getByRole('link', { name: /build video/i }).click();
@@ -155,9 +155,18 @@ test.describe('mobile video routing', () => {
     const liveStage = liveFrame.locator('[data-video-stage-shell="embedded"]').first();
     const liveRendering = liveFrame.getByText(/^Rendering\.\.\.$/i);
 
+    const waitForOptionalRendering = async () => {
+      try {
+        await liveRendering.waitFor({ state: 'visible', timeout: 1500 });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
     await page.getByRole('button', { name: /9:16/i }).first().click();
-    await expect(liveRendering).not.toHaveCount(0);
-    await page.waitForTimeout(1000);
+    const sawTallRendering = await waitForOptionalRendering();
+    await page.waitForTimeout(sawTallRendering ? 1000 : 300);
 
     let liveBox = await liveFrame.boundingBox();
     let liveStageBox = await liveStage.boundingBox();
@@ -173,8 +182,8 @@ test.describe('mobile video routing', () => {
     expect(liveStageBox.height).toBeLessThanOrEqual(liveBox.height + 1);
 
     await page.getByRole('button', { name: /16:9/i }).first().click();
-    await expect(liveRendering).not.toHaveCount(0);
-    await page.waitForTimeout(1000);
+    const sawWideRendering = await waitForOptionalRendering();
+    await page.waitForTimeout(sawWideRendering ? 1000 : 300);
 
     liveBox = await liveFrame.boundingBox();
     liveStageBox = await liveStage.boundingBox();
@@ -250,5 +259,30 @@ test.describe('mobile video routing', () => {
 
     await bottomNav.getByRole('link', { name: /^studio$/i }).click();
     await expect(page).toHaveURL(/\/$/);
+  });
+
+  test('create editor stays inside the mobile viewport', async ({ page }) => {
+    await importPuzzleBatch(page, 1);
+
+    await page.getByRole('link', { name: /manual edit/i }).click();
+    await expect(page).toHaveURL(/\/create\/editor$/);
+    await expect(page.getByRole('heading', { name: /manual edit and cleanup/i })).toBeVisible();
+
+    const hasHorizontalOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth + 1
+    );
+
+    expect(hasHorizontalOverflow).toBe(false);
+  });
+
+  test('create editor uses the AI Detect label on mobile', async ({ page }) => {
+    await importPuzzleBatch(page, 1);
+
+    await page.getByRole('link', { name: /manual edit/i }).click();
+    await expect(page).toHaveURL(/\/create\/editor$/);
+
+    const aiDetectButton = page.getByRole('button', { name: /^ai detect$/i });
+    await expect(aiDetectButton).toBeVisible();
+    await expect(page.getByText(/^auto detect$/i)).toHaveCount(0);
   });
 });

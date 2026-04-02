@@ -2,10 +2,73 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
+import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      VitePWA({
+        injectRegister: false,
+        registerType: 'autoUpdate',
+        manifestFilename: 'manifest.webmanifest',
+        includeAssets: [
+          'favicon.svg',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'maskable-512x512.png'
+        ],
+        manifest: {
+          id: '/',
+          name: 'Puzzle Studio',
+          short_name: 'Puzzle Studio',
+          description: 'Offline-first spot-the-difference studio for puzzles, thumbnails, editing, and video workflows.',
+          start_url: '/',
+          scope: '/',
+          display: 'standalone',
+          orientation: 'any',
+          background_color: '#FFFDF5',
+          theme_color: '#FFFDF5',
+          lang: 'en-US',
+          categories: ['productivity', 'graphics', 'photo'],
+          icons: [
+            {
+              src: '/pwa-192x192.png',
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'any'
+            },
+            {
+              src: '/pwa-512x512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any'
+            },
+            {
+              src: '/maskable-512x512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any maskable'
+            }
+          ]
+        },
+        workbox: {
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
+          navigateFallback: 'index.html',
+          navigateFallbackDenylist: [/^\/api\//],
+          maximumFileSizeToCacheInBytes: 64 * 1024 * 1024
+        },
+        devOptions: {
+          enabled: true,
+          suppressWarnings: true,
+          type: 'module'
+        }
+      })
+    ],
     build: {
       // AI upscaling ships as route-lazy TensorFlow chunks; keep warnings focused on
       // unexpectedly large app bundles instead of these intentionally isolated ML runtimes.

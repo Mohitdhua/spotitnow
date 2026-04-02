@@ -1,10 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Outfit", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", "Arial Black", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 body {
@@ -16,6 +15,7 @@ body {
 @media (max-width: 768px) {
   body[data-mobile="true"] {
     background-color: #ffffff;
+    --mobile-bottom-nav-offset: calc(60px + env(safe-area-inset-bottom, 0px));
   }
 
   body[data-mobile="true"] .max-w-7xl,
@@ -25,7 +25,7 @@ body {
   }
 
   body[data-mobile="true"] main {
-    padding-bottom: 78px !important;
+    padding-bottom: var(--mobile-bottom-nav-offset) !important;
   }
 
   body[data-mobile="true"] main :is(section, div)[class*="rounded-[28px]"][class*="border-4"][class*="shadow-["],
