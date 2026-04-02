@@ -1,7 +1,8 @@
 import { Suspense, useEffect, useMemo, useState } from 'react';
-import { FolderKanban, Layers, ListTodo, Settings, Video, Wrench } from 'lucide-react';
+import { FolderKanban, Layers, ListTodo, RefreshCw, Settings, Video, WifiOff, Wrench } from 'lucide-react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { MediaDiagnosticsDrawer } from '../components/MediaDiagnosticsDrawer';
+import { applyPwaUpdate, usePwaState } from '../services/pwa';
 import { useAppStore } from '../store/appStore';
 import { JobCenterDrawer } from './components/JobCenterDrawer';
 import { RouteWorkspaceLoading } from './components/RouteWorkspaceLoading';
@@ -319,6 +320,7 @@ export function AppShell() {
   const isJobCenterOpen = useAppStore((state) => state.ui.jobCenterOpen);
   const setLastRoute = useAppStore((state) => state.setLastRoute);
   const setJobCenterOpen = useAppStore((state) => state.setJobCenterOpen);
+  const { hasUpdate, isOnline } = usePwaState();
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -361,6 +363,34 @@ export function AppShell() {
   return (
     <div className="min-h-screen bg-[#FFFDF5] text-slate-900 selection:bg-black selection:text-white">
       <JobCenterDrawer />
+
+      {!isOnline || hasUpdate ? (
+        <div className="sticky top-0 z-[55] border-b-4 border-black bg-[#FDE68A] px-3 py-2 text-slate-900">
+          <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 text-[11px] font-black uppercase tracking-wide">
+            <div className="flex min-w-0 items-center gap-2">
+              {!isOnline ? <WifiOff size={14} strokeWidth={2.8} /> : <RefreshCw size={14} strokeWidth={2.8} />}
+              <span className="min-w-0 truncate">
+                {!isOnline
+                  ? 'Offline mode is active. Saved projects and local tools stay available.'
+                  : 'A fresher offline build is ready.'}
+              </span>
+            </div>
+
+            {hasUpdate ? (
+              <button
+                type="button"
+                onClick={() => {
+                  void applyPwaUpdate();
+                }}
+                className="inline-flex items-center gap-2 rounded-xl border-2 border-black bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-wide text-slate-900 hover:bg-slate-100"
+              >
+                <RefreshCw size={12} strokeWidth={2.8} />
+                Reload Update
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       <div className="flex min-h-screen">
         <aside className="hidden w-[244px] shrink-0 border-r-4 border-black bg-[radial-gradient(circle_at_top_left,#DBEAFE_0%,#FFFDF8_38%,#FFF7ED_100%)] xl:w-[256px] lg:block">

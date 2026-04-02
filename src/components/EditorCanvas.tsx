@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { motion } from 'motion/react';
 import { Save, Trash2, Undo, Play, Download, X, Plus, Sparkles, Loader2, Video } from 'lucide-react';
 import { Region, Puzzle } from '../types';
@@ -14,6 +15,7 @@ interface EditorCanvasProps {
   onExportVideo?: (puzzle: Puzzle) => void;
   batchCount?: number;
   isModal?: boolean;
+  headerActionsContainer?: HTMLElement | null;
 }
 
 export function EditorCanvas({
@@ -25,13 +27,15 @@ export function EditorCanvas({
   onAddToBatch,
   onExportVideo,
   batchCount,
-  isModal = false
+  isModal = false,
+  headerActionsContainer = null
 }: EditorCanvasProps) {
   const [regions, setRegions] = useState<Region[]>(initialRegions);
   const [isDrawing, setIsDrawing] = useState(false);
   const [isDetecting, setIsDetecting] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(null);
   const [currentRegion, setCurrentRegion] = useState<Region | null>(null);
+  const [previewAspectRatio, setPreviewAspectRatio] = useState(3 / 4);
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -193,15 +197,77 @@ export function EditorCanvas({
 
       setRegions(prev => [...prev, ...newRegions]);
     } catch (error) {
-      alert('Failed to detect differences automatically. Please try again or mark them manually.');
+      alert('AI Detect failed. Please try again or mark the differences manually.');
     } finally {
       setIsDetecting(false);
     }
   };
 
+  const shellClassName = isModal
+    ? 'flex h-full min-h-0 w-full min-w-0 flex-col gap-2 p-1.5 sm:gap-3 sm:p-3'
+    : 'mx-auto flex h-full w-full max-w-7xl min-w-0 flex-col space-y-4 p-3 sm:space-y-6 sm:p-6';
+
+  const previewRailClassName = isModal
+    ? 'grid flex-1 min-h-0 grid-rows-2 place-items-center gap-2 overflow-hidden px-1 pb-5 sm:gap-3 sm:px-2'
+    : 'flex flex-1 min-h-0 flex-col items-stretch justify-center gap-5 overflow-y-auto overflow-x-hidden p-1 pr-3 sm:gap-8 sm:p-4 lg:flex-row';
+
+  const modalHeaderActions = (
+    <div className="grid w-full grid-cols-[minmax(0,1fr)_2.25rem_2.25rem_minmax(0,1fr)] items-center gap-1.5 pb-1 sm:flex sm:flex-nowrap sm:gap-2">
+      <button
+        onClick={handleAutoDetect}
+        disabled={isDetecting}
+        className="inline-flex min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border-2 border-black bg-[#F3E8FF] px-2 py-2 text-[10px] font-black uppercase text-black transition-all disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 sm:min-w-[7.5rem] sm:px-3 sm:text-[11px]"
+        title="AI Detect differences"
+      >
+        {isDetecting ? (
+          <Loader2 size={14} className="animate-spin" strokeWidth={2.5} />
+        ) : (
+          <Sparkles size={14} strokeWidth={2.5} />
+        )}
+        <span className="truncate">{isDetecting ? 'Detecting' : 'AI Detect'}</span>
+      </button>
+      <button
+        onClick={handleUndo}
+        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border-2 border-black bg-white text-black transition-all hover:bg-slate-100 sm:h-9 sm:w-9"
+        title="Undo"
+      >
+        <Undo size={16} strokeWidth={2.5} />
+      </button>
+      <button
+        onClick={handleClear}
+        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border-2 border-[#FF6B6B] bg-white text-[#FF6B6B] transition-all hover:bg-[#FFF5F5] sm:h-9 sm:w-9"
+        title="Clear All"
+      >
+        <Trash2 size={16} strokeWidth={2.5} />
+      </button>
+      <button
+        onClick={handleExport}
+        disabled={regions.length === 0}
+        className={`inline-flex min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border-2 border-black px-2 py-2 text-[10px] font-black uppercase transition-all sm:min-w-[8.5rem] sm:px-3 sm:text-[11px] ${
+          regions.length === 0
+            ? 'cursor-not-allowed border-slate-300 bg-slate-200 text-slate-400'
+            : 'bg-[#4ECDC4] text-black hover:bg-[#3DBDB4]'
+        }`}
+      >
+        <Save size={14} strokeWidth={2.8} />
+        <span className="truncate sm:hidden">Save</span>
+        <span className="hidden sm:inline">Save Changes</span>
+      </button>
+    </div>
+  );
+
+  const showModalHeaderActions = isModal && headerActionsContainer;
+  const previewImageClassName = isModal
+    ? 'block h-full w-full object-contain'
+    : 'block h-auto w-full max-h-[52vh] sm:max-h-[65vh] object-contain';
+  const modalPreviewCardStyle = isModal ? { aspectRatio: `${previewAspectRatio}` } : undefined;
+
   return (
-    <div className="flex flex-col h-full w-full max-w-7xl mx-auto p-3 sm:p-6 space-y-4 sm:space-y-6">
-      <div className="bg-white p-4 border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] rounded-xl space-y-4">
+    <div className={shellClassName}>
+      {showModalHeaderActions ? createPortal(modalHeaderActions, headerActionsContainer) : null}
+
+      {!isModal ? (
+      <div className="min-w-0 rounded-xl border-4 border-black bg-white p-4 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] space-y-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <h2 className="text-2xl sm:text-3xl font-black text-black font-display uppercase tracking-tight">Mark Differences</h2>
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
@@ -209,14 +275,14 @@ export function EditorCanvas({
               onClick={handleAutoDetect} 
               disabled={isDetecting}
               className="flex items-center gap-2 px-4 py-2 bg-[#F3E8FF] hover:bg-[#E9D5FF] text-black border-2 border-black rounded-lg font-bold transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[1px] hover:translate-x-[1px] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]"
-              title="Auto-detect differences with AI"
+              title="AI Detect differences"
             >
               {isDetecting ? (
                 <Loader2 size={20} className="animate-spin" strokeWidth={2.5} />
               ) : (
                 <Sparkles size={20} strokeWidth={2.5} />
               )}
-              <span className="uppercase">{isDetecting ? 'Detecting...' : 'Auto Detect'}</span>
+              <span className="uppercase">{isDetecting ? 'Detecting...' : 'AI Detect'}</span>
             </button>
             <div className="hidden sm:block w-1 h-8 bg-black mx-1" />
             <button onClick={handleUndo} className="p-2 text-black hover:bg-slate-100 border-2 border-transparent hover:border-black rounded-lg transition-all" title="Undo">
@@ -283,16 +349,37 @@ export function EditorCanvas({
           )}
         </div>
       </div>
+      ) : null}
 
-      <div className="flex flex-col lg:flex-row gap-5 sm:gap-8 flex-1 min-h-0 justify-center items-stretch overflow-auto p-1 sm:p-4">
-        <div className="relative w-full rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] border-4 border-black bg-white lg:max-w-[45%]">
+      <div className={previewRailClassName}>
+        <div
+          className={`relative min-w-0 max-w-full overflow-hidden rounded-xl border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] ${
+          isModal ? 'h-full w-auto min-h-0 max-h-full max-w-[17rem] justify-self-center self-center' : 'w-full lg:max-w-[45%] lg:flex-[0_1_45%]'
+        } ${isModal ? 'bg-transparent' : 'bg-white'}`}
+          style={modalPreviewCardStyle}
+        >
           <div className="absolute top-0 left-0 bg-black text-white text-sm px-3 py-1 font-bold uppercase z-10 border-b-2 border-r-2 border-black rounded-br-lg">
             Original
           </div>
-          <img src={imageA} alt="Original" className="block w-full max-h-[52vh] sm:max-h-[65vh] object-contain" />
+          <img
+            src={imageA}
+            alt="Original"
+            className={previewImageClassName}
+            onLoad={(event) => {
+              const { naturalWidth, naturalHeight } = event.currentTarget;
+              if (naturalWidth > 0 && naturalHeight > 0) {
+                setPreviewAspectRatio(naturalWidth / naturalHeight);
+              }
+            }}
+          />
         </div>
 
-        <div className="relative w-full rounded-xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] border-4 border-black group cursor-crosshair bg-white lg:max-w-[45%]">
+        <div
+          className={`group relative min-w-0 max-w-full cursor-crosshair overflow-hidden rounded-xl border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] ${
+          isModal ? 'h-full w-auto min-h-0 max-h-full max-w-[17rem] justify-self-center self-start' : 'w-full lg:max-w-[45%] lg:flex-[0_1_45%]'
+        } ${isModal ? 'bg-transparent' : 'bg-white'}`}
+          style={modalPreviewCardStyle}
+        >
           <div className="absolute top-0 left-0 bg-[#FF6B6B] text-black text-sm px-3 py-1 font-bold uppercase z-10 border-b-2 border-r-2 border-black rounded-br-lg animate-pulse">
             Draw Here
           </div>
@@ -301,11 +388,14 @@ export function EditorCanvas({
             ref={imageRef}
             src={imageB} 
             alt="Modified" 
-            className="block w-full max-h-[52vh] sm:max-h-[65vh] object-contain pointer-events-none select-none"
+            className={`${previewImageClassName} pointer-events-none select-none`}
             onLoad={() => {
               const img = imageRef.current;
               const canvas = canvasRef.current;
               if (img && canvas) {
+                if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                  setPreviewAspectRatio(img.naturalWidth / img.naturalHeight);
+                }
                 canvas.width = img.naturalWidth;
                 canvas.height = img.naturalHeight;
               }
@@ -323,9 +413,6 @@ export function EditorCanvas({
         </div>
       </div>
       
-      <div className="text-center text-black font-bold text-xs sm:text-sm uppercase tracking-widest bg-[#FFFDF5] p-2 border-2 border-black inline-block mx-auto shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] -rotate-1 max-w-full">
-        Click and drag on the right image to mark differences
-      </div>
     </div>
   );
 }
